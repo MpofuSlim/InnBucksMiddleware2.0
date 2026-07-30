@@ -58,9 +58,26 @@ openssl x509 -req -in fineract.csr -CA cell-ca.crt -CAkey cell-ca.key \
 # Keystore for Fineract (password goes to FINERACT_KEYSTORE_PASSWORD in .env):
 openssl pkcs12 -export -in fineract.crt -inkey fineract.key \
   -name fineract -out fineract-keystore.p12
+# REQUIRED: openssl writes this 0600 owned by you, but the Fineract image runs
+# as `nobody:nogroup` (fineract-provider/build.gradle), so the container can't
+# open the mount and Boot dies at startup with
+#   Caused by: java.nio.file.AccessDeniedException: /ssl/fineract-keystore.p12
+# Safe: the P12 is password-protected and that password lives in .env at 0600,
+# so a readable keystore alone yields nothing.
+chmod 644 fineract-keystore.p12
 # Truststore for the middleware (containing ONLY the CA):
 keytool -importcert -noprompt -file cell-ca.crt -alias innbucks-cell-ca \
   -keystore innbucks-cell-truststore.p12 -storetype PKCS12
+```
+
+No JDK on the box? Run `keytool` from a throwaway container instead, then take
+ownership of what it wrote as root:
+
+```sh
+docker run --rm -v "$PWD":/w -w /w eclipse-temurin:21-jre \
+  keytool -importcert -noprompt -file cell-ca.crt -alias innbucks-cell-ca \
+  -keystore innbucks-cell-truststore.p12 -storetype PKCS12 -storepass '<pw>'
+sudo chown "$(id -u):$(id -g)" innbucks-cell-truststore.p12
 ```
 
 Wire the truststore into the **middleware** service (root
