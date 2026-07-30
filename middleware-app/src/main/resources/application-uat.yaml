@@ -1,0 +1,17 @@
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    enabled: true
+
+management:
+  tracing:
+    sampling:
+      probability: 0.5
+
+logging:
+  structured:
+    format:
+      console: ecs
+  level:
+    zw.co.innbucks.middleware: INFO

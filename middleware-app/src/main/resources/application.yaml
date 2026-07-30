@@ -1,0 +1,129 @@
+spring:
+  application:
+    name: innbucks-middleware
+  # Profiles come from the SPRING_PROFILES_ACTIVE env var (Spring reads it
+  # natively) — deliberately NO default profile here. ProductionSecretsGuard
+  # treats an EMPTY active-profile set as a DEPLOYMENT (fail-closed): local
+  # runs must opt in explicitly with SPRING_PROFILES_ACTIVE=dev.
+  # Datasource MUST be supplied via env vars in every non-dev deployment.
+  # No defaults here — a missing DATASOURCE_URL fails fast at startup
+  # instead of silently falling back to an embedded DB. application-dev.yaml
+  # overrides with localhost placeholders so a fresh clone + IDE Run "just
+  # works"; prod/uat have no such overrides.
+  datasource:
+    url: ${DATASOURCE_URL:}
+    username: ${DATASOURCE_USERNAME:}
+    password: ${DATASOURCE_PASSWORD:}
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+    fail-on-missing-locations: true
+
+server:
+  port: ${SERVER_PORT:8090}
+  shutdown: graceful
+  error:
+    include-message: never
+    include-stacktrace: never
+    include-binding-errors: never
+
+innbucks:
+  country: ${INNBUCKS_COUNTRY:}
+  # Which core banking system this cell fronts (fineract | veengu). Read by
+  # the adapter wiring once the Fineract adapter lands; every deployment cell
+  # pins exactly one (country, core) pair.
+  core:
+    provider: ${INNBUCKS_CORE_PROVIDER:fineract}
+  auth:
+    signing-key: ${JWT_SIGNING_KEY:}
+    # MUST be a DIFFERENT secret from signing-key — it signs OTP verification /
+    # step-up tokens only. Equal keys = whoever mints access tokens can mint
+    # PIN-reset tokens (account takeover); the guard refuses to boot on equality.
+    verification-signing-key: ${VERIFICATION_SIGNING_KEY:}
+    national-id-hmac-key: ${NATIONAL_ID_HMAC_KEY:}
+    audience: ${JWT_AUDIENCE:innbucks-mobile}
+    access-token-ttl: ${JWT_ACCESS_TTL:10m}
+    refresh-token-ttl: ${JWT_REFRESH_TTL:30d}
+    brute-force:
+      max-failed-attempts-before-lock: ${AUTH_MAX_FAILED_ATTEMPTS:7}
+      lock-duration: ${AUTH_LOCK_DURATION:1h}
+      backoff-base: ${AUTH_BACKOFF_BASE:1s}
+  audit:
+    # Keys the tamper-evidence HMAC chain over audit_event. Per-deployment,
+    # openssl rand -base64 48. Rotation breaks the chain at the rotation point
+    # (expected; the verifier tickets it) — content HMACs of new rows are what
+    # matter forensically.
+    hmac-secret: ${AUDIT_HMAC_SECRET:}
+    verify-cron: ${AUDIT_VERIFY_CRON:0 45 3 * * *}
+  cors:
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:}
+  idempotency:
+    ttl: ${IDEMPOTENCY_TTL:24h}
+  otp:
+    ttl: ${OTP_TTL:5m}
+    max-attempts: ${OTP_MAX_ATTEMPTS:5}
+    verification-token-ttl: ${OTP_VERIFICATION_TOKEN_TTL:5m}
+    # Keys the HMAC over stored OTP codes — a bare hash of a 6-digit space is
+    # trivially reversible from a DB read. Per-deployment secret.
+    hmac-secret: ${OTP_HMAC_SECRET:}
+    # DEV ONLY. When set, every OTP becomes this exact value. Refuses to start
+    # outside the dev/test profile if set. Leave empty for random codes.
+    fixed-code: ${OTP_FIXED_CODE:}
+  rate-limit:
+    # Per-instance, in-memory token buckets on the public auth surface. Disable
+    # only for local debugging; staging/prod should keep this on.
+    enabled: ${RATE_LIMIT_ENABLED:true}
+    # Default false: the deployed topology publishes 8090 directly, so the
+    # socket peer IS the client. Set true ONLY behind a trusted proxy/LB that
+    # sets X-Forwarded-For — the header is otherwise client-spoofable.
+    trust-forwarded-for: ${RATE_LIMIT_TRUST_FORWARDED_FOR:false}
+    # capacity = requests allowed per refill-period (greedy refill).
+    ip-login:
+      capacity: ${RATE_LIMIT_IP_LOGIN_CAPACITY:15}
+      refill-period: ${RATE_LIMIT_IP_LOGIN_WINDOW:1m}
+    ip-refresh:
+      capacity: ${RATE_LIMIT_IP_REFRESH_CAPACITY:30}
+      refill-period: ${RATE_LIMIT_IP_REFRESH_WINDOW:1m}
+    ip-otp-request:
+      capacity: ${RATE_LIMIT_IP_OTP_REQUEST_CAPACITY:10}
+      refill-period: ${RATE_LIMIT_IP_OTP_REQUEST_WINDOW:1m}
+    ip-otp-verify:
+      capacity: ${RATE_LIMIT_IP_OTP_VERIFY_CAPACITY:20}
+      refill-period: ${RATE_LIMIT_IP_OTP_VERIFY_WINDOW:1m}
+    ip-pin:
+      capacity: ${RATE_LIMIT_IP_PIN_CAPACITY:15}
+      refill-period: ${RATE_LIMIT_IP_PIN_WINDOW:1m}
+    # Per-MSISDN OTP-request cap (SMS-flood control): few sends per number per
+    # window, independent of source IP.
+    msisdn-otp-request:
+      capacity: ${RATE_LIMIT_MSISDN_OTP_REQUEST_CAPACITY:3}
+      refill-period: ${RATE_LIMIT_MSISDN_OTP_REQUEST_WINDOW:15m}
+
+management:
+  server:
+    port: ${MANAGEMENT_SERVER_PORT:9090}
+  endpoints:
+    web:
+      exposure:
+        # `loggers` is intentionally OMITTED — the endpoint accepts POST to
+        # mutate log levels at runtime; exposing it on an unauthenticated
+        # management port lets anyone reachable on 9090 flip client logging
+        # to DEBUG and exfiltrate PII (PINs, MSISDNs, JWT headers, core-banking
+        # request bodies) via the logs. Re-enable only behind authn.
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      show-details: never
+      probes:
+        enabled: true
+  tracing:
+    enabled: ${TRACING_ENABLED:false}
+    sampling:
+      probability: ${TRACING_SAMPLE_RATE:0.1}
+
+logging:
+  pattern:
+    level: "%5p [%X{country:-},%X{correlationId:-},%X{traceId:-},%X{spanId:-}]"
+  level:
+    zw.co.innbucks.middleware: INFO

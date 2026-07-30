@@ -1,0 +1,53 @@
+# DEV PROFILE ONLY.
+# Defaults below are intentionally permissive so that a fresh clone + IDE
+# Run "just works". Each value is env-var-overridable — production / uat MUST
+# supply real values and MUST NOT run with SPRING_PROFILES_ACTIVE=dev.
+# Anything sensitive here is a clearly-marked placeholder, never a real secret.
+# (The "dev-only" marker in each placeholder is load-bearing: ProductionSecretsGuard
+# rejects values containing it under a deployment profile.)
+
+spring:
+  datasource:
+    url: ${DATASOURCE_URL:jdbc:postgresql://localhost:5432/innbucks}
+    username: ${DATASOURCE_USERNAME:innbucks}
+    password: ${DATASOURCE_PASSWORD:innbucks}
+
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    enabled: true
+
+innbucks:
+  country: ${INNBUCKS_COUNTRY:KE}
+  auth:
+    signing-key: ${JWT_SIGNING_KEY:dev-only-jwt-signing-key-replace-in-uat-and-prod-32+chars}
+    # Distinct from signing-key even in dev — the guard enforces inequality everywhere.
+    verification-signing-key: ${VERIFICATION_SIGNING_KEY:dev-only-verification-signing-key-distinct-32+chars}
+    national-id-hmac-key: ${NATIONAL_ID_HMAC_KEY:dev-only-national-id-hmac-key-replace-in-prod-32chars}
+    audience: ${JWT_AUDIENCE:innbucks-mobile-dev}
+    access-token-ttl: ${JWT_ACCESS_TTL:10m}
+    refresh-token-ttl: ${JWT_REFRESH_TTL:30d}
+  audit:
+    hmac-secret: ${AUDIT_HMAC_SECRET:dev-only-audit-hmac-secret-replace-in-prod-32chars}
+  cors:
+    allowed-origins:
+      - http://localhost:3000
+      - http://localhost:4200
+      - http://localhost:5173
+      - http://localhost:8090
+  otp:
+    hmac-secret: ${OTP_HMAC_SECRET:dev-only-otp-hmac-secret-replace-in-prod-32chars}
+    # DEV ONLY. Fixed code 000000 so any OTP request can be verified with
+    # this value while the SMS provider isn't wired. Refused by OtpConfig
+    # if the active profile isn't dev or test.
+    fixed-code: "000000"
+
+management:
+  tracing:
+    sampling:
+      probability: 1.0
+
+logging:
+  level:
+    zw.co.innbucks.middleware: DEBUG

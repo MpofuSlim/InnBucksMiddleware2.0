@@ -1,0 +1,15 @@
+# Keeps the SHA-pinned GitHub Actions and Maven deps current. The
+# github-actions ecosystem bumps the pinned SHA + the trailing version
+# comment together — keep them in lock-step, never hand-edit one without
+# the other.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: maven
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
