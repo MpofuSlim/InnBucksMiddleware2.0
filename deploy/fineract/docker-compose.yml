@@ -28,7 +28,14 @@ services:
       POSTGRES_PASSWORD: ${FINERACT_DB_PASSWORD:?set FINERACT_DB_PASSWORD in .env}
       POSTGRES_DB: postgres
     volumes:
-      - innbucks-fineract-pgdata:/var/lib/postgresql/data
+      # Mount the WHOLE /var/lib/postgresql, not .../data: from PG18 the
+      # official image stores data in a major-version subdirectory
+      # (/var/lib/postgresql/18/docker) so that `pg_upgrade --link` works
+      # without crossing a mount boundary. A .../data mount is the pre-18
+      # convention and makes the entrypoint refuse to start:
+      # "there appears to be PostgreSQL data in /var/lib/postgresql/data
+      #  (unused mount/volume)". See docker-library/postgres#1259.
+      - innbucks-fineract-pgdata:/var/lib/postgresql
       - ./initdb/01-init.sh:/docker-entrypoint-initdb.d/01-init.sh:ro
     # No ports: block on purpose — only Fineract reaches it, in-network.
     healthcheck:
