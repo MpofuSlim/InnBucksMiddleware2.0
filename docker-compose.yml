@@ -50,6 +50,19 @@ services:
       INNBUCKS_COUNTRY: ${INNBUCKS_COUNTRY:?set INNBUCKS_COUNTRY in .env}
       INNBUCKS_CORE_PROVIDER: ${INNBUCKS_CORE_PROVIDER:-fineract}
 
+      # Fineract cell — boot-required when the provider is fineract. The
+      # Fineract deployment runs as its own stack; point base-url at it and
+      # network-isolate 8443 so ONLY this middleware reaches it.
+      FINERACT_BASE_URL: ${FINERACT_BASE_URL:?set FINERACT_BASE_URL in .env}
+      FINERACT_TENANT_ID: ${FINERACT_TENANT_ID:-default}
+      FINERACT_READ_USERNAME: ${FINERACT_READ_USERNAME:?set FINERACT_READ_USERNAME in .env}
+      FINERACT_READ_PASSWORD: ${FINERACT_READ_PASSWORD:?set FINERACT_READ_PASSWORD in .env}
+      FINERACT_WRITE_USERNAME: ${FINERACT_WRITE_USERNAME:?set FINERACT_WRITE_USERNAME in .env}
+      FINERACT_WRITE_PASSWORD: ${FINERACT_WRITE_PASSWORD:?set FINERACT_WRITE_PASSWORD in .env}
+      FINERACT_OFFICE_ID: ${FINERACT_OFFICE_ID:-1}
+      FINERACT_SAVINGS_PRODUCT_ID: ${FINERACT_SAVINGS_PRODUCT_ID:?set FINERACT_SAVINGS_PRODUCT_ID in .env}
+      FINERACT_CURRENCY: ${FINERACT_CURRENCY:?set FINERACT_CURRENCY in .env}
+
       # Auth + at-rest crypto secrets. ALL are boot-required under a
       # deployment profile (ProductionSecretsGuard, fail-closed) and MUST be
       # distinct values. Generate each: openssl rand -base64 48

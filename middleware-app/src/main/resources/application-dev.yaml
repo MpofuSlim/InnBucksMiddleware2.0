@@ -43,6 +43,18 @@ innbucks:
     # if the active profile isn't dev or test.
     fixed-code: "000000"
 
+# Dev-only Fineract defaults: a fresh clone boots against a local Fineract
+# dev instance (docker compose from the fineract repo). Placeholder creds are
+# the well-known Fineract defaults — dev only, rotated everywhere real.
+fineract:
+  base-url: ${FINERACT_BASE_URL:https://localhost:8443/fineract-provider/api}
+  read-username: ${FINERACT_READ_USERNAME:mifos}
+  read-password: ${FINERACT_READ_PASSWORD:password}
+  write-username: ${FINERACT_WRITE_USERNAME:mifos}
+  write-password: ${FINERACT_WRITE_PASSWORD:password}
+  savings-product-id: ${FINERACT_SAVINGS_PRODUCT_ID:1}
+  currency: ${FINERACT_CURRENCY:KES}
+
 management:
   tracing:
     sampling:

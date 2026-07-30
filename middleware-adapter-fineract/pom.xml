@@ -9,12 +9,55 @@
     </parent>
     <artifactId>middleware-adapter-fineract</artifactId>
     <name>middleware-adapter-fineract</name>
-    <description>CoreBankingPort adapter for Apache Fineract (v1 REST API, Basic auth, Fineract-Platform-TenantId, Idempotency-Key propagation). Skeleton — the client lands in the next slice with its WireMock contract tests.</description>
+    <description>CoreBankingPort adapter for Apache Fineract: RestClient with dual read/write AppUsers, Fineract-Platform-TenantId, Idempotency-Key propagation, savings onboarding saga, typed exception mapping, read-retry/write-never-retry resilience. Contract-pinned by standalone WireMock tests.</description>
 
     <dependencies>
         <dependency>
             <groupId>zw.co.innbucks</groupId>
             <artifactId>middleware-corebanking-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webmvc</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+        <!-- Boot 4's modular starters don't pull jackson-databind transitively
+             here; the client parses Fineract JSON with it, so declare it
+             (version from the Boot BOM). -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.github.resilience4j</groupId>
+            <artifactId>resilience4j-circuitbreaker</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.github.resilience4j</groupId>
+            <artifactId>resilience4j-retry</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.wiremock</groupId>
+            <artifactId>wiremock-standalone</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <scope>test</scope>
         </dependency>
     </dependencies>
 </project>

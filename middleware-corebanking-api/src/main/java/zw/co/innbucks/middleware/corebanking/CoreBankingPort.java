@@ -10,6 +10,7 @@ import zw.co.innbucks.middleware.corebanking.value.CoreCustomerRef;
 import zw.co.innbucks.middleware.corebanking.value.CustomerProfile;
 import zw.co.innbucks.middleware.corebanking.value.DepositAccountSummary;
 import zw.co.innbucks.middleware.corebanking.value.IdempotencyKey;
+import zw.co.innbucks.middleware.corebanking.value.TransactionLookup;
 import zw.co.innbucks.middleware.corebanking.value.TransactionResult;
 import zw.co.innbucks.middleware.corebanking.value.TxRef;
 
@@ -62,6 +63,20 @@ public interface CoreBankingPort {
      */
     CoreCustomerRef createCustomer(CreateCustomerCommand cmd, IdempotencyKey key);
 
+    /**
+     * Open (and fully activate) the customer's wallet/deposit account. The
+     * adapter owns whatever multi-step saga its core requires (Fineract:
+     * create → approve → activate, each leg idempotency-keyed off {@code key}
+     * and individually resumable), and MUST be safe to re-invoke after a
+     * partial failure — a retry picks the saga up where it died.
+     *
+     * @param requestedExternalId the account externalId the middleware mints
+     *        (e.g. {@code <customerUuid>:wallet}); adapters for cores without
+     *        {@link CoreCapability#CLIENT_ASSIGNED_EXTERNAL_ID} may ignore it
+     *        and the caller persists the returned ref.
+     */
+    AccountRef openDepositAccount(CoreCustomerRef customer, String requestedExternalId, IdempotencyKey key);
+
     CustomerProfile getProfile(CoreCustomerRef ref);
 
     List<DepositAccountSummary> listDepositAccounts(CoreCustomerRef ref);
@@ -79,6 +94,13 @@ public interface CoreBankingPort {
      * ONLY retried path for money movement: after a
      * {@link CoreUnknownOutcomeException} the caller polls this until the core
      * gives a definitive state.
+     *
+     * <p>Outcome contract: {@code COMPLETED}/{@code FAILED} must be POSITIVE
+     * core answers (found-applied, found-failed, or ref-definitively-absent
+     * where the adapter always attaches the ref to the original write —
+     * absence then proves the write never landed). When the adapter cannot
+     * prove either way, return {@code UNKNOWN} — the row stays parked for the
+     * operator; never guess.
      */
-    TransactionResult getTransaction(TxRef ref);
+    TransactionResult getTransaction(TransactionLookup lookup);
 }

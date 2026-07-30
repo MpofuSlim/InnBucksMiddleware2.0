@@ -24,6 +24,7 @@ import zw.co.innbucks.middleware.corebanking.value.CustomerProfile;
 import zw.co.innbucks.middleware.corebanking.value.DepositAccountSummary;
 import zw.co.innbucks.middleware.corebanking.value.IdempotencyKey;
 import zw.co.innbucks.middleware.corebanking.value.MinorUnits;
+import zw.co.innbucks.middleware.corebanking.value.TransactionLookup;
 import zw.co.innbucks.middleware.corebanking.value.TransactionResult;
 import zw.co.innbucks.middleware.corebanking.value.TransactionState;
 import zw.co.innbucks.middleware.corebanking.value.TxRef;
@@ -71,8 +72,8 @@ class LedgerFlowIntegrationTest {
      * executor takes the write call as a lambda); everything else fails loud.
      */
     static class StubCorePort implements CoreBankingPort {
-        volatile Function<TxRef, TransactionResult> onGetTransaction =
-                ref -> { throw new IllegalStateException("stub not configured"); };
+        volatile Function<TransactionLookup, TransactionResult> onGetTransaction =
+                lookup -> { throw new IllegalStateException("stub not configured"); };
 
         @Override public CoreProvider provider() { return CoreProvider.FINERACT; }
         @Override public Set<CoreCapability> capabilities() { return Set.of(); }
@@ -83,7 +84,8 @@ class LedgerFlowIntegrationTest {
         @Override public TransactionResult deposit(MoneyMovementCommand cmd, IdempotencyKey key) { throw new UnsupportedOperationException(); }
         @Override public TransactionResult withdraw(MoneyMovementCommand cmd, IdempotencyKey key) { throw new UnsupportedOperationException(); }
         @Override public TransactionResult transfer(TransferCommand cmd, IdempotencyKey key) { throw new UnsupportedOperationException(); }
-        @Override public TransactionResult getTransaction(TxRef ref) { return onGetTransaction.apply(ref); }
+        @Override public AccountRef openDepositAccount(CoreCustomerRef customer, String requestedExternalId, IdempotencyKey key) { throw new UnsupportedOperationException(); }
+        @Override public TransactionResult getTransaction(TransactionLookup lookup) { return onGetTransaction.apply(lookup); }
     }
 
     @TestConfiguration
@@ -152,7 +154,7 @@ class LedgerFlowIntegrationTest {
 
         // The core, once queried, positively confirms the movement applied.
         stubPort.onGetTransaction =
-                ref -> new TransactionResult(new TxRef("CORE-RECON-1"), TransactionState.COMPLETED);
+                lookup -> new TransactionResult(new TxRef("CORE-RECON-1"), TransactionState.COMPLETED);
         reconciliationJob.sweep();
 
         assertThat(statusOf(outcome.transactionId())).isEqualTo("COMPLETED");
@@ -169,7 +171,7 @@ class LedgerFlowIntegrationTest {
             throw new CoreUnknownOutcomeException(CoreProvider.FINERACT, ref, "reset after send", null);
         });
         stubPort.onGetTransaction =
-                ref -> new TransactionResult(ref, TransactionState.UNKNOWN);
+                lookup -> new TransactionResult(lookup.externalRef(), TransactionState.UNKNOWN);
 
         reconciliationJob.sweep();
 
@@ -184,7 +186,7 @@ class LedgerFlowIntegrationTest {
 
         // Second sweep before the backoff deadline: the row is not due, so the
         // (now booby-trapped) stub must not even be consulted.
-        stubPort.onGetTransaction = ref -> { throw new AssertionError("row was not due for polling"); };
+        stubPort.onGetTransaction = lookup -> { throw new AssertionError("row was not due for polling"); };
         reconciliationJob.sweep();
         assertThat(statusOf(outcome.transactionId())).isEqualTo("UNKNOWN");
     }
@@ -201,7 +203,7 @@ class LedgerFlowIntegrationTest {
                         'PENDING', ?, ?, 0)
                 """, id, customerId, Timestamp.from(old), Timestamp.from(old));
         // Any due-row polling in the same sweep must leave it parked.
-        stubPort.onGetTransaction = ref -> new TransactionResult(ref, TransactionState.UNKNOWN);
+        stubPort.onGetTransaction = lookup -> new TransactionResult(lookup.externalRef(), TransactionState.UNKNOWN);
 
         reconciliationJob.sweep();
 

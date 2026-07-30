@@ -5,6 +5,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.ObjectProvider;
 import zw.co.innbucks.middleware.corebanking.CoreBankingPort;
+import zw.co.innbucks.middleware.corebanking.value.TransactionLookup;
 import zw.co.innbucks.middleware.corebanking.value.TransactionResult;
 import zw.co.innbucks.middleware.corebanking.value.TransactionState;
 import zw.co.innbucks.middleware.corebanking.value.TxRef;
@@ -59,6 +60,12 @@ class LedgerReconciliationJobTest {
                 properties, meterRegistry, clock);
     }
 
+    /** Matches the lookup the job builds from a row (by external ref). */
+    private static TransactionLookup lookupOf(LedgerTransaction tx) {
+        return org.mockito.ArgumentMatchers.argThat(l ->
+                l != null && l.externalRef().reference().equals(tx.getExternalRef()));
+    }
+
     private LedgerTransaction row(LedgerStatus status, int attempts) {
         LedgerTransaction tx = new LedgerTransaction();
         tx.setId(UUID.randomUUID());
@@ -88,7 +95,7 @@ class LedgerReconciliationJobTest {
     void coreCompletedResolvesTheRow() {
         LedgerTransaction parked = row(LedgerStatus.UNKNOWN, 0);
         when(repository.findDueForReconciliation(eq(now), anyInt())).thenReturn(List.of(parked));
-        when(port.getTransaction(new TxRef(parked.getExternalRef())))
+        when(port.getTransaction(lookupOf(parked)))
                 .thenReturn(new TransactionResult(new TxRef("CORE-77"), TransactionState.COMPLETED));
 
         job.sweep();
@@ -158,9 +165,9 @@ class LedgerReconciliationJobTest {
         LedgerTransaction resolvable = row(LedgerStatus.UNKNOWN, 0);
         when(repository.findDueForReconciliation(eq(now), anyInt()))
                 .thenReturn(List.of(failing, resolvable));
-        when(port.getTransaction(new TxRef(failing.getExternalRef())))
+        when(port.getTransaction(lookupOf(failing)))
                 .thenThrow(new IllegalStateException("core query blew up"));
-        when(port.getTransaction(new TxRef(resolvable.getExternalRef())))
+        when(port.getTransaction(lookupOf(resolvable)))
                 .thenReturn(new TransactionResult(new TxRef("CORE-88"), TransactionState.COMPLETED));
 
         job.sweep();

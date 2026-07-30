@@ -112,6 +112,38 @@ innbucks:
       capacity: ${RATE_LIMIT_MSISDN_OTP_REQUEST_CAPACITY:3}
       refill-period: ${RATE_LIMIT_MSISDN_OTP_REQUEST_WINDOW:15m}
 
+# Fineract cell wiring — only read when innbucks.core.provider=fineract, and
+# then every field is boot-required (fail-fast, like INNBUCKS_COUNTRY). TWO
+# least-privilege AppUsers: the read credential holds READ_* permissions only;
+# the write credential exactly the command permissions the adapter calls —
+# never ALL_FUNCTIONS. A leaked reconciliation credential cannot move money.
+fineract:
+  base-url: ${FINERACT_BASE_URL:}
+  tenant-id: ${FINERACT_TENANT_ID:default}
+  read-username: ${FINERACT_READ_USERNAME:}
+  read-password: ${FINERACT_READ_PASSWORD:}
+  write-username: ${FINERACT_WRITE_USERNAME:}
+  write-password: ${FINERACT_WRITE_PASSWORD:}
+  office-id: ${FINERACT_OFFICE_ID:1}
+  savings-product-id: ${FINERACT_SAVINGS_PRODUCT_ID:}
+  currency: ${FINERACT_CURRENCY:}
+  locale: ${FINERACT_LOCALE:en}
+  date-format: ${FINERACT_DATE_FORMAT:yyyy-MM-dd}
+  connect-timeout: ${FINERACT_CONNECT_TIMEOUT:2s}
+  read-timeout: ${FINERACT_READ_TIMEOUT:10s}
+  # Circuit breaker + read-only retry (writes are NEVER auto-retried; the
+  # propagated Idempotency-Key is the dedup, not an excuse to retry).
+  resilience:
+    enabled: ${FINERACT_RESILIENCE_ENABLED:true}
+    sliding-window-size: ${FINERACT_CB_WINDOW:20}
+    minimum-number-of-calls: ${FINERACT_CB_MIN_CALLS:10}
+    failure-rate-threshold: ${FINERACT_CB_FAILURE_RATE:50}
+    wait-duration-in-open-state: ${FINERACT_CB_OPEN_WAIT:30s}
+    permitted-calls-in-half-open-state: ${FINERACT_CB_HALF_OPEN_CALLS:3}
+    slow-call-duration-threshold: ${FINERACT_CB_SLOW_CALL:8s}
+    retry-max-attempts: ${FINERACT_RETRY_MAX_ATTEMPTS:3}
+    retry-wait-duration: ${FINERACT_RETRY_WAIT:200ms}
+
 management:
   server:
     port: ${MANAGEMENT_SERVER_PORT:9090}
