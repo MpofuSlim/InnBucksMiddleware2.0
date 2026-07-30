@@ -27,7 +27,7 @@
         <!-- Bouncycastle: 1.78.1 had CVE-2026-5598 (HIGH) — private-key leak via
              non-constant-time comparisons. 1.84 is the first version with the fix.
              Needed at runtime by Spring Security's Argon2PasswordEncoder (PinHasher). -->
-        <bouncycastle.version>1.84</bouncycastle.version>
+        <bouncycastle.version>1.85</bouncycastle.version>
         <testcontainers.version>1.20.4</testcontainers.version>
         <!-- Spring Boot 4.0.6 bundles Tomcat 11.0.21 which carries 6 outstanding
              CVEs (3 CRITICAL, 3 HIGH); 11.0.22 is the fix-line. We override
