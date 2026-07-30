@@ -11,7 +11,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class RateLimiterServiceTest {
 
     private static RateLimitProperties props(boolean enabled, Limit limit) {
-        return new RateLimitProperties(enabled, false, limit, limit, limit, limit, limit, limit);
+        return new RateLimitProperties(enabled, false, limit, limit, limit, limit, limit, limit, limit);
     }
 
     @Test

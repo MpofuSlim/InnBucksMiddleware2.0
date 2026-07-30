@@ -34,6 +34,7 @@ public record RateLimitProperties(
         Limit ipOtpRequest,
         Limit ipOtpVerify,
         Limit ipPin,
+        Limit ipRegister,
         Limit msisdnOtpRequest
 ) {
 

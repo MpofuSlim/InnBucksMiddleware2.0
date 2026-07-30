@@ -106,6 +106,10 @@ innbucks:
     ip-pin:
       capacity: ${RATE_LIMIT_IP_PIN_CAPACITY:15}
       refill-period: ${RATE_LIMIT_IP_PIN_WINDOW:1m}
+    # Public + creates core-banking state: the tightest bucket.
+    ip-register:
+      capacity: ${RATE_LIMIT_IP_REGISTER_CAPACITY:5}
+      refill-period: ${RATE_LIMIT_IP_REGISTER_WINDOW:15m}
     # Per-MSISDN OTP-request cap (SMS-flood control): few sends per number per
     # window, independent of source IP.
     msisdn-otp-request:
