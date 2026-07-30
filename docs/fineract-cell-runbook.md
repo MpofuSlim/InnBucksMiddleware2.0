@@ -163,11 +163,19 @@ savings-only wallet cell, **turn the feature off** — Fineract then uses the
 tenant's own date and nothing has to advance it daily:
 
 ```sh
-curl -sS $CURL_OPTS -X PUT -u "mifos:$ADMIN_PASSWORD" \
-  -H "Fineract-Platform-TenantId: default" -H 'Content-Type: application/json' \
-  -d '{"enabled":false}' \
-  https://localhost:8443/fineract-provider/api/v1/configurations/name/enable_business_date
+API=https://localhost:8443/fineract-provider/api
+AUTH=(-u "mifos:$ADMIN_PASSWORD" -H "Fineract-Platform-TenantId: default")
+
+ID=$(curl -sS $CURL_OPTS "${AUTH[@]}" "$API/v1/configurations" \
+  | jq -r '[.. | objects | select(.name? == "enable_business_date")] | .[0].id')
+curl -sS $CURL_OPTS -X PUT "${AUTH[@]}" -H 'Content-Type: application/json' \
+  -d '{"enabled":false}' "$API/v1/configurations/$ID"
 ```
+
+Resolve the id off the list endpoint rather than using
+`/v1/configurations/name/enable_business_date` — the by-name **GET** does not
+return `name`/`enabled` at the top level, so it reads as `null` and quietly
+misleads you into thinking the feature is off.
 
 Keep it on only if the cell deliberately runs COB batch processing — in which
 case something must advance the date daily, or this recurs tomorrow.

@@ -191,8 +191,12 @@ fi
 # rather than letting the operator debug it from the smoke step.
 TODAY_UTC=$(date -u +%Y-%m-%d)
 TODAY_NUM=$(date -u +%Y%m%d)
-BD_ENABLED=$(api GET "/v1/configurations/name/enable_business_date" 2>/dev/null \
-  | jq -r '.enabled // false' || printf 'unknown')
+# Read the flag off the LIST endpoint, not /configurations/name/{name}: the
+# by-name response does not carry `name`/`enabled` at the top level on this
+# build. Recursive descent means an added wrapper key cannot break this again,
+# and an unreadable/error body yields false — check skipped, never a crash.
+BD_ENABLED=$(api GET "/v1/configurations" 2>/dev/null \
+  | jq -r '[.. | objects | select(.name? == "enable_business_date")] | .[0].enabled // false' || printf 'false')
 if [[ "$BD_ENABLED" == "true" ]]; then
   # LocalDate serializes as [yyyy,m,d] on this endpoint (@JsonLocalDateArrayFormat),
   # so normalise either shape to a comparable yyyymmdd integer.
@@ -203,11 +207,15 @@ if [[ "$BD_ENABLED" == "true" ]]; then
     fail "Fineract's logical BUSINESS DATE is ${BD_NUM}, but today (UTC) is ${TODAY_NUM}.
        Every write dated today is rejected as 'in the future' until this is fixed.
        For a savings-only wallet cell the right fix is to turn the feature OFF, so
-       Fineract uses the tenant's real date and nothing has to advance it daily:
+       Fineract uses the tenant's real date and nothing has to advance it daily.
+       Resolve the id off the list endpoint and PUT by id (the by-name PUT is
+       thinner on this build):
+         ID=\$(curl -sS ${CURL_OPTS} -u '${ADMIN_USER}:<password>' \\
+           -H 'Fineract-Platform-TenantId: ${TENANT}' ${FINERACT_URL}/v1/configurations \\
+           | jq -r '[.. | objects | select(.name? == \"enable_business_date\")] | .[0].id')
          curl -sS ${CURL_OPTS} -X PUT -u '${ADMIN_USER}:<password>' \\
            -H 'Fineract-Platform-TenantId: ${TENANT}' -H 'Content-Type: application/json' \\
-           -d '{\"enabled\":false}' \\
-           ${FINERACT_URL}/v1/configurations/name/enable_business_date
+           -d '{\"enabled\":false}' ${FINERACT_URL}/v1/configurations/\$ID
        If this cell deliberately runs on business dates, advance it instead:
          curl -sS ${CURL_OPTS} -X POST -u '${ADMIN_USER}:<password>' \\
            -H 'Fineract-Platform-TenantId: ${TENANT}' -H 'Content-Type: application/json' \\
