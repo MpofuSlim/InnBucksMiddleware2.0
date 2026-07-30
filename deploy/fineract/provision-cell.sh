@@ -353,11 +353,32 @@ if [[ "${RUN_SMOKE:-0}" == "1" ]]; then
   log "7/7 smoke: driving the adapter's exact call sequence with the mw credentials ..."
   TODAY=$(date -u +%Y-%m-%d) REF="smoke-$(date -u +%s)"
   CLIENT_EXT="smoke-probe-$(date -u +%s)"
-  CLIENT_ID=$(api POST "/v1/clients" "$(jq -n --arg ext "$CLIENT_EXT" --arg d "$TODAY" '{
+  CLIENT_RESP=$(api POST "/v1/clients" "$(jq -n --arg ext "$CLIENT_EXT" --arg d "$TODAY" '{
         officeId:1, firstname:"SMOKE", lastname:"Probe", externalId:$ext,
         legalFormId:1, active:true, activationDate:$d,
         locale:"en", dateFormat:"yyyy-MM-dd"
-      }')" innbucks-mw-write "$MW_WRITE_PASSWORD" | jq -r '.clientId // .resourceId')
+      }')" innbucks-mw-write "$MW_WRITE_PASSWORD")
+  CLIENT_ID=$(jq -r '.clientId // .resourceId // empty' <<<"$CLIENT_RESP")
+  if [[ -z "$CLIENT_ID" ]]; then
+    # A 2xx with no id means MAKER-CHECKER: the command was parked for a human
+    # approver and its transaction rolled back (CommandSourceService.processCommand
+    # -> RollbackTransactionNotApprovedException). The caller gets a
+    # success-SHAPED response and no row. An automated rail cannot satisfy dual
+    # control, so the middleware's own commands must be exempt — leaving every
+    # human-facing permission under maker-checker untouched.
+    fail "client create returned 2xx with no clientId/resourceId:
+         ${CLIENT_RESP}
+       That is maker-checker parking the command for approval, not a create.
+       Check (note the column is can_maker_checker, and the global key is kebab-case):
+         ${BD_SQL} \\
+           -c \"SELECT name, enabled FROM c_configuration WHERE name = 'maker-checker';\"
+         ${BD_SQL} \\
+           -c \"SELECT code, can_maker_checker FROM m_permission WHERE code IN ('${WRITE_PERMS[0]}'$(printf ", '%s'" "${WRITE_PERMS[@]:1}"));\"
+       Exempt ONLY the codes this middleware issues, then restart Fineract:
+         ${BD_SQL} \\
+           -c \"UPDATE m_permission SET can_maker_checker = false WHERE code IN ('${WRITE_PERMS[0]}'$(printf ", '%s'" "${WRITE_PERMS[@]:1}"));\"
+         docker compose restart fineract"
+  fi
   SAVINGS_ID=$(api POST "/v1/savingsaccounts" "$(jq -n \
       --argjson c "$CLIENT_ID" --argjson p "$PRODUCT_ID" --arg ext "${CLIENT_EXT}:wallet" --arg d "$TODAY" '{
         clientId:$c, productId:$p, externalId:$ext, submittedOnDate:$d,
