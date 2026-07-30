@@ -178,6 +178,20 @@ Build: `./mvnw verify` at the root. Run locally:
 * Single-replica per cell assumption (in-memory rate limits, unlocked
   `@Scheduled` jobs) — wrap with ShedLock before ever scaling horizontally.
 
+## Environments (EC2, af-south-1)
+
+Three boxes, deployed to over SSH by the operator. **This repo is PUBLIC —
+never commit hostnames/IPs, key filenames, or anything else that targets
+these machines.** Connection details live in the operator's local
+`~/.ssh/config` under these Host aliases; ask the operator to run commands
+there, or reference the aliases when writing runbook snippets:
+
+* `innbucks-ticketing-staging` — staging box running the ticketing fleet.
+* `innbucks-cbs-staging` — staging box for the CORE BANKING cell: the
+  Fineract stack (`deploy/fineract`) + this middleware (root compose) per
+  `docs/fineract-cell-runbook.md`.
+* `innbucks-prod` — production. Deliberate, runbook-driven changes only.
+
 ## Slice progression
 
 1. **Scaffold + core port** — multi-module build; ported OradianMiddleware's
