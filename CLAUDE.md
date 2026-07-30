@@ -348,8 +348,12 @@ Build: `./mvnw verify` at the root. Run locally:
 
 Next (in order):
 6. **Veengu adapter** behind the same port (`V-Tenant`/`V-Access-Token`
-   headers, consent-then-execute saga, REVERSAL capability). Specs pinned in
-   ticketing-system `docs/api/veengu-*.json`.
+   headers, consent-then-execute saga, REVERSAL capability).
+   **ON HOLD until the full Veengu API spec is in hand (owner's call,
+   2026-07-30)** — do NOT start it from the older specs pinned in
+   ticketing-system `docs/api/veengu-*.json`; when the full spec arrives,
+   pin it in THIS repo under `docs/api/` and model the adapter against
+   that (same trim-aggressively rule as the Fineract DTOs).
 
 Deferred (documented, not forgotten): KMS/Secrets Manager custody + rotation
 runbook; per-customer namespacing of inbound Idempotency-Keys
