@@ -145,7 +145,7 @@ same value and the script will work it out).
 ### The logical business date (bites every cell restored from a dump)
 
 Fineract dates writes by its **logical business date**, not the wall clock,
-whenever the `enable_business_date` configuration is on. Nothing advances that
+whenever the `enable-business-date` configuration is on. Nothing advances that
 date while the stack is down, so a cell restored from an older dump comes up
 with a stale one — and then *every* write dated today is rejected with
 
@@ -162,18 +162,24 @@ The middleware hits this too, not just the smoke: `FineractClient` stamps
 savings-only wallet cell, **turn the feature off** — Fineract then uses the
 tenant's own date and nothing has to advance it daily:
 
-**Do this against the database, not the API.** The global-configuration
-endpoints read unreliably on this build: `/v1/configurations/name/{name}`
-returns `name` and `enabled` as `null`, and the list endpoint has been observed
-returning no entry for `enable_business_date` at all — so an API-based check
-reports "off" when it simply failed to read, which is the worst possible answer.
+> [!IMPORTANT]
+> **Global-configuration keys are kebab-case: `enable-business-date`, not
+> `enable_business_date`.** Migration `0149_update_global_configuration_names`
+> renamed every one of them:
+> ```sql
+> UPDATE c_configuration SET name = REPLACE(REPLACE(LOWER(name), '_', '-'), ' ', '-');
+> ```
+> A query using the old underscored name matches nothing — and "no row" reads
+> exactly like "the feature is off", in SQL and over the API alike. That
+> mis-diagnosis cost a full debugging round on the first cell. The Java
+> constants are the source of truth (`GlobalConfigurationConstants`).
 
 ```sh
 cd deploy/fineract
 docker compose exec -T fineract-db psql -U fineract -d fineract_default \
-  -c "SELECT id, name, enabled FROM c_configuration WHERE name = 'enable_business_date';"
+  -c "SELECT id, name, enabled FROM c_configuration WHERE name = 'enable-business-date';"
 docker compose exec -T fineract-db psql -U fineract -d fineract_default \
-  -c "UPDATE c_configuration SET enabled = false WHERE name = 'enable_business_date';"
+  -c "UPDATE c_configuration SET enabled = false WHERE name = 'enable-business-date';"
 docker compose restart fineract
 ```
 
