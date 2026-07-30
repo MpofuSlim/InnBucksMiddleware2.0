@@ -14,6 +14,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.Date;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -31,6 +32,8 @@ public class VerificationTokenIssuer {
 
     public static final String AUDIENCE = "innbucks-otp-verify";
     public static final String CLAIM_PURPOSE = "purpose";
+    /** Step-up only: the transaction fingerprint this token approves — nothing else. */
+    public static final String CLAIM_TXN_FP = "txn_fp";
 
     private final JWSSigner signer;
     private final String issuer;
@@ -52,18 +55,28 @@ public class VerificationTokenIssuer {
     }
 
     public VerificationToken issue(String msisdn, OtpPurpose purpose) {
+        return issue(msisdn, purpose, Map.of());
+    }
+
+    /**
+     * Issue with extra claims — today only {@link #CLAIM_TXN_FP}, which binds
+     * a STEP_UP token to exactly one transaction fingerprint so it can never
+     * approve any other movement.
+     */
+    public VerificationToken issue(String msisdn, OtpPurpose purpose, Map<String, Object> extraClaims) {
         Instant now = clock.instant();
         Instant expiresAt = now.plus(otpProperties.verificationTokenTtl());
 
-        JWTClaimsSet claims = new JWTClaimsSet.Builder()
+        JWTClaimsSet.Builder builder = new JWTClaimsSet.Builder()
                 .subject(msisdn)
                 .issuer(issuer)
                 .audience(AUDIENCE)
                 .jwtID(UUID.randomUUID().toString())
                 .issueTime(Date.from(now))
                 .expirationTime(Date.from(expiresAt))
-                .claim(CLAIM_PURPOSE, purpose.name())
-                .build();
+                .claim(CLAIM_PURPOSE, purpose.name());
+        extraClaims.forEach(builder::claim);
+        JWTClaimsSet claims = builder.build();
 
         try {
             SignedJWT jwt = new SignedJWT(new JWSHeader(JWSAlgorithm.HS256), claims);

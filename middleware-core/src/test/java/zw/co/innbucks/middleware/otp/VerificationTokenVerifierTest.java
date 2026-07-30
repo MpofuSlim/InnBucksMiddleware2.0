@@ -44,7 +44,8 @@ class VerificationTokenVerifierTest {
             "innbucks-mobile",
             Duration.ofMinutes(15),
             Duration.ofDays(30),
-            new AuthProperties.BruteForce(5, Duration.ofMinutes(15), Duration.ofSeconds(1)));
+            new AuthProperties.BruteForce(5, Duration.ofMinutes(15), Duration.ofSeconds(1)),
+            null, null, null, null);
 
     private final OtpProperties otpProperties = new OtpProperties(
             Duration.ofMinutes(5), 5, Duration.ofMinutes(5), null);

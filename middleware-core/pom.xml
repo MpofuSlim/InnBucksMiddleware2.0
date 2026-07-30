@@ -76,6 +76,14 @@
             <artifactId>spring-boot-starter-security-test</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- Contract tests for the notification-gateway / WhatsApp clients.
+             Standalone classifier: self-contained shaded jar, so its Jetty/
+             Jackson can't fight the project's versions. -->
+        <dependency>
+            <groupId>org.wiremock</groupId>
+            <artifactId>wiremock-standalone</artifactId>
+            <scope>test</scope>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-webmvc-test</artifactId>

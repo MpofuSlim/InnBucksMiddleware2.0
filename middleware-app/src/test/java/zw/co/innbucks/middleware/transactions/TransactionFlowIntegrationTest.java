@@ -177,11 +177,14 @@ class TransactionFlowIntegrationTest {
             throw new CoreClientException(CoreProvider.FINERACT, "Insufficient account balance.", null);
         };
 
+        // Amount stays BELOW the basic step-up threshold (50000) — this test is
+        // about the core rejection path; StepUpFlowIntegrationTest owns step-up.
+
         mockMvc.perform(post("/transactions/withdraw")
                         .header(HttpHeaders.AUTHORIZATION, bearer).header("Idempotency-Key", "wd-1")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
-                                {"accountId":"%s","amountMinor":999999,"currency":"KES"}
+                                {"accountId":"%s","amountMinor":9999,"currency":"KES"}
                                 """.formatted(wallet)))
                 .andExpect(status().isUnprocessableEntity())
                 .andExpect(jsonPath("$.errorCode").value("core_rejected"));

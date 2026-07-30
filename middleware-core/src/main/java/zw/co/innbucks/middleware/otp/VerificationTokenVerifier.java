@@ -91,10 +91,12 @@ public class VerificationTokenVerifier {
                     "purpose=" + purposeClaim + " expected=" + expectedPurpose);
         }
 
+        Object txnFpClaim = claims.getClaim(VerificationTokenIssuer.CLAIM_TXN_FP);
         return new VerifiedToken(
                 claims.getSubject(),
                 OtpPurpose.valueOf(purposeClaim),
                 claims.getJWTID(),
-                claims.getExpirationTime().toInstant());
+                claims.getExpirationTime().toInstant(),
+                txnFpClaim == null ? null : txnFpClaim.toString());
     }
 }

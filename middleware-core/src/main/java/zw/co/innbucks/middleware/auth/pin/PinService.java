@@ -114,6 +114,11 @@ public class PinService {
                             "PIN_RESET requires ACTIVE or LOCKED; customer is " + current);
                 }
             }
+            // Unreachable from the PIN controllers (they pass only the two PIN
+            // purposes) — but the enum grew STEP_UP, and a PIN change on a
+            // transaction-approval token must never be possible.
+            case STEP_UP -> throw new PinSetNotAllowedException(
+                    "purpose " + expectedPurpose + " cannot change a PIN");
         }
 
         Instant now = clock.instant();
@@ -130,6 +135,7 @@ public class PinService {
         AuditAction action = switch (expectedPurpose) {
             case PIN_SETUP -> AuditAction.PIN_SET;
             case PIN_RESET -> AuditAction.PIN_RESET;
+            case STEP_UP -> throw new IllegalStateException("unreachable: rejected above");
         };
         auditService.record(action, AuditOutcome.SUCCESS, customer.getId(), null);
         log.info("PIN {} for customer id={} status_before={} status_after=ACTIVE",

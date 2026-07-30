@@ -43,6 +43,25 @@ innbucks:
     verification-token-ttl: 5m
     hmac-secret: test-otp-hmac-secret-that-is-at-least-32-bytes-long
     fixed-code: ""
+  notify:
+    # Console stub: no test may hit a real SMS/WhatsApp gateway. The contract
+    # tests build the gateway clients directly against WireMock.
+    provider: console
+    token-ttl: 10m
+    connect-timeout: 1s
+    read-timeout: 2s
+    whatsapp:
+      enabled: false
+      connect-timeout: 1s
+      read-timeout: 2s
+  stepup:
+    # Real thresholds exercised by StepUpFlowIntegrationTest: amounts >= the
+    # basic threshold require approval; small movements pass untouched.
+    enabled: true
+    thresholds:
+      basic: 50000
+      standard: 200000
+      enhanced: 1000000
   rate-limit:
     # Disabled in tests so repeated auth calls within one test don't trip
     # limits. RateLimiterServiceTest / AuthRateLimitFilterTest build the limiter

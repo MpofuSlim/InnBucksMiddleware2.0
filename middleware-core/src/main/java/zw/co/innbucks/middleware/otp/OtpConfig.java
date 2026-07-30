@@ -3,7 +3,6 @@ package zw.co.innbucks.middleware.otp;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -23,15 +22,9 @@ public class OtpConfig {
     private final OtpProperties otpProperties;
     private final Environment environment;
 
-    /**
-     * Fallback SmsSender. Yields to any real-provider bean (Africa's Talking,
-     * Twilio, ...) as soon as one is registered.
-     */
-    @Bean
-    @ConditionalOnMissingBean(SmsSender.class)
-    public SmsSender consoleSmsSender() {
-        return new ConsoleSmsSender();
-    }
+    // SmsSender selection (console stub vs the InnBucks notification gateway)
+    // lives in notify/NotificationConfig — ONE explicit decision point keyed
+    // on innbucks.notify.provider, not bean-order-dependent auto-config.
 
     @Bean
     public VerificationTokenIssuer verificationTokenIssuer(AuthProperties authProperties,

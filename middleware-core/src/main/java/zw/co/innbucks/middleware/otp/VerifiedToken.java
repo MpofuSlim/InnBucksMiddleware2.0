@@ -17,6 +17,13 @@ public record VerifiedToken(
         String msisdn,
         OtpPurpose purpose,
         String jti,
-        Instant expiresAt
+        Instant expiresAt,
+
+        /**
+         * STEP_UP tokens only: the transaction fingerprint this token approves.
+         * Null on PIN_SETUP / PIN_RESET tokens (and on any STEP_UP token minted
+         * without one — which the movement check then rejects).
+         */
+        String txnFp
 ) {
 }

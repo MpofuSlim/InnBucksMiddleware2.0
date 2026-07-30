@@ -197,4 +197,43 @@ class LoginFlowIntegrationTest {
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.errorCode").value("pin_not_set"));
     }
+
+    @Test
+    void refreshFromDifferentDeviceRevokesTheWholeFamily() throws Exception {
+        // Device binding (auth slice 4): the refresh token only rotates on the
+        // device it was issued to. A different deviceHash is treated as theft —
+        // generic refresh_invalid 401 (no oracle for the attacker) AND the
+        // family is revoked, so the original device's token is dead too.
+        String loginBody = """
+                {"msisdn":"0712345678","pin":"1234","deviceHash":"device-A"}
+                """;
+        MvcResult loginResult = mockMvc.perform(post("/auth/login")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(loginBody))
+                .andExpect(status().isOk())
+                .andReturn();
+        String refresh = objectMapper.readTree(loginResult.getResponse().getContentAsString())
+                .get("refreshToken").asText();
+
+        mockMvc.perform(post("/auth/refresh")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"refreshToken":"%s","deviceHash":"device-B"}
+                                """.formatted(refresh)))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.errorCode").value("refresh_invalid"));
+
+        // Family revoked: the ORIGINAL device can't rotate the token either.
+        mockMvc.perform(post("/auth/refresh")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"refreshToken":"%s","deviceHash":"device-A"}
+                                """.formatted(refresh)))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.errorCode").value("refresh_invalid"));
+
+        Integer mismatchAudits = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM audit_event WHERE action = 'refresh_device_mismatch'", Integer.class);
+        assertThat(mismatchAudits).isEqualTo(1);
+    }
 }
