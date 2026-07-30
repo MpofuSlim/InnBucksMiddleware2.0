@@ -1,0 +1,123 @@
+# The Fineract half of an InnBucks cell — hardened relative to the fork's
+# sample compose:
+#   * image is the PINNED, Trivy-scanned, attested build from the fork's
+#     "Release InnBucks cell image" workflow — never :latest, never a local
+#     develop build
+#   * every credential is required from .env (no public defaults: the sample
+#     compose ships a well-known DB password and master password)
+#   * NO public 8443 — loopback-only publish for SSH-tunnel admin access;
+#     the middleware reaches Fineract over the shared internal network
+#   * UTC tenant timezone (sample ships Asia/Kolkata), no `test` Spring
+#     profile, no JDWP debug agent
+#
+# One-time host setup (shared with the middleware stack):
+#     docker network create innbucks-cell-shared
+# Full procedure: docs/fineract-cell-runbook.md
+
+name: innbucks-fineract
+
+services:
+  fineract-db:
+    # Matches the Postgres line the fork's own compose tests against.
+    image: postgres:18.3
+    container_name: innbucks-fineract-db
+    restart: unless-stopped
+    networks: [fineract-internal]
+    environment:
+      POSTGRES_USER: fineract
+      POSTGRES_PASSWORD: ${FINERACT_DB_PASSWORD:?set FINERACT_DB_PASSWORD in .env}
+      POSTGRES_DB: postgres
+    volumes:
+      - innbucks-fineract-pgdata:/var/lib/postgresql/data
+      - ./initdb/01-init.sh:/docker-entrypoint-initdb.d/01-init.sh:ro
+    # No ports: block on purpose — only Fineract reaches it, in-network.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fineract -d postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  fineract:
+    image: ghcr.io/mpofuslim/fineract:${FINERACT_IMAGE_TAG:?set FINERACT_IMAGE_TAG in .env (e.g. sha-<commit> or innbucks-cell-1)}
+    container_name: innbucks-fineract
+    restart: unless-stopped
+    # fineract-internal to reach its own Postgres; the shared network so the
+    # middleware resolves it as https://fineract:8443 (nothing else joins it).
+    networks:
+      fineract-internal: {}
+      innbucks-cell-shared:
+        aliases: [fineract]
+    depends_on:
+      fineract-db:
+        condition: service_healthy
+    environment:
+      FINERACT_NODE_ID: "1"
+
+      # Tenant STORE connection (fineract_tenants).
+      FINERACT_HIKARI_DRIVER_SOURCE_CLASS_NAME: org.postgresql.Driver
+      FINERACT_HIKARI_JDBC_URL: jdbc:postgresql://fineract-db:5432/fineract_tenants
+      FINERACT_HIKARI_USERNAME: fineract
+      FINERACT_HIKARI_PASSWORD: ${FINERACT_DB_PASSWORD:?set FINERACT_DB_PASSWORD in .env}
+
+      # Default tenant's data DB. Timezone pinned UTC (the sample compose
+      # ships Asia/Kolkata — a silent source of hours-off timestamps).
+      FINERACT_DEFAULT_TENANTDB_HOSTNAME: fineract-db
+      FINERACT_DEFAULT_TENANTDB_PORT: "5432"
+      FINERACT_DEFAULT_TENANTDB_UID: fineract
+      FINERACT_DEFAULT_TENANTDB_PWD: ${FINERACT_DB_PASSWORD:?set FINERACT_DB_PASSWORD in .env}
+      FINERACT_DEFAULT_TENANTDB_TIMEZONE: UTC
+      FINERACT_DEFAULT_TENANTDB_IDENTIFIER: default
+      FINERACT_DEFAULT_TENANTDB_NAME: fineract_default
+      FINERACT_DEFAULT_TENANTDB_DESCRIPTION: InnBucks cell tenant
+      # Encrypts tenant credentials at rest in the tenant store — the sample
+      # default ("fineract") is public knowledge. openssl rand -base64 32
+      FINERACT_DEFAULT_MASTER_PASSWORD: ${FINERACT_MASTER_PASSWORD:?set FINERACT_MASTER_PASSWORD in .env}
+
+      # TLS on 8443 with the CELL's keystore (see the runbook's CA section) —
+      # never the classpath demo keystore with its public password.
+      FINERACT_SERVER_SSL_ENABLED: "true"
+      FINERACT_SERVER_SSL_KEY_STORE: /ssl/fineract-keystore.p12
+      FINERACT_SERVER_SSL_KEY_STORE_PASSWORD: ${FINERACT_KEYSTORE_PASSWORD:?set FINERACT_KEYSTORE_PASSWORD in .env}
+
+      FINERACT_MANAGEMENT_ENDPOINT_WEB_EXPOSURE_INCLUDE: health,info
+      FINERACT_INSECURE_HTTP_CLIENT: "false"
+      FINERACT_CONTENT_FILESYSTEM_ROOT_FOLDER: /fineract-content
+
+      # Deliberately NO Spring profile (the sample ships `test,diagnostics`)
+      # and NO JDWP debug agent in JAVA_TOOL_OPTIONS.
+      JAVA_TOOL_OPTIONS: >-
+        -Duser.timezone=UTC -Xmx1G -XX:MinRAMPercentage=25 -XX:MaxRAMPercentage=80
+        -XX:+UseContainerSupport -XX:+UseStringDeduplication
+        --add-exports=java.naming/com.sun.jndi.ldap=ALL-UNNAMED
+        --add-opens=java.base/java.lang=ALL-UNNAMED
+        --add-opens=java.base/java.lang.invoke=ALL-UNNAMED
+        --add-opens=java.base/java.io=ALL-UNNAMED
+        --add-opens=java.base/java.security=ALL-UNNAMED
+        --add-opens=java.base/java.util=ALL-UNNAMED
+        --add-opens=java.management/javax.management=ALL-UNNAMED
+        --add-opens=java.naming/javax.naming=ALL-UNNAMED
+    volumes:
+      - ./ssl/fineract-keystore.p12:/ssl/fineract-keystore.p12:ro
+      - innbucks-fineract-content:/fineract-content
+    ports:
+      # Loopback ONLY — admin/provisioning access is via SSH tunnel
+      # (ssh -L 8443:127.0.0.1:8443 <box>). Never publish publicly.
+      - "127.0.0.1:8443:8443"
+    healthcheck:
+      test: ["CMD", "sh", "-c", "nc -z localhost 8443"]
+      interval: 10s
+      timeout: 3s
+      retries: 60
+      start_period: 120s
+
+volumes:
+  innbucks-fineract-pgdata:
+  innbucks-fineract-content:
+
+networks:
+  fineract-internal:
+    name: innbucks-fineract-internal
+  # Created once on the host; the middleware stack joins the same network.
+  innbucks-cell-shared:
+    name: innbucks-cell-shared
+    external: true

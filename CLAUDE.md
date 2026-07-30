@@ -257,10 +257,23 @@ Build: `./mvnw verify` at the root. Run locally:
    `TransactionFlowIntegrationTest` (stub port, real Postgres).
 
 Next (in order):
-4. **Fineract cell hardening** — pin the fork to a SHA, build + Trivy-scan own
-   image, rotate all compose defaults, TLS, network-isolate to the middleware,
-   tenant provisioning (savings product, GL, COB jobs — budget real days;
-   remember `locale`/`dateFormat` fields in mutation bodies).
+4. **Fineract cell hardening — code half DONE; ops half is the runbook.**
+   The fork (`MpofuSlim/fineract`) carries the `Release InnBucks cell image`
+   workflow: pushing an immutable `innbucks-cell-N` tag builds via Jib,
+   gates on Trivy (CRITICAL/HIGH, `--ignore-unfixed`, governed
+   `.trivyignore`), pushes `ghcr.io/mpofuslim/fineract:sha-<commit>` +
+   the cell tag, and attests provenance. This repo carries the cell kit:
+   `deploy/fineract/docker-compose.yml` (own Postgres, all secrets required
+   from `.env`, UTC tenant timezone, no `test` profile / no JDWP agent,
+   loopback-only 8443 + the external `innbucks-cell-shared` network that the
+   root compose's middleware service also joins), `provision-cell.sh`
+   (idempotent: admin rotation, cell currency, zero-interest wallet savings
+   product, TWO least-privilege roles/AppUsers with permission codes
+   verified against the build, optional smoke driving the adapter's exact
+   call sequence), and **`docs/fineract-cell-runbook.md`** — THE procedure
+   for standing up/upgrading a cell (incl. the internal-CA TLS recipe and
+   the middleware truststore wiring; `deploy/fineract/ssl/` is gitignored).
+   Remaining is purely operator work on the box: run the runbook.
 5. **Auth completion** — device-binding enforcement at refresh rotation,
    step-up OTP with `txn_fp`-bound tokens + per-tier thresholds, Africa's
    Talking SMS adapter (go-live gate; alert on delivery failures), RS256
