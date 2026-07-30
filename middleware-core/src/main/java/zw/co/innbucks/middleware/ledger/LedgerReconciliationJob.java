@@ -7,6 +7,9 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import zw.co.innbucks.middleware.corebanking.CoreBankingPort;
+import zw.co.innbucks.middleware.corebanking.value.AccountRef;
+import zw.co.innbucks.middleware.corebanking.value.MovementKind;
+import zw.co.innbucks.middleware.corebanking.value.TransactionLookup;
 import zw.co.innbucks.middleware.corebanking.value.TransactionResult;
 import zw.co.innbucks.middleware.corebanking.value.TxRef;
 
@@ -125,7 +128,7 @@ public class LedgerReconciliationJob {
     }
 
     private void reconcileRow(CoreBankingPort port, LedgerTransaction tx, Instant now) {
-        TransactionResult result = port.getTransaction(new TxRef(tx.getExternalRef()));
+        TransactionResult result = port.getTransaction(lookupFor(tx));
         switch (result.state()) {
             case COMPLETED -> {
                 ledgerService.markCompleted(tx.getId(), result.ref().reference(),
@@ -165,6 +168,15 @@ public class LedgerReconciliationJob {
                             + "resolve against the core's records (never guess locally)",
                     overdue, properties.parkedAlertThreshold());
         }
+    }
+
+    /** The ledger row is the reconciliation context: kind + accounts tell the adapter where to query. */
+    private static TransactionLookup lookupFor(LedgerTransaction tx) {
+        return new TransactionLookup(
+                new TxRef(tx.getExternalRef()),
+                MovementKind.valueOf(tx.getType()),
+                tx.getSourceAccount() == null ? null : new AccountRef(tx.getSourceAccount()),
+                tx.getDestinationAccount() == null ? null : new AccountRef(tx.getDestinationAccount()));
     }
 
     private void backoff(LedgerTransaction tx, Instant now) {

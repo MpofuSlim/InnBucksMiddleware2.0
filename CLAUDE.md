@@ -201,12 +201,48 @@ Build: `./mvnw verify` at the root. Run locally:
    page). The port is resolved via `ObjectProvider` — sweeps degrade
    gracefully until the first adapter bean lands.
 
+3. **Fineract adapter (slice 3a)** — `middleware-adapter-fineract` is real:
+   `FineractClient` (two RestClients — reads ride the read-only AppUser,
+   commands the write one; `Fineract-Platform-TenantId`; `Idempotency-Key`
+   on every mutation; `locale`+`dateFormat` in every date-bearing body;
+   correlation propagated as `X-Correlation-ID`), `FineractErrorMapper`
+   (the taxonomy: write 5xx / HTTP 425 / read-timeout-mid-write →
+   `CoreUnknownOutcomeException` because the command reached the core; only
+   connect-phase failures → `CoreTransientException`; Fineract's 403
+   domain-rule vetoes → `CoreClientException`, permission-flavoured 403 →
+   auth), `FineractResilience` (breaker both ways, retry READS ONLY),
+   `FineractAdapter` (capabilities SERVER_SIDE_DEDUP +
+   CLIENT_ASSIGNED_EXTERNAL_ID; savings saga create→approve→activate with
+   per-leg keys `<key>:create|approve|activate`, every leg resumable by
+   POSITIVE re-read of actual state — never error-string sniffing;
+   cell-currency check before every write; amount-echo cross-check after —
+   mismatch parks, never succeeds). Port refinements this forced:
+   `getTransaction(TransactionLookup)` (reconciliation needs kind + account
+   context — Fineract indexes transactions under the savings account) and
+   `openDepositAccount(...)` joined the port. **Reconciliation semantics**:
+   deposits/withdrawals ALWAYS attach our ref as the savings-transaction
+   externalId → found=COMPLETED, reversed=FAILED, 404-by-ref=POSITIVE
+   never-landed FAILED. Transfers cannot carry the ref in
+   `POST /v1/accounttransfers` (queryable by `?externalId=` but not
+   settable) → absent transfer stays UNKNOWN, parked for the operator; the
+   customer-retry path is still fully dedup'd upstream by Idempotency-Key.
+   Adapter activates on `innbucks.core.provider=fineract` (then every
+   `fineract.*` property is boot-required). Contract pinned by standalone
+   WireMock tests (22 cases). Gotcha: colon-bearing externalIds
+   (`<uuid>:wallet`) hit the wire percent-encoded (`%3A`) — WireMock stub
+   URLs must match the encoded form.
+
 Next (in order):
-3. **Fineract adapter** — RestClient + dual AppUsers + Idempotency-Key
-   propagation + savings onboarding saga (create → approve → activate,
-   per-leg keys, resumable) + amount echo check + WireMock contract tests.
-   Re-expose `/register`, `/me/profile`, transfers/deposits/withdrawals
-   through the port.
+3b. **Customer-facing endpoints through the port** — `POST /register`
+   (public, Idempotency-Key required, namespaced per MSISDN; createCustomer
+   + openDepositAccount saga; customer row updated with
+   core_provider/core_external_id), `GET /me/profile`, `GET /me/accounts`,
+   `POST /transactions/{deposit|withdraw|transfer}` (authenticated;
+   ownership check — the JWT's customer must own the source/target account;
+   inbound Idempotency-Key namespaced per customer before it becomes the
+   external_ref/upstream key; all movement through
+   `LedgeredMovementExecutor`; UNKNOWN renders as PROCESSING). OpenAPI per
+   house rules; integration tests with a stub port.
 4. **Fineract cell hardening** — pin the fork to a SHA, build + Trivy-scan own
    image, rotate all compose defaults, TLS, network-isolate to the middleware,
    tenant provisioning (savings product, GL, COB jobs — budget real days;
