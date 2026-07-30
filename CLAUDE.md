@@ -169,17 +169,39 @@ Build: `./mvnw verify` at the root. Run locally:
 
 ## Slice progression
 
-1. **Scaffold + core port (this slice)** — multi-module build; ported
-   OradianMiddleware's core-agnostic packages (auth slices 1–11 minus the
-   Oradian-coupled endpoints); clean Flyway V1; `CoreBankingPort` contract;
-   security fixes baked in: keyed OTP HMAC, separate verification signing key,
-   fail-closed secrets guard, audit row+chain HMAC + nightly verifier,
-   idempotency claim-row + stored replay status.
+1. **Scaffold + core port** — multi-module build; ported OradianMiddleware's
+   core-agnostic packages (auth slices 1–11 minus the Oradian-coupled
+   endpoints); clean Flyway V1; `CoreBankingPort` contract; security fixes
+   baked in: keyed OTP HMAC, separate verification signing key, fail-closed
+   secrets guard, audit row+chain HMAC + nightly verifier, idempotency
+   claim-row + stored replay status.
+2. **Local transaction ledger (V2)** — `ledger` package in middleware-core,
+   ported from ticketing payment-service's proven design. Write-ahead:
+   `LedgeredMovementExecutor` is THE ONLY way to run a money movement (opens
+   the PENDING `ledger_transaction` row in a REQUIRES_NEW tx BEFORE the core
+   call, then records what actually happened). `LedgerService.transition()`
+   is the single lifecycle chokepoint: legal-transitions map (PENDING →
+   SUBMITTED/COMPLETED/FAILED/UNKNOWN; SUBMITTED → terminal/UNKNOWN;
+   UNKNOWN → terminal/SUBMITTED; terminals immutable — illegal requests are
+   refused + counted `innbucks.ledger.illegal_transitions`, never applied,
+   never thrown), same-tx `ledger_transaction_event` journal, tamper-evident
+   audit rows (TXN_COMPLETED/TXN_FAILED/TXN_UNKNOWN) with the real customer
+   identity. Exception mapping: the four provably-not-applied core exception
+   types → FAILED + rethrow; `CoreUnknownOutcomeException` → UNKNOWN,
+   returned (caller renders PROCESSING); ANY unclassified exception → UNKNOWN
+   + rethrow (conservative — could have fired post-send).
+   `LedgerReconciliationJob` (fixed-delay, `innbucks.ledger.*` config):
+   stale PENDING is PARKED as UNKNOWN (the call may have been sent —
+   deliberately different from ticketing's stale→FAILED, which is only safe
+   because an undelivered code can't be paid); due UNKNOWN/SUBMITTED rows
+   poll `getTransaction` with per-row isolation + exponential backoff
+   (`reconcile_attempts`/`next_reconcile_at`); ONLY positive core outcomes
+   resolve a row; UNKNOWN rows are never auto-expired; rows parked past
+   `parked-alert-threshold` trip `innbucks.ledger.parked_overdue` (operator
+   page). The port is resolved via `ObjectProvider` — sweeps degrade
+   gracefully until the first adapter bean lands.
 
 Next (in order):
-2. **Local transaction ledger** — write-ahead PENDING row per money movement,
-   single `transition()` chokepoint with a legal-transitions map, reconciliation
-   job for UNKNOWN outcomes (port the pattern from ticketing payment-service).
 3. **Fineract adapter** — RestClient + dual AppUsers + Idempotency-Key
    propagation + savings onboarding saga (create → approve → activate,
    per-leg keys, resumable) + amount echo check + WireMock contract tests.

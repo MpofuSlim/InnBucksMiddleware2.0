@@ -28,6 +28,15 @@ innbucks:
       - http://localhost:3000
   idempotency:
     ttl: 1h
+  ledger:
+    # Long interval: tests drive the reconciler by calling sweep() directly,
+    # never via the scheduler.
+    reconcile-interval: PT1H
+    stale-pending-threshold: PT5M
+    batch-size: 100
+    reconcile-backoff-base: PT1M
+    reconcile-backoff-cap: PT30M
+    parked-alert-threshold: PT1H
   otp:
     ttl: 5m
     max-attempts: 5
