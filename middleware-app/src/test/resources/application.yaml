@@ -8,34 +8,6 @@ innbucks:
   country: KE
   core:
     provider: fineract
-
-# The real adapter bean boots in every @SpringBootTest context (provider is
-# fineract above) but is never CALLED — tests override the port with @Primary
-# stubs. The dead port makes any accidental real call fail loudly and fast.
-fineract:
-  base-url: http://localhost:1
-  tenant-id: default
-  read-username: test-read
-  read-password: test-read-secret
-  write-username: test-write
-  write-password: test-write-secret
-  office-id: 1
-  savings-product-id: 1
-  currency: KES
-  locale: en
-  date-format: yyyy-MM-dd
-  connect-timeout: 1s
-  read-timeout: 2s
-  resilience:
-    enabled: false
-    sliding-window-size: 20
-    minimum-number-of-calls: 10
-    failure-rate-threshold: 50
-    wait-duration-in-open-state: 30s
-    permitted-calls-in-half-open-state: 3
-    slow-call-duration-threshold: 8s
-    retry-max-attempts: 3
-    retry-wait-duration: 50ms
   auth:
     signing-key: test-jwt-signing-key-that-is-at-least-32-bytes-long-for-hs256
     # Deliberately distinct from signing-key — ProductionSecretsGuard enforces
@@ -76,6 +48,34 @@ fineract:
     # limits. RateLimiterServiceTest / AuthRateLimitFilterTest build the limiter
     # directly with enabled=true to exercise the real behaviour.
     enabled: false
+
+# The real adapter bean boots in every @SpringBootTest context (provider is
+# fineract above) but is never CALLED — tests override the port with @Primary
+# stubs. The dead port makes any accidental real call fail loudly and fast.
+fineract:
+  base-url: http://localhost:1
+  tenant-id: default
+  read-username: test-read
+  read-password: test-read-secret
+  write-username: test-write
+  write-password: test-write-secret
+  office-id: 1
+  savings-product-id: 1
+  currency: KES
+  locale: en
+  date-format: yyyy-MM-dd
+  connect-timeout: 1s
+  read-timeout: 2s
+  resilience:
+    enabled: false
+    sliding-window-size: 20
+    minimum-number-of-calls: 10
+    failure-rate-threshold: 50
+    wait-duration-in-open-state: 30s
+    permitted-calls-in-half-open-state: 3
+    slow-call-duration-threshold: 8s
+    retry-max-attempts: 3
+    retry-wait-duration: 50ms
 
 management:
   endpoints:
