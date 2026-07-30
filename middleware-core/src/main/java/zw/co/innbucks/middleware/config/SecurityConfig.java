@@ -57,6 +57,10 @@ public class SecurityConfig {
                         .requestMatchers("/auth/login", "/auth/refresh", "/auth/logout").permitAll()
                         .requestMatchers("/auth/otp/**").permitAll()
                         .requestMatchers("/auth/pin/**").permitAll()
+                        // Public onboarding: Idempotency-Key required + per-IP
+                        // rate limited; everything money-touching stays behind
+                        // the JWT (anyRequest below).
+                        .requestMatchers(org.springframework.http.HttpMethod.POST, "/register").permitAll()
                         .anyRequest().authenticated()
                 )
                 .oauth2ResourceServer(oauth2 -> oauth2

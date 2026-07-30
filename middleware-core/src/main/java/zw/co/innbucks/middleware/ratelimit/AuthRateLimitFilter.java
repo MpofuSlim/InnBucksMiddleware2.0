@@ -81,6 +81,8 @@ public class AuthRateLimitFilter extends OncePerRequestFilter {
             case "/auth/otp/request" -> new Rule("otp-request", properties.ipOtpRequest());
             case "/auth/otp/verify" -> new Rule("otp-verify", properties.ipOtpVerify());
             case "/auth/pin/set", "/auth/pin/reset" -> new Rule("pin", properties.ipPin());
+            // Public + creates core-banking state: the tightest bucket.
+            case "/register" -> new Rule("register", properties.ipRegister());
             default -> null;
         };
     }

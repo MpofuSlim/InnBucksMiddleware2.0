@@ -232,17 +232,31 @@ Build: `./mvnw verify` at the root. Run locally:
    (`<uuid>:wallet`) hit the wire percent-encoded (`%3A`) — WireMock stub
    URLs must match the encoded form.
 
+3b. **Customer-facing endpoints through the port** — the mobile surface is
+   live: `POST /register` (public, `@SecurityRequirements({})`, per-IP
+   rate-limited via the new `ip-register` bucket, Idempotency-Key required —
+   namespaced per MSISDN via `IdempotencyKeys.namespaced(scope, key)`
+   (SHA-256, unit-separator between parts); createCustomer + wallet saga with
+   per-step derived keys; customer row inserted first, core mapping updated
+   after; a crashed registration leaves core_external_id NULL and the next
+   attempt RESUMES on that row; fully-registered MSISDN → 409), `GET
+   /me/profile` + `GET /me/accounts` (local identity merged with core
+   names/balances; missing core mapping → 404 customer_not_registered),
+   `POST /transactions/{deposit|withdraw|transfer}` (JWT `customer:write`;
+   ownership checked against the CORE's account list BEFORE any claim/write —
+   source for withdraw/transfer, target for deposit; key namespaced per
+   customer → becomes idempotency_record key, ledger external_ref AND the
+   upstream Idempotency-Key; all movement through `LedgeredMovementExecutor`;
+   crash-retry with the same key answers from the EXISTING ledger row (never
+   a second row — the core would replay the same result anyway; fresh attempt
+   = fresh key); COMPLETED→SUCCESS, FAILED→FAILED, everything else→
+   PROCESSING). `CoreBankingExceptionHandler`: `CoreClientException` → 422
+   `core_rejected` (upstream wording allowed), auth/server/transient → 502/503
+   generic (ops detail stays in logs). Amounts cross the API in MINOR units.
+   Contract pinned by `RegisterFlowIntegrationTest` +
+   `TransactionFlowIntegrationTest` (stub port, real Postgres).
+
 Next (in order):
-3b. **Customer-facing endpoints through the port** — `POST /register`
-   (public, Idempotency-Key required, namespaced per MSISDN; createCustomer
-   + openDepositAccount saga; customer row updated with
-   core_provider/core_external_id), `GET /me/profile`, `GET /me/accounts`,
-   `POST /transactions/{deposit|withdraw|transfer}` (authenticated;
-   ownership check — the JWT's customer must own the source/target account;
-   inbound Idempotency-Key namespaced per customer before it becomes the
-   external_ref/upstream key; all movement through
-   `LedgeredMovementExecutor`; UNKNOWN renders as PROCESSING). OpenAPI per
-   house rules; integration tests with a stub port.
 4. **Fineract cell hardening** — pin the fork to a SHA, build + Trivy-scan own
    image, rotate all compose defaults, TLS, network-isolate to the middleware,
    tenant provisioning (savings product, GL, COB jobs — budget real days;
