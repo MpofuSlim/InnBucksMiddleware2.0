@@ -33,7 +33,10 @@ services:
     image: ghcr.io/${GHCR_OWNER:-mpofuslim}/innbucks-middleware:${IMAGE_TAG:-dev}
     container_name: innbucks-middleware
     restart: unless-stopped
-    networks: [middleware-internal]
+    # middleware-internal for its own Postgres; innbucks-cell-shared to reach
+    # the Fineract stack (deploy/fineract) as https://fineract:8443 — create
+    # it once per host: docker network create innbucks-cell-shared
+    networks: [middleware-internal, innbucks-cell-shared]
     mem_limit: 768m
     mem_reservation: 512m
     depends_on:
@@ -103,3 +106,8 @@ networks:
   # Private network for this stack's middleware <-> Postgres traffic.
   middleware-internal:
     name: innbucks-middleware-internal
+  # Shared with the Fineract stack (deploy/fineract). External: created once
+  # on the host so either stack can come up first.
+  innbucks-cell-shared:
+    name: innbucks-cell-shared
+    external: true
