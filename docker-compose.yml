@@ -1,0 +1,92 @@
+# Compose for the InnBucks Middleware 2.0 stack: the middleware app + its
+# private Postgres. The Fineract deployment it fronts runs as its own stack;
+# point FINERACT_* env vars at it when the adapter lands (next slice).
+
+name: innbucks-middleware
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: innbucks-middleware-postgres
+    restart: unless-stopped
+    networks: [middleware-internal]
+    mem_limit: 512m
+    mem_reservation: 256m
+    environment:
+      POSTGRES_DB: innbucks
+      POSTGRES_USER: ${POSTGRES_USER:-innbucks}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    # No `ports:` block on purpose — only the middleware reaches it, via the
+    # docker network as `postgres:5432`.
+    volumes:
+      - innbucks-middleware-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-innbucks} -d innbucks"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  middleware:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghcr.io/${GHCR_OWNER:-mpofuslim}/innbucks-middleware:${IMAGE_TAG:-dev}
+    container_name: innbucks-middleware
+    restart: unless-stopped
+    networks: [middleware-internal]
+    mem_limit: 768m
+    mem_reservation: 512m
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Datasource — reach the in-network Postgres by service name.
+      DATASOURCE_URL: jdbc:postgresql://postgres:5432/innbucks
+      DATASOURCE_USERNAME: ${POSTGRES_USER:-innbucks}
+      DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+
+      # (country, core) cell pin — the middleware refuses to start without a
+      # country per the country-aware architecture (CLAUDE.md).
+      INNBUCKS_COUNTRY: ${INNBUCKS_COUNTRY:?set INNBUCKS_COUNTRY in .env}
+      INNBUCKS_CORE_PROVIDER: ${INNBUCKS_CORE_PROVIDER:-fineract}
+
+      # Auth + at-rest crypto secrets. ALL are boot-required under a
+      # deployment profile (ProductionSecretsGuard, fail-closed) and MUST be
+      # distinct values. Generate each: openssl rand -base64 48
+      JWT_SIGNING_KEY: ${JWT_SIGNING_KEY:?set JWT_SIGNING_KEY in .env}
+      VERIFICATION_SIGNING_KEY: ${VERIFICATION_SIGNING_KEY:?set VERIFICATION_SIGNING_KEY in .env}
+      NATIONAL_ID_HMAC_KEY: ${NATIONAL_ID_HMAC_KEY:?set NATIONAL_ID_HMAC_KEY in .env}
+      OTP_HMAC_SECRET: ${OTP_HMAC_SECRET:?set OTP_HMAC_SECRET in .env}
+      AUDIT_HMAC_SECRET: ${AUDIT_HMAC_SECRET:?set AUDIT_HMAC_SECRET in .env}
+      JWT_AUDIENCE: ${JWT_AUDIENCE:-innbucks-mobile}
+
+      # CORS — set to the FE origin in prod.
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
+
+      # Profile + observability.
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-prod}
+      TRACING_ENABLED: ${TRACING_ENABLED:-false}
+
+      # Cap the heap relative to mem_limit so an unconstrained JVM can't
+      # OOM-kill its neighbours on a shared box. Tune together with mem_limit.
+      JAVA_TOOL_OPTIONS: ${JAVA_TOOL_OPTIONS:--XX:MaxRAMPercentage=70.0}
+    ports:
+      - "8090:8090"
+      # Management/actuator port — bind to host loopback ONLY. SecurityConfig
+      # permits unauthenticated /actuator/**, so a public publish would expose
+      # health/metrics/prometheus to anything reachable on the host.
+      - "127.0.0.1:9090:9090"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/actuator/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 60s
+
+volumes:
+  innbucks-middleware-pgdata:
+
+networks:
+  # Private network for this stack's middleware <-> Postgres traffic.
+  middleware-internal:
+    name: innbucks-middleware-internal

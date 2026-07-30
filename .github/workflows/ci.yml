@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    # Also run on feature branches so pushes that pre-date the PR get a
+    # green / red signal without having to open the PR first.
+    branches: [main, "feature/**"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build & test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      # Third-party actions are pinned to immutable commit SHAs (movable tags
+      # can be retargeted to run arbitrary code with the workflow's token).
+      # Dependabot bumps the SHA + version comment together.
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set up JDK 21 (Temurin)
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4.8.0
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Make mvnw executable
+        run: chmod +x ./mvnw
+
+      - name: Build, test, and package
+        run: ./mvnw -B -ntp -Dstyle.color=always verify
+
+      - name: Upload Surefire reports on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: surefire-reports
+          path: '**/target/surefire-reports/**'
+          if-no-files-found: ignore
+          retention-days: 7

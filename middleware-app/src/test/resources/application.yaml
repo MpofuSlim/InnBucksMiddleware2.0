@@ -1,0 +1,54 @@
+spring:
+  application:
+    name: innbucks-middleware
+  profiles:
+    active: test
+
+innbucks:
+  country: KE
+  core:
+    provider: fineract
+  auth:
+    signing-key: test-jwt-signing-key-that-is-at-least-32-bytes-long-for-hs256
+    # Deliberately distinct from signing-key — ProductionSecretsGuard enforces
+    # inequality in EVERY environment, tests included.
+    verification-signing-key: test-verification-signing-key-at-least-32-bytes-long
+    national-id-hmac-key: test-national-id-hmac-key-at-least-32-bytes-long
+    audience: innbucks-mobile-test
+    access-token-ttl: 10m
+    refresh-token-ttl: 7d
+    brute-force:
+      max-failed-attempts-before-lock: 5
+      lock-duration: 1h
+      backoff-base: 1s
+  audit:
+    hmac-secret: test-audit-hmac-secret-that-is-at-least-32-bytes-long
+  cors:
+    allowed-origins:
+      - http://localhost:3000
+  idempotency:
+    ttl: 1h
+  otp:
+    ttl: 5m
+    max-attempts: 5
+    verification-token-ttl: 5m
+    hmac-secret: test-otp-hmac-secret-that-is-at-least-32-bytes-long
+    fixed-code: ""
+  rate-limit:
+    # Disabled in tests so repeated auth calls within one test don't trip
+    # limits. RateLimiterServiceTest / AuthRateLimitFilterTest build the limiter
+    # directly with enabled=true to exercise the real behaviour.
+    enabled: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  tracing:
+    sampling:
+      probability: 1.0
+
+logging:
+  level:
+    zw.co.innbucks.middleware: WARN

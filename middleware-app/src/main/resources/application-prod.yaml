@@ -1,0 +1,26 @@
+spring:
+  flyway:
+    # Prod must NOT auto-baseline an unrecognised schema. A runbook accident
+    # (drop + recreate, restore from a wrong backup, etc.) would otherwise be
+    # silently accepted as the baseline and every later migration marked
+    # applied without running. Dev keeps the lenient default in application.yaml.
+    baseline-on-migrate: false
+
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false
+
+management:
+  tracing:
+    sampling:
+      probability: ${TRACING_SAMPLE_RATE:0.1}
+
+logging:
+  structured:
+    format:
+      console: ecs
+  level:
+    root: WARN
+    zw.co.innbucks.middleware: INFO

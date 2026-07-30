@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>zw.co.innbucks</groupId>
+        <artifactId>innbucks-middleware</artifactId>
+        <version>0.0.1-SNAPSHOT</version>
+    </parent>
+    <artifactId>middleware-adapter-fineract</artifactId>
+    <name>middleware-adapter-fineract</name>
+    <description>CoreBankingPort adapter for Apache Fineract (v1 REST API, Basic auth, Fineract-Platform-TenantId, Idempotency-Key propagation). Skeleton — the client lands in the next slice with its WireMock contract tests.</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>zw.co.innbucks</groupId>
+            <artifactId>middleware-corebanking-api</artifactId>
+        </dependency>
+    </dependencies>
+</project>
