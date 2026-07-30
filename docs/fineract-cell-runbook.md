@@ -110,24 +110,37 @@ laptop: `ssh -L 8443:127.0.0.1:8443 <box>`.
 ## 4. Provision the tenant
 
 ```sh
+cd deploy/fineract
 export ADMIN_PASSWORD=password                  # the stock default…
-export ROTATE_ADMIN_PASSWORD="$(openssl rand -base64 24)"   # …rotated first thing
-export MW_READ_PASSWORD="$(openssl rand -base64 24)"
-export MW_WRITE_PASSWORD="$(openssl rand -base64 24)"
-export CELL_CURRENCY=KES
+export ROTATE_ADMIN_PASSWORD="$(./provision-cell.sh --gen-password)"   # …rotated first thing
+export MW_READ_PASSWORD="$(./provision-cell.sh --gen-password)"
+export MW_WRITE_PASSWORD="$(./provision-cell.sh --gen-password)"
+export CELL_CURRENCY=USD
 export CURL_OPTS="--cacert ssl/cell-ca.crt"
 RUN_SMOKE=1 ./provision-cell.sh
 ```
 
-The script is idempotent (re-run safely). It waits for Fineract, rotates the
-admin password, allows the cell currency, creates the zero-interest wallet
-savings product, creates the two least-privilege roles + AppUsers (verifying
-every permission code exists on this build first — never `ALL_FUNCTIONS`),
-and with `RUN_SMOKE=1` drives the adapter's exact call sequence (client →
-wallet create/approve/activate → deposit → read-back by external id) using
-the new middleware credentials. It prints the values the middleware's `.env`
-needs. **Store the rotated admin password in your password manager** — it is
-the break-glass credential for this cell.
+Use `--gen-password`, not `openssl rand -base64 24`: Fineract's active
+`strong` policy forbids **consecutive repeated characters**, which base64
+output violates about 40% of the time. The script also pre-checks all three
+passwords against the cell's active policy before its first write, so a bad
+one fails immediately instead of half-way through the run.
+
+The script is idempotent (re-run safely, including after the admin password
+has already been rotated — it detects that and skips step 2). It waits for
+Fineract, rotates the admin password, allows the cell currency, creates the
+zero-interest wallet savings product, creates the two least-privilege roles +
+AppUsers (verifying every permission code exists on this build first — never
+`ALL_FUNCTIONS`), and with `RUN_SMOKE=1` drives the adapter's exact call
+sequence (client → wallet create/approve/activate → deposit → read-back by
+external id) using the new middleware credentials. It prints the values the
+middleware's `.env` needs. **Store the rotated admin password in your
+password manager** — it is the break-glass credential for this cell.
+
+If step 1 reports that Fineract rejected the credentials, that is a password
+problem and waiting will not fix it — on a re-run, `ADMIN_PASSWORD` must be
+the value you rotated *to* (or leave `ROTATE_ADMIN_PASSWORD` exported at that
+same value and the script will work it out).
 
 ## 5. Wire and start the middleware
 
