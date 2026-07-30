@@ -192,16 +192,19 @@ fi
 TODAY_UTC=$(date -u +%Y-%m-%d)
 TODAY_NUM=$(date -u +%Y%m%d)
 
-# TRI-STATE on purpose. An earlier version collapsed "could not read the flag"
-# into "disabled" and cheerfully reported the feature off on the very cell it
-# was written for — the flag is genuinely hard to read over the API here
-# (/v1/configurations/name/{name} omits name/enabled, and the list endpoint has
-# been observed returning no match), so an unreadable flag must stay UNKNOWN
-# and be treated as dangerous, not as good news.
+# The key is KEBAB-case: migration 0149_update_global_configuration_names
+# renamed every global-configuration key (UPDATE c_configuration SET name =
+# REPLACE(REPLACE(LOWER(name), '_', '-'), ' ', '-')). Querying the old
+# enable_business_date matches nothing and reads exactly like "the feature is
+# off" — which cost a full debugging round. Both spellings are accepted so a
+# cell predating 0149 still resolves.
+#
+# TRI-STATE on purpose: an earlier version collapsed "could not read the flag"
+# into "disabled" and waved through the very cell it was written for. An
+# unreadable flag stays UNKNOWN and is treated as dangerous, not as good news.
 BD_FLAG=$(api GET "/v1/configurations" 2>/dev/null | jq -r '
-  if ([.. | objects | select(.name? == "enable_business_date")] | length) > 0
-  then ([.. | objects | select(.name? == "enable_business_date")] | .[0].enabled | tostring)
-  else "unknown" end' || printf 'unknown')
+  [.. | objects | select(.name? == "enable-business-date" or .name? == "enable_business_date")] as $c
+  | if ($c | length) > 0 then ($c[0].enabled | tostring) else "unknown" end' || printf 'unknown')
 
 # The business-date rows read reliably (LocalDate serializes as [yyyy,m,d] via
 # @JsonLocalDateArrayFormat; both shapes normalised to a comparable integer).
@@ -217,17 +220,17 @@ if [[ -n "$BD_NUM" && "$BD_NUM" != null ]] && (( BD_NUM < TODAY_NUM )); then
       ;;
     *)
       [[ "$BD_FLAG" == unknown ]] \
-        && WHY="could not read enable_business_date over the API, so this is treated as ON" \
-        || WHY="enable_business_date is ON"
+        && WHY="could not read enable-business-date over the API, so this is treated as ON" \
+        || WHY="enable-business-date is ON"
       fail "Fineract's BUSINESS_DATE is ${BD_NUM} but today (UTC) is ${TODAY_NUM}, and ${WHY}.
        Every write dated today is rejected as 'in the future' until this is fixed.
        Confirm the flag against the database (the API reads unreliably here):
          ${BD_SQL} \\
-           -c \"SELECT id, name, enabled FROM c_configuration WHERE name = 'enable_business_date';\"
+           -c \"SELECT id, name, enabled FROM c_configuration WHERE name = 'enable-business-date';\"
        For a savings-only wallet cell the fix is to turn the feature OFF — Fineract
        then uses the tenant's own date and nothing has to advance it daily:
          ${BD_SQL} \\
-           -c \"UPDATE c_configuration SET enabled = false WHERE name = 'enable_business_date';\"
+           -c \"UPDATE c_configuration SET enabled = false WHERE name = 'enable-business-date';\"
          docker compose restart fineract
        The restart is REQUIRED: the flag is cached (@Cacheable(\"configByName\")) and
        only evicted on the API update path, so a direct SQL write is invisible until
@@ -241,7 +244,7 @@ if [[ -n "$BD_NUM" && "$BD_NUM" != null ]] && (( BD_NUM < TODAY_NUM )); then
       ;;
   esac
 elif [[ "$BD_FLAG" == unknown ]]; then
-  log "could not read enable_business_date over the API; BUSINESS_DATE row looks current."
+  log "could not read enable-business-date over the API; BUSINESS_DATE row looks current."
 else
   log "business date: feature=${BD_FLAG}, row current."
 fi
