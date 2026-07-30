@@ -60,6 +60,18 @@ innbucks:
     allowed-origins: ${CORS_ALLOWED_ORIGINS:}
   idempotency:
     ttl: ${IDEMPOTENCY_TTL:24h}
+  ledger:
+    # How often the reconciler sweeps (fixed-delay). Stale PENDING rows are
+    # parked as UNKNOWN after stale-pending-threshold; parked/in-flight rows
+    # are polled against the core with exponential backoff (base doubling per
+    # attempt up to cap); UNKNOWN rows older than parked-alert-threshold
+    # trip the operator alarm (innbucks.ledger.parked_overdue) every sweep.
+    reconcile-interval: ${LEDGER_RECONCILE_INTERVAL:PT1M}
+    stale-pending-threshold: ${LEDGER_STALE_PENDING_THRESHOLD:PT5M}
+    batch-size: ${LEDGER_BATCH_SIZE:100}
+    reconcile-backoff-base: ${LEDGER_RECONCILE_BACKOFF_BASE:PT1M}
+    reconcile-backoff-cap: ${LEDGER_RECONCILE_BACKOFF_CAP:PT30M}
+    parked-alert-threshold: ${LEDGER_PARKED_ALERT_THRESHOLD:PT1H}
   otp:
     ttl: ${OTP_TTL:5m}
     max-attempts: ${OTP_MAX_ATTEMPTS:5}

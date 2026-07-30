@@ -22,7 +22,11 @@ public enum AuditAction {
     TRANSFER_DEPOSIT_SUCCESS,
     TRANSFER_DEPOSIT_FAILURE,
     WITHDRAWAL_SUCCESS,
-    WITHDRAWAL_FAILURE;
+    WITHDRAWAL_FAILURE,
+    // Ledger lifecycle (money-significant transitions sealed by LedgerService).
+    TXN_COMPLETED,
+    TXN_FAILED,
+    TXN_UNKNOWN;
 
     public String dbValue() {
         return name().toLowerCase();
