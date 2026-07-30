@@ -50,7 +50,7 @@
         <!-- WireMock standalone (shaded jar) for adapter contract tests — the
              self-contained classifier keeps its Jetty/Jackson from fighting the
              project's versions. -->
-        <wiremock.version>3.10.0</wiremock.version>
+        <wiremock.version>3.13.2</wiremock.version>
     </properties>
 
     <dependencyManagement>
