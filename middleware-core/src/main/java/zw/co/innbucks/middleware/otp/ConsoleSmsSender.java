@@ -4,10 +4,10 @@ import lombok.extern.slf4j.Slf4j;
 import zw.co.innbucks.middleware.common.msisdn.MsisdnMasking;
 
 /**
- * Stub SMS sender — the fallback {@link SmsSender} until a real provider
- * adapter (Africa's Talking / Twilio / Safaricom Bulk SMS) lands. Registered
- * by {@link OtpConfig} via {@code @ConditionalOnMissingBean}, so dropping in a
- * real adapter needs nothing more than a {@code @Component} on the new class.
+ * Stub SMS sender — the no-network {@link SmsSender} for dev/UAT. Selected by
+ * {@code notify/NotificationConfig} when {@code innbucks.notify.provider} is
+ * {@code console}; the real provider is the InnBucks notification gateway
+ * ({@code innbucks-gateway}), which is the go-live requirement.
  *
  * <p>It deliberately does <strong>not</strong> log the message body. The body
  * carries the OTP code (and for other purposes may carry other secrets), so

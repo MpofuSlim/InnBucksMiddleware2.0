@@ -18,7 +18,9 @@ public class VerificationTokenInvalidException extends RuntimeException {
         WRONG_ISSUER,
         EXPIRED,
         PURPOSE_MISMATCH,
-        REPLAYED
+        REPLAYED,
+        /** STEP_UP token presented for a different transaction than it approves. */
+        TXN_MISMATCH
     }
 
     private final Reason reason;

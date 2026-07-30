@@ -61,12 +61,23 @@ Build: `./mvnw verify` at the root. Run locally:
 
 ## Auth model
 
-* **Inbound (mobile → middleware)**: customer-facing JWT, HS256 today
-  (`JWT_SIGNING_KEY`), RS256-with-`kid` migration is a planned slice.
-  Issued by `POST /auth/login` (MSISDN + Argon2id PIN → 10-min access +
-  30-day rotating opaque refresh, family revocation on replay).
+* **Inbound (mobile → middleware)**: customer-facing JWT, HS256 by default
+  (`JWT_SIGNING_KEY`); RS256-with-`kid` minting + dual-verify decoder are
+  SHIPPED behind `JWT_SIGNING_ALG`/`JWT_PRIVATE_KEY`/`JWT_PUBLIC_KEY`
+  (slice 5 — flip in the staged order in `.env.example`). Issued by
+  `POST /auth/login` (MSISDN + Argon2id PIN → 10-min access + 30-day
+  rotating opaque refresh, family revocation on replay AND on device
+  mismatch — the refresh token only rotates on the device it was issued to).
   `sub` = customer UUID; claims: `country`, `kyc_tier`, `scopes`, `did`,
-  `nid_hash`, `auth_time`.
+  `nid_hash`, `auth_time`. High-value withdrawals/transfers additionally
+  need a step-up SMS approval bound to the exact transaction
+  (`X-Step-Up-Token`; `innbucks.stepup.*`).
+* **SMS/notifications ride the InnBucks notification gateway**
+  (`NOTIFY_PROVIDER=innbucks-gateway` + `NOTIFY_API_*` — same platform
+  gateway as the ticketing fleet; email surface pinned for later), with an
+  optional WhatsApp fallback channel (`WHATSAPP_FALLBACK_ENABLED` +
+  `WHATSAPP_GATEWAY_URL`/`WHATSAPP_API_KEY`). The `console` provider is a
+  dev/UAT stub only — deployment profiles scream at boot on it.
 * **Verification/step-up tokens are signed with a SEPARATE key**
   (`VERIFICATION_SIGNING_KEY`). Equal keys = access-token minter can mint
   PIN-reset tokens (account takeover); `ProductionSecretsGuard` refuses to
@@ -256,7 +267,6 @@ Build: `./mvnw verify` at the root. Run locally:
    Contract pinned by `RegisterFlowIntegrationTest` +
    `TransactionFlowIntegrationTest` (stub port, real Postgres).
 
-Next (in order):
 4. **Fineract cell hardening — code half DONE; ops half is the runbook.**
    The fork (`MpofuSlim/fineract`) carries the `Release InnBucks cell image`
    workflow: pushing an immutable `innbucks-cell-N` tag builds via Jib,
@@ -274,13 +284,76 @@ Next (in order):
    for standing up/upgrading a cell (incl. the internal-CA TLS recipe and
    the middleware truststore wiring; `deploy/fineract/ssl/` is gitignored).
    Remaining is purely operator work on the box: run the runbook.
-5. **Auth completion** — device-binding enforcement at refresh rotation,
-   step-up OTP with `txn_fp`-bound tokens + per-tier thresholds, Africa's
-   Talking SMS adapter (go-live gate; alert on delivery failures), RS256
-   minting with `kid`.
+5. **Auth completion — DONE.** Four pieces, plus the WhatsApp fallback:
+   - **SMS via the InnBucks notification gateway** (platform decision: the
+     SAME gateway the ticketing fleet sends through — NOT Africa's Talking).
+     `notify/` package: `NotificationGatewayClient` ported from ticketing's
+     proven client (`POST /auth/third-party` → cached bearer until JWT `exp`
+     −30s, `X-Api-Key` on every call, one forced refresh-and-replay on 401,
+     SMS body `{message, reference, destinationMsisdn}` with auto
+     `IBMW-SMS-<uuid>` refs, `SmsTextSanitizer` GSM whitelist on the SMS
+     path, EMAIL surface (`{subject, message, reference, destinationEmail}`,
+     subject-only sanitised) pinned now for later use; never logs
+     bodies/MSISDNs; HTTP/1.1 pinned for wire parity with ticketing).
+     Selection is ONE explicit switch — `innbucks.notify.provider`
+     (`console` | `innbucks-gateway`) in `NotificationConfig`, NOT
+     `@ConditionalOnMissingBean` (bean-order roulette). Gateway mode makes
+     the four `NOTIFY_API_*` values boot-required; console mode under a
+     deployment profile logs a page-worthy ERROR (UAT-legal, go-live
+     blocker). Delivery failure rolls back the OTP tx (no challenge row
+     without a dispatched SMS) → 503 `sms_delivery_failed`. Metric:
+     `innbucks.sms.sent{outcome=success|whatsapp_fallback|failure}` — alert
+     on failures, treat rising fallback as an SMS-provider incident.
+   - **WhatsApp fallback** (`WHATSAPP_FALLBACK_ENABLED` + gateway URL/key):
+     when the SMS gateway rejects/times out, the ORIGINAL body (no GSM
+     transliteration — WhatsApp renders Unicode) rides the external WhatsApp
+     gateway (`POST /api/messages/custom-notification`, lowercase
+     `x-api-key`, 1600-char cap — same wire shape as ticketing's client).
+     Delivery fails only when every configured channel fails.
+   - **Device binding at refresh rotation**: the stored `device_hash` must
+     equal the presented one (constant-time; null stored = mismatch, fail
+     closed). Mismatch = theft signal → whole family revoked + audit
+     `REFRESH_DEVICE_MISMATCH`, surfaced as the GENERIC `refresh_invalid`
+     401 (no oracle for the attacker).
+   - **Step-up OTP on high-value movement**: withdraw/transfer at/above the
+     caller's KYC-tier threshold (`innbucks.stepup.thresholds.*`, MINOR
+     units) 403s `step_up_required` + a server-computed `txnFp`
+     (SHA-256 over customerId‖type‖from‖to‖amount‖currency, 0x1F-joined —
+     customer id inside means cross-customer replay is impossible).
+     AUTHENTICATED `/auth/step-up/request|verify` send the OTP to the
+     LOGGED-IN customer's registered MSISDN and mint a verification token
+     with purpose `STEP_UP` + `txn_fp` claim; the movement accepts it only
+     on fingerprint match (constant-time) and consumes the `jti`
+     (single-use, same `consumed_verification_token` store as PIN flows) —
+     all BEFORE the idempotency claim, so refusal leaves zero state. The
+     public `/auth/otp/*` endpoints REJECT purpose STEP_UP (else an
+     unauthenticated caller could SMS approval codes to arbitrary numbers /
+     mint unbound tokens). Deposits never step up. Crash-retry caveat
+     (accepted): a same-key retry of an executed movement needs one fresh
+     approval — the alternative (not consuming) lets a captured token
+     re-fire the transfer with fresh keys for its whole TTL.
+   - **RS256 minting with `kid`, staged like ticketing's migration**:
+     `JWT_SIGNING_ALG` (HS256 default) + optional `JWT_PRIVATE_KEY` /
+     `JWT_PUBLIC_KEY` / `JWT_KEY_ID` (PEM, `\n`-escape tolerant via
+     `PemKeys`). The decoder selects the verification key by the TOKEN'S own
+     `alg` header (RS256 → public key, HS256 → secret; anything else
+     rejected). Order: (1) `JWT_PUBLIC_KEY` everywhere + roll, (2) flip
+     minting, (3) ≥ max TTL later retire the HS256 secret. Misconfig fails
+     at boot, never per-request. Verification tokens stay HS256 on their own
+     separate key.
+   Contract pinned by `NotificationGatewayClientContractTest`,
+   `WhatsAppFallbackContractTest`, `JwtIssuerRs256Test`,
+   `StepUpFlowIntegrationTest`, and the device-mismatch case in
+   `LoginFlowIntegrationTest`.
+
+Next (in order):
 6. **Veengu adapter** behind the same port (`V-Tenant`/`V-Access-Token`
-   headers, consent-then-execute saga, REVERSAL capability). Specs pinned in
-   ticketing-system `docs/api/veengu-*.json`.
+   headers, consent-then-execute saga, REVERSAL capability).
+   **ON HOLD until the full Veengu API spec is in hand (owner's call,
+   2026-07-30)** — do NOT start it from the older specs pinned in
+   ticketing-system `docs/api/veengu-*.json`; when the full spec arrives,
+   pin it in THIS repo under `docs/api/` and model the adapter against
+   that (same trim-aggressively rule as the Fineract DTOs).
 
 Deferred (documented, not forgotten): KMS/Secrets Manager custody + rotation
 runbook; per-customer namespacing of inbound Idempotency-Keys

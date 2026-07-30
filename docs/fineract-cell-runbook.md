@@ -126,8 +126,12 @@ docker compose up -d
 End-to-end smoke, through the middleware:
 
 1. `POST /register` (Idempotency-Key header) → 201 with the wallet id.
-2. OTP: **until the SMS adapter lands (slice 5), codes only appear in the
-   middleware logs** (`ConsoleSmsSender`) — fine for UAT, a go-live blocker.
+2. OTP: with `NOTIFY_PROVIDER=innbucks-gateway` (+ the four `NOTIFY_API_*`
+   values from the platform team) the code arrives by real SMS — optionally
+   with `WHATSAPP_FALLBACK_ENABLED=true` (+ `WHATSAPP_*`) as the fallback
+   channel. On the `console` default, codes only appear in the middleware
+   logs — fine for UAT, and the app logs a page-worthy ERROR at boot to stop
+   that reaching go-live.
 3. `POST /auth/pin/set` → `POST /auth/login` → Bearer token.
 4. `GET /me/accounts` → the wallet with balance 0.
 5. `POST /transactions/deposit` then `/transfer` — watch

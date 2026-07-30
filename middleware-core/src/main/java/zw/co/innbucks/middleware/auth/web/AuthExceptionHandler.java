@@ -16,6 +16,7 @@ import zw.co.innbucks.middleware.auth.exception.PinSetNotAllowedException;
 import zw.co.innbucks.middleware.auth.exception.RefreshTokenInvalidException;
 import zw.co.innbucks.middleware.auth.exception.RefreshTokenReplayException;
 import zw.co.innbucks.middleware.common.msisdn.InvalidMsisdnException;
+import zw.co.innbucks.middleware.notify.NotificationDeliveryException;
 import zw.co.innbucks.middleware.otp.VerificationTokenInvalidException;
 import zw.co.innbucks.middleware.ratelimit.RateLimitExceededException;
 
@@ -48,10 +49,12 @@ public class AuthExceptionHandler {
             case MALFORMED, BAD_SIGNATURE, WRONG_AUDIENCE, WRONG_ISSUER, REPLAYED -> "verification_token_invalid";
             case EXPIRED -> "verification_token_expired";
             case PURPOSE_MISMATCH -> "verification_token_purpose_mismatch";
+            case TXN_MISMATCH -> "verification_token_txn_mismatch";
         };
         String detail = switch (ex.getReason()) {
             case EXPIRED -> "Your verification session has expired. Please request a new code.";
             case PURPOSE_MISMATCH -> "That verification doesn't match this action. Please start over.";
+            case TXN_MISMATCH -> "That approval doesn't match this transaction. Please approve it again.";
             case MALFORMED, BAD_SIGNATURE, WRONG_AUDIENCE, WRONG_ISSUER, REPLAYED ->
                     "We couldn't verify your session. Please request a new code and try again.";
         };
@@ -137,6 +140,22 @@ public class AuthExceptionHandler {
         HttpHeaders headers = new HttpHeaders();
         headers.set(HttpHeaders.RETRY_AFTER, Long.toString(ex.getRetryAfterSeconds()));
         return new ResponseEntity<>(problem, headers, HttpStatus.TOO_MANY_REQUESTS);
+    }
+
+    @ExceptionHandler(NotificationDeliveryException.class)
+    public ResponseEntity<ProblemDetail> smsDeliveryFailed(NotificationDeliveryException ex) {
+        // The SMS gateway rejected the send or was unreachable. The OTP tx has
+        // rolled back (no challenge row without a dispatched SMS), so a retry
+        // is safe and starts clean. 503 is honest AND enumeration-safe: the
+        // failure is provider-wide, not account-shaped. Never echo ex.getMessage()
+        // to the caller — it can carry upstream detail; it's already logged.
+        log.warn("SMS delivery failed: {}", ex.getMessage());
+        ProblemDetail problem = ProblemDetail.forStatus(HttpStatus.SERVICE_UNAVAILABLE);
+        problem.setType(PROBLEM_TYPE);
+        problem.setTitle("We couldn't send the SMS");
+        problem.setDetail("We couldn't send you a text message right now. Please try again in a few minutes.");
+        problem.setProperty("errorCode", "sms_delivery_failed");
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(problem);
     }
 
     @ExceptionHandler(RefreshTokenInvalidException.class)

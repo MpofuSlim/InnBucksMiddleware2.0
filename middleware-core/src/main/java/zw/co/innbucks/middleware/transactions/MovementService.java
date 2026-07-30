@@ -23,6 +23,7 @@ import zw.co.innbucks.middleware.ledger.LedgerTransactionRepository;
 import zw.co.innbucks.middleware.ledger.LedgerTransactionType;
 import zw.co.innbucks.middleware.ledger.LedgeredMovementExecutor;
 import zw.co.innbucks.middleware.me.ProfileNotFoundException;
+import zw.co.innbucks.middleware.stepup.StepUpService;
 import zw.co.innbucks.middleware.transactions.MovementRequests.DepositRequest;
 import zw.co.innbucks.middleware.transactions.MovementRequests.TransferRequest;
 import zw.co.innbucks.middleware.transactions.MovementRequests.WithdrawRequest;
@@ -40,6 +41,10 @@ import java.util.UUID;
  *       against the core's own account list BEFORE anything is claimed or
  *       written. The middleware's write credential can move anyone's money;
  *       this check is the containment.</li>
+ *   <li><b>Step-up (withdraw/transfer):</b> at or above the caller's KYC-tier
+ *       threshold, the movement needs a fresh OTP-backed approval bound to
+ *       exactly this transaction ({@link StepUpService}) — checked BEFORE the
+ *       idempotency claim so a refused movement leaves no state.</li>
  *   <li><b>Idempotency:</b> the caller's key is namespaced per customer
  *       (nobody can collide with or replay another customer's key) and
  *       claim-locked — concurrent duplicates can never double-execute.</li>
@@ -63,6 +68,7 @@ public class MovementService {
     private final IdempotencyService idempotencyService;
     private final LedgeredMovementExecutor executor;
     private final LedgerTransactionRepository ledgerRepository;
+    private final StepUpService stepUpService;
 
     public IdempotencyService.Result<TransactionResponse> deposit(UUID customerId, String rawKey,
                                                                   DepositRequest request) {
@@ -83,9 +89,11 @@ public class MovementService {
     }
 
     public IdempotencyService.Result<TransactionResponse> withdraw(UUID customerId, String rawKey,
-                                                                   WithdrawRequest request) {
+                                                                   WithdrawRequest request, String stepUpToken) {
         Customer customer = requireMappedCustomer(customerId);
         requireOwnership(customer, request.accountId());
+        stepUpService.enforce(customerId, customer.kycTierEnum(), LedgerTransactionType.WITHDRAWAL,
+                request.accountId(), null, request.amountMinor(), request.currency(), stepUpToken);
         String key = IdempotencyKeys.namespaced(customerId.toString(), rawKey);
         return idempotencyService.execute(key, "POST", "/transactions/withdraw", request,
                 TransactionResponse.class, () -> run(key, new LedgerDraft(
@@ -101,11 +109,14 @@ public class MovementService {
     }
 
     public IdempotencyService.Result<TransactionResponse> transfer(UUID customerId, String rawKey,
-                                                                   TransferRequest request) {
+                                                                   TransferRequest request, String stepUpToken) {
         Customer customer = requireMappedCustomer(customerId);
         // Only the SOURCE must be the caller's — the destination may be any
         // account in the cell (that's what a transfer is).
         requireOwnership(customer, request.fromAccountId());
+        stepUpService.enforce(customerId, customer.kycTierEnum(), LedgerTransactionType.TRANSFER,
+                request.fromAccountId(), request.toAccountId(), request.amountMinor(),
+                request.currency(), stepUpToken);
         String key = IdempotencyKeys.namespaced(customerId.toString(), rawKey);
         return idempotencyService.execute(key, "POST", "/transactions/transfer", request,
                 TransactionResponse.class, () -> run(key, new LedgerDraft(

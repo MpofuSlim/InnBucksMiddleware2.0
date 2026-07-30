@@ -76,6 +76,33 @@ services:
       AUDIT_HMAC_SECRET: ${AUDIT_HMAC_SECRET:?set AUDIT_HMAC_SECRET in .env}
       JWT_AUDIENCE: ${JWT_AUDIENCE:-innbucks-mobile}
 
+      # JWT RS256 migration (optional; defaults keep HS256). Flip in the
+      # staged order documented in .env.example.
+      JWT_SIGNING_ALG: ${JWT_SIGNING_ALG:-HS256}
+      JWT_PRIVATE_KEY: ${JWT_PRIVATE_KEY:-}
+      JWT_PUBLIC_KEY: ${JWT_PUBLIC_KEY:-}
+      JWT_KEY_ID: ${JWT_KEY_ID:-}
+
+      # SMS delivery. A deployment cell MUST run the InnBucks notification
+      # gateway — the console default only exists so a fresh cell can boot
+      # for UAT before the platform team hands over credentials (the app
+      # logs a page-worthy ERROR when it does).
+      NOTIFY_PROVIDER: ${NOTIFY_PROVIDER:-console}
+      NOTIFY_API_URL: ${NOTIFY_API_URL:-}
+      NOTIFY_API_KEY: ${NOTIFY_API_KEY:-}
+      NOTIFY_API_USERNAME: ${NOTIFY_API_USERNAME:-}
+      NOTIFY_API_PASSWORD: ${NOTIFY_API_PASSWORD:-}
+      # Optional WhatsApp fallback channel for failed SMS sends.
+      WHATSAPP_FALLBACK_ENABLED: ${WHATSAPP_FALLBACK_ENABLED:-false}
+      WHATSAPP_GATEWAY_URL: ${WHATSAPP_GATEWAY_URL:-}
+      WHATSAPP_API_KEY: ${WHATSAPP_API_KEY:-}
+
+      # Step-up thresholds (minor units of FINERACT_CURRENCY).
+      STEPUP_ENABLED: ${STEPUP_ENABLED:-true}
+      STEPUP_THRESHOLD_BASIC: ${STEPUP_THRESHOLD_BASIC:-50000}
+      STEPUP_THRESHOLD_STANDARD: ${STEPUP_THRESHOLD_STANDARD:-200000}
+      STEPUP_THRESHOLD_ENHANCED: ${STEPUP_THRESHOLD_ENHANCED:-1000000}
+
       # CORS — set to the FE origin in prod.
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
 

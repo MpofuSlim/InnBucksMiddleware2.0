@@ -37,7 +37,31 @@ public record AuthProperties(
         Duration refreshTokenTtl,
 
         @NotNull
-        BruteForce bruteForce
+        BruteForce bruteForce,
+
+        /**
+         * Access-token signing algorithm: HS256 (default, the shared-secret
+         * status quo) or RS256. The RS256 migration is staged like the
+         * ticketing fleet's: (1) provision {@code publicKey} everywhere and
+         * roll — verifiers then accept both algorithms; (2) flip this to
+         * RS256 (+ {@code privateKey}) and roll — minting changes and the
+         * security win lands (a leaked verifier key can no longer MINT);
+         * (3) after max token TTL, retire the HS256 secret.
+         */
+        String signingAlgorithm,
+
+        /** PEM PKCS#8 RSA private key ("BEGIN PRIVATE KEY"). Required iff signingAlgorithm=RS256. */
+        String privateKey,
+
+        /**
+         * PEM X.509 RSA public key ("BEGIN PUBLIC KEY"). Optional: when set,
+         * the decoder accepts RS256 tokens (selected by the token's own alg
+         * header) alongside HS256. Without it, RS256 tokens are rejected.
+         */
+        String publicKey,
+
+        /** Optional key id stamped into the RS256 JWS header ({@code kid}) for future rotation. */
+        String keyId
 ) {
 
     public record BruteForce(

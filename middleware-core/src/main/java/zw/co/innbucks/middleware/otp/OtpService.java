@@ -20,6 +20,7 @@ import java.security.SecureRandom;
 import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -138,6 +139,16 @@ public class OtpService {
      */
     @Transactional(noRollbackFor = OtpVerificationException.class)
     public VerificationToken verify(String rawMsisdn, OtpPurpose purpose, String code) {
+        return verify(rawMsisdn, purpose, code, Map.of());
+    }
+
+    /**
+     * Verify with extra claims stamped into the minted verification token —
+     * used by step-up to bind the token to one transaction fingerprint.
+     */
+    @Transactional(noRollbackFor = OtpVerificationException.class)
+    public VerificationToken verify(String rawMsisdn, OtpPurpose purpose, String code,
+                                    Map<String, Object> extraTokenClaims) {
         String msisdn = msisdnRegistry.forDeployment().normalize(rawMsisdn);
 
         Optional<ActiveChallenge> maybe = loadActive(msisdn, purpose);
@@ -168,7 +179,7 @@ public class OtpService {
 
         jdbcTemplate.update(MARK_CONSUMED_SQL, Timestamp.from(now), ch.id());
         auditService.record(AuditAction.OTP_VERIFIED, AuditOutcome.SUCCESS, null, null);
-        return verificationTokenIssuer.issue(msisdn, purpose);
+        return verificationTokenIssuer.issue(msisdn, purpose, extraTokenClaims);
     }
 
     /**
@@ -209,6 +220,7 @@ public class OtpService {
         return "Your Innbucks " + switch (purpose) {
             case PIN_SETUP -> "PIN setup";
             case PIN_RESET -> "PIN reset";
+            case STEP_UP -> "transaction approval";
         } + " code is " + code + ". Do not share it with anyone.";
     }
 

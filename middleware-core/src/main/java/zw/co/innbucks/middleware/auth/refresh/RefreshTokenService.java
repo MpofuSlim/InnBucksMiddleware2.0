@@ -60,7 +60,15 @@ public class RefreshTokenService {
         return persist(customerId, UUID.randomUUID(), deviceHash);
     }
 
-    @Transactional
+    /**
+     * The {@code noRollbackFor} is load-bearing: replay detection and device
+     * mismatch REVOKE THE WHOLE FAMILY and then throw so the caller 401s.
+     * Without it, Spring rolls the revocation back together with the throw and
+     * the family stays alive — the attacker's next attempt starts fresh. Same
+     * pattern as {@code OtpService.verify}'s attempts counter. (Audit rows are
+     * REQUIRES_NEW and were never at risk.)
+     */
+    @Transactional(noRollbackFor = {RefreshTokenInvalidException.class, RefreshTokenReplayException.class})
     public RefreshToken rotate(String presentedSecret, String deviceHash) {
         Optional<RefreshToken> maybe = repository.findByTokenHash(sha256HexLower(presentedSecret));
         if (maybe.isEmpty()) {
@@ -82,6 +90,29 @@ public class RefreshTokenService {
                     current.getCustomerId(),
                     deviceHash);
             throw new RefreshTokenReplayException();
+        }
+
+        // Device binding (auth slice 4): the refresh token only rotates on the
+        // device it was issued to. A mismatch means the opaque secret left that
+        // device — theft, not a retry — so the WHOLE family is revoked, same
+        // posture as replay detection. The response is the generic
+        // refresh_invalid 401 (via RefreshTokenInvalidException): an attacker
+        // probing with a stolen token learns nothing about WHY it died, while
+        // the legitimate app just routes to a fresh login. Constant-time
+        // compare; a NULL stored hash cannot occur (login always binds one)
+        // but is treated as a mismatch — fail closed, not open.
+        String storedDeviceHash = current.getDeviceHash();
+        if (storedDeviceHash == null || deviceHash == null
+                || !MessageDigest.isEqual(
+                        storedDeviceHash.getBytes(StandardCharsets.UTF_8),
+                        deviceHash.getBytes(StandardCharsets.UTF_8))) {
+            repository.revokeFamily(current.getFamilyId(), now, "device_mismatch");
+            auditService.record(
+                    AuditAction.REFRESH_DEVICE_MISMATCH,
+                    AuditOutcome.FAILURE,
+                    current.getCustomerId(),
+                    deviceHash);
+            throw new RefreshTokenInvalidException();
         }
 
         RefreshToken next = persist(current.getCustomerId(), current.getFamilyId(), deviceHash);

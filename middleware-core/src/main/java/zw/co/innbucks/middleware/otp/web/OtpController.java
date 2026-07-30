@@ -21,6 +21,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import zw.co.innbucks.middleware.auth.exception.MalformedRequestException;
 import zw.co.innbucks.middleware.common.msisdn.InvalidMsisdnException;
 import zw.co.innbucks.middleware.otp.OtpPurpose;
 import zw.co.innbucks.middleware.otp.OtpService;
@@ -54,6 +55,7 @@ public class OtpController {
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class)))
     })
     public ResponseEntity<Void> request(@Valid @RequestBody OtpRequestPayload payload) {
+        rejectStepUpPurpose(payload.purpose());
         try {
             otpService.request(payload.msisdn(), payload.purpose());
         } catch (InvalidMsisdnException ex) {
@@ -78,8 +80,22 @@ public class OtpController {
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class)))
     })
     public OtpVerifyResponse verify(@Valid @RequestBody OtpVerifyPayload payload) {
+        rejectStepUpPurpose(payload.purpose());
         VerificationToken token = otpService.verify(payload.msisdn(), payload.purpose(), payload.code());
         return new OtpVerifyResponse(token.token(), "Bearer", token.ttl().toSeconds(), payload.purpose());
+    }
+
+    /**
+     * STEP_UP is served ONLY by the authenticated /auth/step-up endpoints:
+     * there the OTP goes to the LOGGED-IN customer's registered MSISDN and the
+     * token gets its txn_fp binding. Accepting it here would let an
+     * unauthenticated caller SMS approval codes to arbitrary numbers and mint
+     * unbound STEP_UP tokens.
+     */
+    private static void rejectStepUpPurpose(OtpPurpose purpose) {
+        if (purpose == OtpPurpose.STEP_UP) {
+            throw new MalformedRequestException("purpose STEP_UP is not available on this endpoint");
+        }
     }
 
     @ExceptionHandler(OtpVerificationException.class)
