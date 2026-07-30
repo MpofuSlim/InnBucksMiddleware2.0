@@ -191,41 +191,59 @@ fi
 # rather than letting the operator debug it from the smoke step.
 TODAY_UTC=$(date -u +%Y-%m-%d)
 TODAY_NUM=$(date -u +%Y%m%d)
-# Read the flag off the LIST endpoint, not /configurations/name/{name}: the
-# by-name response does not carry `name`/`enabled` at the top level on this
-# build. Recursive descent means an added wrapper key cannot break this again,
-# and an unreadable/error body yields false — check skipped, never a crash.
-BD_ENABLED=$(api GET "/v1/configurations" 2>/dev/null \
-  | jq -r '[.. | objects | select(.name? == "enable_business_date")] | .[0].enabled // false' || printf 'false')
-if [[ "$BD_ENABLED" == "true" ]]; then
-  # LocalDate serializes as [yyyy,m,d] on this endpoint (@JsonLocalDateArrayFormat),
-  # so normalise either shape to a comparable yyyymmdd integer.
-  BD_NUM=$(api GET "/v1/businessdate/BUSINESS_DATE" 2>/dev/null \
-    | jq -r '.date as $d | if ($d|type) == "array" then ($d[0]*10000 + $d[1]*100 + $d[2])
-             else ($d | gsub("-"; "") | tonumber) end' || true)
-  if [[ -n "$BD_NUM" && "$BD_NUM" != null ]] && (( BD_NUM < TODAY_NUM )); then
-    fail "Fineract's logical BUSINESS DATE is ${BD_NUM}, but today (UTC) is ${TODAY_NUM}.
+
+# TRI-STATE on purpose. An earlier version collapsed "could not read the flag"
+# into "disabled" and cheerfully reported the feature off on the very cell it
+# was written for — the flag is genuinely hard to read over the API here
+# (/v1/configurations/name/{name} omits name/enabled, and the list endpoint has
+# been observed returning no match), so an unreadable flag must stay UNKNOWN
+# and be treated as dangerous, not as good news.
+BD_FLAG=$(api GET "/v1/configurations" 2>/dev/null | jq -r '
+  if ([.. | objects | select(.name? == "enable_business_date")] | length) > 0
+  then ([.. | objects | select(.name? == "enable_business_date")] | .[0].enabled | tostring)
+  else "unknown" end' || printf 'unknown')
+
+# The business-date rows read reliably (LocalDate serializes as [yyyy,m,d] via
+# @JsonLocalDateArrayFormat; both shapes normalised to a comparable integer).
+BD_NUM=$(api GET "/v1/businessdate" 2>/dev/null | jq -r '
+  [.. | objects | select(.type? == "BUSINESS_DATE")] | .[0].date // empty
+  | if type == "array" then (.[0]*10000 + .[1]*100 + .[2]) else (gsub("-"; "") | tonumber) end' || true)
+
+BD_SQL="docker compose exec -T fineract-db psql -U fineract -d ${TENANT_DB:-fineract_default}"
+if [[ -n "$BD_NUM" && "$BD_NUM" != null ]] && (( BD_NUM < TODAY_NUM )); then
+  case "$BD_FLAG" in
+    false)
+      log "business date row is stale (${BD_NUM}) but the feature reads as off — ignored."
+      ;;
+    *)
+      [[ "$BD_FLAG" == unknown ]] \
+        && WHY="could not read enable_business_date over the API, so this is treated as ON" \
+        || WHY="enable_business_date is ON"
+      fail "Fineract's BUSINESS_DATE is ${BD_NUM} but today (UTC) is ${TODAY_NUM}, and ${WHY}.
        Every write dated today is rejected as 'in the future' until this is fixed.
-       For a savings-only wallet cell the right fix is to turn the feature OFF, so
-       Fineract uses the tenant's real date and nothing has to advance it daily.
-       Resolve the id off the list endpoint and PUT by id (the by-name PUT is
-       thinner on this build):
-         ID=\$(curl -sS ${CURL_OPTS} -u '${ADMIN_USER}:<password>' \\
-           -H 'Fineract-Platform-TenantId: ${TENANT}' ${FINERACT_URL}/v1/configurations \\
-           | jq -r '[.. | objects | select(.name? == \"enable_business_date\")] | .[0].id')
-         curl -sS ${CURL_OPTS} -X PUT -u '${ADMIN_USER}:<password>' \\
-           -H 'Fineract-Platform-TenantId: ${TENANT}' -H 'Content-Type: application/json' \\
-           -d '{\"enabled\":false}' ${FINERACT_URL}/v1/configurations/\$ID
-       If this cell deliberately runs on business dates, advance it instead:
+       Confirm the flag against the database (the API reads unreliably here):
+         ${BD_SQL} \\
+           -c \"SELECT id, name, enabled FROM c_configuration WHERE name = 'enable_business_date';\"
+       For a savings-only wallet cell the fix is to turn the feature OFF — Fineract
+       then uses the tenant's own date and nothing has to advance it daily:
+         ${BD_SQL} \\
+           -c \"UPDATE c_configuration SET enabled = false WHERE name = 'enable_business_date';\"
+         docker compose restart fineract
+       The restart is REQUIRED: the flag is cached (@Cacheable(\"configByName\")) and
+       only evicted on the API update path, so a direct SQL write is invisible until
+       the process restarts.
+       If this cell deliberately runs on business dates, advance it instead — and make
+       sure something keeps advancing it, or this recurs tomorrow:
          curl -sS ${CURL_OPTS} -X POST -u '${ADMIN_USER}:<password>' \\
            -H 'Fineract-Platform-TenantId: ${TENANT}' -H 'Content-Type: application/json' \\
            -d '{\"type\":\"BUSINESS_DATE\",\"date\":\"${TODAY_UTC}\",\"locale\":\"en\",\"dateFormat\":\"yyyy-MM-dd\"}' \\
-           ${FINERACT_URL}/v1/businessdate
-       — and make sure something keeps advancing it, or this recurs tomorrow."
-  fi
-  log "logical business date is enabled and current."
+           ${FINERACT_URL}/v1/businessdate"
+      ;;
+  esac
+elif [[ "$BD_FLAG" == unknown ]]; then
+  log "could not read enable_business_date over the API; BUSINESS_DATE row looks current."
 else
-  log "logical business date is off — Fineract uses the tenant's own date."
+  log "business date: feature=${BD_FLAG}, row current."
 fi
 
 if [[ -n "${ROTATE_ADMIN_PASSWORD:-}" && "$ROTATION_DONE" == 0 ]]; then

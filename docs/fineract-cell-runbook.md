@@ -162,20 +162,33 @@ The middleware hits this too, not just the smoke: `FineractClient` stamps
 savings-only wallet cell, **turn the feature off** — Fineract then uses the
 tenant's own date and nothing has to advance it daily:
 
-```sh
-API=https://localhost:8443/fineract-provider/api
-AUTH=(-u "mifos:$ADMIN_PASSWORD" -H "Fineract-Platform-TenantId: default")
+**Do this against the database, not the API.** The global-configuration
+endpoints read unreliably on this build: `/v1/configurations/name/{name}`
+returns `name` and `enabled` as `null`, and the list endpoint has been observed
+returning no entry for `enable_business_date` at all — so an API-based check
+reports "off" when it simply failed to read, which is the worst possible answer.
 
-ID=$(curl -sS $CURL_OPTS "${AUTH[@]}" "$API/v1/configurations" \
-  | jq -r '[.. | objects | select(.name? == "enable_business_date")] | .[0].id')
-curl -sS $CURL_OPTS -X PUT "${AUTH[@]}" -H 'Content-Type: application/json' \
-  -d '{"enabled":false}' "$API/v1/configurations/$ID"
+```sh
+cd deploy/fineract
+docker compose exec -T fineract-db psql -U fineract -d fineract_default \
+  -c "SELECT id, name, enabled FROM c_configuration WHERE name = 'enable_business_date';"
+docker compose exec -T fineract-db psql -U fineract -d fineract_default \
+  -c "UPDATE c_configuration SET enabled = false WHERE name = 'enable_business_date';"
+docker compose restart fineract
 ```
 
-Resolve the id off the list endpoint rather than using
-`/v1/configurations/name/enable_business_date` — the by-name **GET** does not
-return `name`/`enabled` at the top level, so it reads as `null` and quietly
-misleads you into thinking the feature is off.
+The restart is **required**, not tidiness: the flag is cached
+(`@Cacheable("configByName")` in `GlobalConfigurationRepositoryWrapper`) and
+evicted only on the API update path, so a direct SQL write stays invisible
+until the process restarts. Safe once the tenant DB is migrated — do not do it
+while a first boot is still running migrations.
+
+Note this bypasses Fineract's command-audit trail (no `m_portfolio_command_source`
+row). Acceptable on a cell you are standing up; on a live cell, prefer the API
+if you can get it to answer.
+
+After the restart, `POST /v1/businessdate` starts refusing with
+"business date is not enabled" — that is expected, not a new fault.
 
 Keep it on only if the cell deliberately runs COB batch processing — in which
 case something must advance the date daily, or this recurs tomorrow.
