@@ -142,6 +142,52 @@ problem and waiting will not fix it — on a re-run, `ADMIN_PASSWORD` must be
 the value you rotated *to* (or leave `ROTATE_ADMIN_PASSWORD` exported at that
 same value and the script will work it out).
 
+### The logical business date (bites every cell restored from a dump)
+
+Fineract dates writes by its **logical business date**, not the wall clock,
+whenever the `enable_business_date` configuration is on. Nothing advances that
+date while the stack is down, so a cell restored from an older dump comes up
+with a stale one — and then *every* write dated today is rejected with
+
+```
+Activation date cannot be in the future.  {"parameterName":"activationDate","args":[{"value":"<today>"}]}
+```
+
+which names the date you **sent**, never the stale one it compared against.
+The middleware hits this too, not just the smoke: `FineractClient` stamps
+`activationDate`/`submittedOnDate`/`transactionDate` from the real clock, so
+`POST /register` and every deposit fail the same way.
+
+`provision-cell.sh` now checks this at startup and fails with the fix. For a
+savings-only wallet cell, **turn the feature off** — Fineract then uses the
+tenant's own date and nothing has to advance it daily:
+
+```sh
+curl -sS $CURL_OPTS -X PUT -u "mifos:$ADMIN_PASSWORD" \
+  -H "Fineract-Platform-TenantId: default" -H 'Content-Type: application/json' \
+  -d '{"enabled":false}' \
+  https://localhost:8443/fineract-provider/api/v1/configurations/name/enable_business_date
+```
+
+Keep it on only if the cell deliberately runs COB batch processing — in which
+case something must advance the date daily, or this recurs tomorrow.
+
+While you are there, check the tenant timezone, which the compose file can only
+set when it *creates* the tenant row — a restored `fineract_tenants` keeps
+whatever the old stack used (the upstream sample ships `Asia/Kolkata`):
+
+```sh
+docker compose exec -T fineract-db psql -U fineract -d fineract_tenants \
+  -c "SELECT identifier, timezone_id FROM tenants;"
+# expect UTC; if not:
+docker compose exec -T fineract-db psql -U fineract -d fineract_tenants \
+  -c "UPDATE tenants SET timezone_id='UTC' WHERE identifier='default';"
+docker compose restart fineract
+```
+
+A non-UTC tenant puts every Fineract-side date out of step with the
+middleware, which is UTC everywhere by construction.
+
 ## 5. Wire and start the middleware
 
 In the repo root: `.env` gets the `FINERACT_*` values the script printed plus

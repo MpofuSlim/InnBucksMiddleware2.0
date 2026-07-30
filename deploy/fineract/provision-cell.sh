@@ -158,8 +158,11 @@ log "Fineract is up."
 # Validate every password we are about to SET against the cell's active
 # policy, before the first write. Otherwise the run half-applies and dies on
 # a 400 whose body doesn't say which value was rejected.
+# GET /v1/passwordpreferences returns the ACTIVE policy as a single object
+# (retrieveActiveValidationPolicy), not a list — /template returns the list.
+# Tolerate both so a future shape change degrades to "skipped", not a jq error.
 POLICY_KEY=$(api GET "/v1/passwordpreferences" 2>/dev/null \
-  | jq -r 'map(select(.active==true)) | .[0].key // empty' || true)
+  | jq -r '(if type == "array" then (map(select(.active)) | .[0].key?) else .key end) // empty' || true)
 POLICY_RE=$(policy_regex "${POLICY_KEY:-}")
 if [[ -z "$POLICY_KEY" ]]; then
   log "  (could not read the active password policy — skipping the pre-check)"
@@ -178,6 +181,43 @@ else
          export ${var}=\"\$(./provision-cell.sh --gen-password)\""
   done
   log "passwords satisfy the '${POLICY_KEY}' policy."
+fi
+
+# Fineract stamps writes with its LOGICAL BUSINESS DATE, not the wall clock.
+# When that feature is on and its date is stale — the normal state of a cell
+# restored from an older dump, since nothing advanced it while the stack was
+# down — every write dated today is rejected as "in the future", and the error
+# names the date you SENT, never the one it compared against. Catch it here
+# rather than letting the operator debug it from the smoke step.
+TODAY_UTC=$(date -u +%Y-%m-%d)
+TODAY_NUM=$(date -u +%Y%m%d)
+BD_ENABLED=$(api GET "/v1/configurations/name/enable_business_date" 2>/dev/null \
+  | jq -r '.enabled // false' || printf 'unknown')
+if [[ "$BD_ENABLED" == "true" ]]; then
+  # LocalDate serializes as [yyyy,m,d] on this endpoint (@JsonLocalDateArrayFormat),
+  # so normalise either shape to a comparable yyyymmdd integer.
+  BD_NUM=$(api GET "/v1/businessdate/BUSINESS_DATE" 2>/dev/null \
+    | jq -r '.date as $d | if ($d|type) == "array" then ($d[0]*10000 + $d[1]*100 + $d[2])
+             else ($d | gsub("-"; "") | tonumber) end' || true)
+  if [[ -n "$BD_NUM" && "$BD_NUM" != null ]] && (( BD_NUM < TODAY_NUM )); then
+    fail "Fineract's logical BUSINESS DATE is ${BD_NUM}, but today (UTC) is ${TODAY_NUM}.
+       Every write dated today is rejected as 'in the future' until this is fixed.
+       For a savings-only wallet cell the right fix is to turn the feature OFF, so
+       Fineract uses the tenant's real date and nothing has to advance it daily:
+         curl -sS ${CURL_OPTS} -X PUT -u '${ADMIN_USER}:<password>' \\
+           -H 'Fineract-Platform-TenantId: ${TENANT}' -H 'Content-Type: application/json' \\
+           -d '{\"enabled\":false}' \\
+           ${FINERACT_URL}/v1/configurations/name/enable_business_date
+       If this cell deliberately runs on business dates, advance it instead:
+         curl -sS ${CURL_OPTS} -X POST -u '${ADMIN_USER}:<password>' \\
+           -H 'Fineract-Platform-TenantId: ${TENANT}' -H 'Content-Type: application/json' \\
+           -d '{\"type\":\"BUSINESS_DATE\",\"date\":\"${TODAY_UTC}\",\"locale\":\"en\",\"dateFormat\":\"yyyy-MM-dd\"}' \\
+           ${FINERACT_URL}/v1/businessdate
+       — and make sure something keeps advancing it, or this recurs tomorrow."
+  fi
+  log "logical business date is enabled and current."
+else
+  log "logical business date is off — Fineract uses the tenant's own date."
 fi
 
 if [[ -n "${ROTATE_ADMIN_PASSWORD:-}" && "$ROTATION_DONE" == 0 ]]; then
