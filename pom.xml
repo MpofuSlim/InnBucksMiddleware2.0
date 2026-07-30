@@ -42,7 +42,7 @@
         <!-- Bucket4j: token-bucket rate limiting on the public auth surface.
              Not managed by the Spring Boot BOM, so pin explicitly. -->
         <bucket4j.version>8.10.1</bucket4j.version>
-        <springdoc.version>3.0.2</springdoc.version>
+        <springdoc.version>3.0.3</springdoc.version>
         <!-- Resilience4j: circuit breaker + read-only retry around core-banking
              adapters. Core modules only — no Spring Boot starter, so the wiring
              is explicit and doesn't depend on Boot-4 auto-config. -->
