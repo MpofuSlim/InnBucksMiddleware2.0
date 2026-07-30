@@ -142,6 +142,49 @@ problem and waiting will not fix it — on a re-run, `ADMIN_PASSWORD` must be
 the value you rotated *to* (or leave `ROTATE_ADMIN_PASSWORD` exported at that
 same value and the script will work it out).
 
+### Maker-checker must not gate the middleware's commands
+
+Fineract's dual-control workflow returns a **success-shaped response** for a
+command it parks: HTTP 200 with `{"commandId":N,"rollbackTransaction":true}`
+and no `resourceId`, while the transaction is rolled back
+(`CommandSourceService.processCommand` → `RollbackTransactionNotApprovedException`).
+Nothing was created. Downstream you get a baffling error — the smoke's
+`POST /v1/savingsaccounts` complaining that `clientId` is mandatory, because
+the client id it was told to use came back empty.
+
+An automated rail cannot satisfy dual control: there is no second human, and
+the middleware's service account must not be a checker super user. So the
+codes the middleware issues have to be exempt — and only those, leaving every
+human-facing permission under maker-checker as before.
+
+```sh
+docker compose exec -T fineract-db psql -U fineract -d fineract_default \
+  -c "SELECT name, enabled FROM c_configuration WHERE name = 'maker-checker';"
+docker compose exec -T fineract-db psql -U fineract -d fineract_default \
+  -c "SELECT code, can_maker_checker FROM m_permission
+      WHERE code IN ('CREATE_CLIENT','ACTIVATE_CLIENT','CREATE_SAVINGSACCOUNT',
+                     'APPROVE_SAVINGSACCOUNT','ACTIVATE_SAVINGSACCOUNT',
+                     'DEPOSIT_SAVINGSACCOUNT','WITHDRAWAL_SAVINGSACCOUNT',
+                     'CREATE_ACCOUNTTRANSFER');"
+```
+
+If the global flag is on and any of those codes has `can_maker_checker = t`:
+
+```sh
+docker compose exec -T fineract-db psql -U fineract -d fineract_default \
+  -c "UPDATE m_permission SET can_maker_checker = false
+      WHERE code IN ('CREATE_CLIENT','ACTIVATE_CLIENT','CREATE_SAVINGSACCOUNT',
+                     'APPROVE_SAVINGSACCOUNT','ACTIVATE_SAVINGSACCOUNT',
+                     'DEPOSIT_SAVINGSACCOUNT','WITHDRAWAL_SAVINGSACCOUNT',
+                     'CREATE_ACCOUNTTRANSFER');"
+docker compose restart fineract
+```
+
+The column is `can_maker_checker` — not `is_maker_checker`, which is the name
+the API and the docs suggest. Note also that `CREATE_CLIENT` alone is not
+enough to check: creating a client with `active:true` runs the activate
+command inline, so `ACTIVATE_CLIENT` gates it too.
+
 ### The logical business date (bites every cell restored from a dump)
 
 Fineract dates writes by its **logical business date**, not the wall clock,
