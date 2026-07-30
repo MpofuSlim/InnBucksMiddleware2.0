@@ -17,18 +17,52 @@
 #   ADMIN_PASSWORD        current password of ADMIN_USER (default mifos)
 #   MW_READ_PASSWORD      password to set for innbucks-mw-read
 #   MW_WRITE_PASSWORD     password to set for innbucks-mw-write
+#   CELL_CURRENCY         ISO-4217 code for this cell, e.g. USD (no default)
 # Optional env:
 #   FINERACT_URL          default https://localhost:8443/fineract-provider/api
 #   FINERACT_TENANT       default: default
 #   ADMIN_USER            default: mifos
 #   ROTATE_ADMIN_PASSWORD if set, admin's password is changed to this FIRST
-#   CELL_CURRENCY         default: KES
+#                         (on a re-run, also accepted as the CURRENT password)
 #   PRODUCT_NAME          default: InnBucks Wallet   PRODUCT_SHORT: IBWL
 #   CURL_OPTS             e.g. --cacert cell-ca.crt  (avoid -k outside first-boot checks)
 #   RUN_SMOKE             1 to run the probe sequence (leaves a SMOKE-Probe client behind)
 #
-# Deps: curl, jq.
+# Deps: curl, jq. (grep -P is used for the password-policy pre-check; without
+# it the check is skipped, not fatal.)
+#
+# Generate a policy-compliant password:  ./provision-cell.sh --gen-password
 set -euo pipefail
+
+# Fineract's ACTIVE password policy, keyed by the `key` the API reports.
+# Verbatim from the fork's Liquibase seed (0002_initial_data.xml and
+# 0152_update_password_validation_policy.xml) — the API exposes the policy's
+# key and description but NOT its regex, so we carry the regexes here.
+policy_regex() {
+  case "$1" in
+    simple) printf '%s' '^.{1,50}$' ;;
+    secure) printf '%s' '^(?=.*\d)(?=.*[a-z])(?=.*[A-Z])(?!.*\s).{6,50}$' ;;
+    strong) printf '%s' '^(?!.*(.)\1)(?!.*\s)(?=.*\d)(?=.*[a-z])(?=.*[A-Z])(?=.*[^\w\s]).{12,50}$' ;;
+    *)      printf '' ;;
+  esac
+}
+
+# `strong` (the default on a current build) forbids CONSECUTIVE REPEATED
+# characters, which openssl rand -base64 24 violates roughly 40% of the time.
+# Reject-and-retry until we get one that passes.
+gen_password() {
+  local candidate re; re=$(policy_regex strong)
+  while :; do
+    # head FIRST, then filter: piping /dev/urandom into `head -c` kills the
+    # upstream with SIGPIPE, which pipefail turns into a fatal 141.
+    candidate=$(LC_ALL=C head -c 512 /dev/urandom | tr -dc 'A-Za-z0-9@=.+-' | cut -c1-20)
+    if printf '%s' "$candidate" | grep -qP -- "$re"; then
+      printf '%s\n' "$candidate"; return
+    fi
+  done
+}
+
+if [[ "${1:-}" == "--gen-password" ]]; then gen_password; exit 0; fi
 
 FINERACT_URL="${FINERACT_URL:-https://localhost:8443/fineract-provider/api}"
 TENANT="${FINERACT_TENANT:-default}"
@@ -36,14 +70,26 @@ ADMIN_USER="${ADMIN_USER:-mifos}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:?export ADMIN_PASSWORD}"
 MW_READ_PASSWORD="${MW_READ_PASSWORD:?export MW_READ_PASSWORD}"
 MW_WRITE_PASSWORD="${MW_WRITE_PASSWORD:?export MW_WRITE_PASSWORD}"
-CELL_CURRENCY="${CELL_CURRENCY:-KES}"
+# No default on purpose: the savings product is created in this currency and
+# a cell that silently comes up in the wrong one is expensive to unpick.
+CELL_CURRENCY="${CELL_CURRENCY:?export CELL_CURRENCY (ISO-4217, e.g. USD)}"
 PRODUCT_NAME="${PRODUCT_NAME:-InnBucks Wallet}"
 PRODUCT_SHORT="${PRODUCT_SHORT:-IBWL}"
 CURL_OPTS="${CURL_OPTS:-}"
 
-READ_PERMS=(READ_CLIENT READ_SAVINGSACCOUNT READ_SAVINGSACCOUNTTRANSACTION READ_ACCOUNTTRANSFER)
-WRITE_PERMS=(CREATE_CLIENT CREATE_SAVINGSACCOUNT APPROVE_SAVINGSACCOUNT ACTIVATE_SAVINGSACCOUNT
-             DEPOSIT_SAVINGSACCOUNT WITHDRAWAL_SAVINGSACCOUNT CREATE_ACCOUNTTRANSFER)
+# Every code below is checked against the running build before the roles are
+# written (step 5). Notes on the two non-obvious ones:
+#   * There is NO READ_SAVINGSACCOUNTTRANSACTION permission — the transaction
+#     endpoints validate READ against the SAVINGSACCOUNT resource, so
+#     READ_SAVINGSACCOUNT already covers the reconciliation read-back.
+#   * ACTIVATE_CLIENT is required because the adapter creates clients with
+#     active:true, and Fineract's createClient runs the activate command
+#     inline (ClientWritePlatformServiceJpaRepositoryImpl ->
+#     validateRollbackCommand(activateClient) -> validateHasPermissionTo).
+READ_PERMS=(READ_CLIENT READ_SAVINGSACCOUNT READ_ACCOUNTTRANSFER)
+WRITE_PERMS=(CREATE_CLIENT ACTIVATE_CLIENT CREATE_SAVINGSACCOUNT APPROVE_SAVINGSACCOUNT
+             ACTIVATE_SAVINGSACCOUNT DEPOSIT_SAVINGSACCOUNT WITHDRAWAL_SAVINGSACCOUNT
+             CREATE_ACCOUNTTRANSFER)
 
 log()  { printf '>> %s\n' "$*" >&2; }
 fail() { printf 'FATAL: %s\n' "$*" >&2; exit 1; }
@@ -64,15 +110,77 @@ api() {
   printf '%s' "$payload"
 }
 
+# probe USER PASS — prints the HTTP status, or 000 when the connection never
+# completed. Deliberately separate from api(): the whole point of step 1 is to
+# tell "not listening yet" (wait) apart from "listening and rejecting these
+# credentials" (fail NOW — a wrong password will never self-heal, and the old
+# retry loop burnt five minutes before saying something misleading).
+probe() {
+  curl -sS ${CURL_OPTS} -o /dev/null -w '%{http_code}' \
+       -u "${1}:${2}" -H "Fineract-Platform-TenantId: ${TENANT}" \
+       "${FINERACT_URL}/v1/offices" 2>/dev/null || true
+}
+
 log "1/7 waiting for Fineract at ${FINERACT_URL} ..."
-for i in $(seq 1 60); do
-  if api GET "/v1/offices" >/dev/null 2>&1; then break; fi
-  [[ "$i" == 60 ]] && fail "Fineract not reachable/authenticated after 5 minutes"
+ROTATION_DONE=0
+DEADLINE=$((SECONDS + 300))
+while :; do
+  CODE=$(probe "$ADMIN_USER" "$ADMIN_PASSWORD")
+  case "$CODE" in
+    2*) break ;;
+    401|403)
+      # A re-run against an already-provisioned cell: step 2 rotated the
+      # password on the previous pass, so ADMIN_PASSWORD is now stale.
+      # Recognise that instead of dying — this script is meant to be re-runnable.
+      if [[ -n "${ROTATE_ADMIN_PASSWORD:-}" && "$(probe "$ADMIN_USER" "$ROTATE_ADMIN_PASSWORD")" == 2* ]]; then
+        log "admin password is ALREADY rotated (re-run) — continuing with the rotated value."
+        ADMIN_PASSWORD="$ROTATE_ADMIN_PASSWORD"
+        ROTATION_DONE=1
+        break
+      fi
+      fail "Fineract is UP but rejected user '${ADMIN_USER}' (HTTP ${CODE}).
+       This is a credentials problem, not a startup delay — waiting will not fix it.
+       Check ADMIN_USER / ADMIN_PASSWORD (and ROTATE_ADMIN_PASSWORD if this cell
+       was provisioned before). Reproduce with:
+         curl -i ${CURL_OPTS} -u '${ADMIN_USER}:<password>' \\
+           -H 'Fineract-Platform-TenantId: ${TENANT}' ${FINERACT_URL}/v1/offices"
+      ;;
+    000) : ;;  # not listening / TLS handshake incomplete — still booting
+    *)   log "  unexpected status ${CODE}, retrying ..." ;;
+  esac
+  (( SECONDS < DEADLINE )) || fail "Fineract not reachable at ${FINERACT_URL} after 5 minutes (last status: ${CODE}).
+       Check the container is healthy and that CURL_OPTS trusts its certificate:
+         docker compose ps && docker compose logs --tail=50 fineract"
   sleep 5
 done
 log "Fineract is up."
 
-if [[ -n "${ROTATE_ADMIN_PASSWORD:-}" ]]; then
+# Validate every password we are about to SET against the cell's active
+# policy, before the first write. Otherwise the run half-applies and dies on
+# a 400 whose body doesn't say which value was rejected.
+POLICY_KEY=$(api GET "/v1/passwordpreferences" 2>/dev/null \
+  | jq -r 'map(select(.active==true)) | .[0].key // empty' || true)
+POLICY_RE=$(policy_regex "${POLICY_KEY:-}")
+if [[ -z "$POLICY_KEY" ]]; then
+  log "  (could not read the active password policy — skipping the pre-check)"
+elif [[ -z "$POLICY_RE" ]]; then
+  log "  (unknown password policy '${POLICY_KEY}' — skipping the pre-check)"
+elif ! printf 'x' | grep -qP 'x' 2>/dev/null; then
+  log "  (grep -P unavailable — skipping the password-policy pre-check)"
+else
+  for var in ROTATE_ADMIN_PASSWORD MW_READ_PASSWORD MW_WRITE_PASSWORD; do
+    value="${!var:-}"
+    [[ -n "$value" ]] || continue
+    printf '%s' "$value" | grep -qP -- "$POLICY_RE" || fail \
+      "${var} does not satisfy this cell's '${POLICY_KEY}' password policy.
+       Note '${POLICY_KEY}' forbids CONSECUTIVE REPEATED characters, which is why
+       openssl rand -base64 24 fails here often. Generate a compliant one with:
+         export ${var}=\"\$(./provision-cell.sh --gen-password)\""
+  done
+  log "passwords satisfy the '${POLICY_KEY}' policy."
+fi
+
+if [[ -n "${ROTATE_ADMIN_PASSWORD:-}" && "$ROTATION_DONE" == 0 ]]; then
   log "2/7 rotating '${ADMIN_USER}' password ..."
   ADMIN_ID=$(api GET "/v1/users" | jq -r --arg u "$ADMIN_USER" '.[] | select(.username==$u) | .id')
   [[ -n "$ADMIN_ID" ]] || fail "admin user ${ADMIN_USER} not found"
@@ -80,6 +188,8 @@ if [[ -n "${ROTATE_ADMIN_PASSWORD:-}" ]]; then
     "$(jq -n --arg p "$ROTATE_ADMIN_PASSWORD" '{password:$p, repeatPassword:$p}')" >/dev/null
   ADMIN_PASSWORD="$ROTATE_ADMIN_PASSWORD"
   log "admin password rotated."
+elif [[ "$ROTATION_DONE" == 1 ]]; then
+  log "2/7 admin rotation already done on a previous run."
 else
   log "2/7 skipping admin rotation (ROTATE_ADMIN_PASSWORD not set)."
 fi
@@ -119,8 +229,15 @@ fi
 log "5/7 ensuring least-privilege roles ..."
 AVAILABLE=$(api GET "/v1/permissions" | jq -r '.[].code')
 for p in "${READ_PERMS[@]}" "${WRITE_PERMS[@]}"; do
-  grep -qx "$p" <<<"$AVAILABLE" \
-    || fail "permission code '$p' does not exist on this build — check: SELECT code FROM m_permission"
+  if ! grep -qx "$p" <<<"$AVAILABLE"; then
+    # Show what this build DOES offer for the same entity — a missing code is
+    # nearly always a near-miss on the entity's real name.
+    NEAR=$(grep -i "${p#*_}" <<<"$AVAILABLE" | head -12 | paste -sd' ' -)
+    fail "permission code '$p' does not exist on this build.
+       Codes on this build mentioning '${p#*_}': ${NEAR:-<none>}
+       Full list: curl ${CURL_OPTS} -u '<admin>' -H 'Fineract-Platform-TenantId: ${TENANT}' \\
+         ${FINERACT_URL}/v1/permissions | jq -r '.[].code'"
+  fi
 done
 
 ensure_role() { # NAME DESCRIPTION PERMS...
