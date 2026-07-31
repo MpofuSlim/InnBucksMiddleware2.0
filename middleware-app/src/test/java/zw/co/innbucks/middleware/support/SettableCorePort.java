@@ -19,6 +19,8 @@ import java.util.List;
 import java.util.Set;
 import java.util.function.BiFunction;
 import java.util.function.Function;
+import zw.co.innbucks.middleware.corebanking.value.TransactionHistoryQuery;
+import zw.co.innbucks.middleware.corebanking.value.TransactionPage;
 
 /**
  * Fully settable {@link CoreBankingPort} stub for integration tests: each
@@ -43,6 +45,10 @@ public class SettableCorePort implements CoreBankingPort {
             (cmd, key) -> { throw new IllegalStateException("stub onTransfer not configured"); };
     public volatile Function<TransactionLookup, TransactionResult> onGetTransaction =
             lookup -> { throw new IllegalStateException("stub onGetTransaction not configured"); };
+    /** Defaults to an empty page — unlike the others, a statement has a sensible
+     *  no-op so tests that never exercise it don't have to configure it. */
+    public volatile Function<TransactionHistoryQuery, TransactionPage> onListTransactions =
+            query -> new TransactionPage(List.of(), 0);
     public volatile TriFunction<CoreCustomerRef, String, IdempotencyKey, AccountRef> onOpenDepositAccount =
             (customer, extId, key) -> { throw new IllegalStateException("stub onOpenDepositAccount not configured"); };
 
@@ -68,4 +74,5 @@ public class SettableCorePort implements CoreBankingPort {
     @Override public TransactionResult withdraw(MoneyMovementCommand cmd, IdempotencyKey key) { return onWithdraw.apply(cmd, key); }
     @Override public TransactionResult transfer(TransferCommand cmd, IdempotencyKey key) { return onTransfer.apply(cmd, key); }
     @Override public TransactionResult getTransaction(TransactionLookup lookup) { return onGetTransaction.apply(lookup); }
+    @Override public TransactionPage listTransactions(TransactionHistoryQuery q) { return onListTransactions.apply(q); }
 }

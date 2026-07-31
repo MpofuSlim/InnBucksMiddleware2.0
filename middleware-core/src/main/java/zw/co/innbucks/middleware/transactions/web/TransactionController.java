@@ -24,7 +24,6 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import zw.co.innbucks.middleware.idempotency.IdempotencyService;
 import zw.co.innbucks.middleware.stepup.StepUpRequiredException;
-import zw.co.innbucks.middleware.transactions.AccountOwnershipException;
 import zw.co.innbucks.middleware.transactions.MovementRequests.DepositRequest;
 import zw.co.innbucks.middleware.transactions.MovementRequests.TransferRequest;
 import zw.co.innbucks.middleware.transactions.MovementRequests.WithdrawRequest;
@@ -171,17 +170,6 @@ public class TransactionController {
         body.setProperty("errorCode", "step_up_required");
         // The server-computed fingerprint the app passes to /auth/step-up/verify.
         body.setProperty("txnFp", ex.getTxnFp());
-        return ResponseEntity.status(HttpStatus.FORBIDDEN)
-                .contentType(MediaType.APPLICATION_PROBLEM_JSON).body(body);
-    }
-
-    @ExceptionHandler(AccountOwnershipException.class)
-    public ResponseEntity<ProblemDetail> ownership(AccountOwnershipException ex) {
-        ProblemDetail body = ProblemDetail.forStatus(HttpStatus.FORBIDDEN);
-        body.setType(URI.create("about:blank"));
-        body.setTitle("Not your account");
-        body.setDetail("You can only move money from accounts that belong to you.");
-        body.setProperty("errorCode", "account_ownership_mismatch");
         return ResponseEntity.status(HttpStatus.FORBIDDEN)
                 .contentType(MediaType.APPLICATION_PROBLEM_JSON).body(body);
     }

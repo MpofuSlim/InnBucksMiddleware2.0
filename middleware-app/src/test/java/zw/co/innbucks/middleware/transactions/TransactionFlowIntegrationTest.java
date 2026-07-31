@@ -42,6 +42,10 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+import zw.co.innbucks.middleware.corebanking.value.TransactionDirection;
+import zw.co.innbucks.middleware.corebanking.value.TransactionEntry;
+import zw.co.innbucks.middleware.corebanking.value.TransactionPage;
+import java.time.LocalDate;
 
 /**
  * The full money-movement guard stack over HTTP: JWT → ownership → namespaced
@@ -124,6 +128,78 @@ class TransactionFlowIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[0].accountId").value(wallet))
                 .andExpect(jsonPath("$[0].balanceMinor").value(150000));
+    }
+
+    @Test
+    void statementReadsThroughThePortAndEchoesPaging() throws Exception {
+        stubPort.onListTransactions = query -> {
+            assertThat(query.account().externalId()).isEqualTo(wallet);
+            assertThat(query.offset()).isEqualTo(20);
+            assertThat(query.limit()).isEqualTo(5);
+            assertThat(query.from()).isEqualTo(LocalDate.of(2026, 7, 1));
+            assertThat(query.to()).isEqualTo(LocalDate.of(2026, 7, 31));
+            return new TransactionPage(List.of(
+                    new TransactionEntry("15", "ref-abc", TransactionDirection.DEBIT, "Withdrawal",
+                            new MinorUnits(60000L, "KES"), new MinorUnits(1500L, "KES"),
+                            LocalDate.of(2026, 7, 31), false),
+                    // No externalRef: booked on the core, never through us.
+                    new TransactionEntry("9", null, TransactionDirection.CREDIT, "Interest Posting",
+                            new MinorUnits(250L, "KES"), null,
+                            LocalDate.of(2026, 7, 1), false)),
+                    143);
+        };
+
+        mockMvc.perform(get("/me/accounts/{id}/transactions", wallet)
+                        .param("from", "2026-07-01").param("to", "2026-07-31")
+                        .param("offset", "20").param("limit", "5")
+                        .header(HttpHeaders.AUTHORIZATION, bearer))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.accountId").value(wallet))
+                .andExpect(jsonPath("$.currency").value("KES"))
+                .andExpect(jsonPath("$.totalCount").value(143))
+                .andExpect(jsonPath("$.offset").value(20))
+                .andExpect(jsonPath("$.limit").value(5))
+                .andExpect(jsonPath("$.entries[0].id").value("15"))
+                .andExpect(jsonPath("$.entries[0].reference").value("ref-abc"))
+                .andExpect(jsonPath("$.entries[0].direction").value("DEBIT"))
+                .andExpect(jsonPath("$.entries[0].amountMinor").value(60000))
+                .andExpect(jsonPath("$.entries[0].runningBalanceMinor").value(1500))
+                .andExpect(jsonPath("$.entries[0].date").value("2026-07-31"))
+                // Core-booked entries carry no reference and may have no running
+                // balance — neither may be invented.
+                .andExpect(jsonPath("$.entries[1].reference").doesNotExist())
+                .andExpect(jsonPath("$.entries[1].runningBalanceMinor").doesNotExist());
+    }
+
+    @Test
+    void statementRefusesAnAccountTheCallerDoesNotOwn() throws Exception {
+        // Ownership is checked against the CORE's account list before the
+        // statement is fetched — the port must never be asked at all.
+        AtomicInteger statementCalls = new AtomicInteger();
+        stubPort.onListTransactions = query -> {
+            statementCalls.incrementAndGet();
+            return new TransactionPage(List.of(), 0);
+        };
+
+        mockMvc.perform(get("/me/accounts/{id}/transactions", "someone-else:wallet")
+                        .header(HttpHeaders.AUTHORIZATION, bearer))
+                .andExpect(status().isForbidden());
+
+        assertThat(statementCalls.get()).isZero();
+    }
+
+    @Test
+    void statementRejectsAnOversizedPageRatherThanPullingTheWholeHistory() throws Exception {
+        mockMvc.perform(get("/me/accounts/{id}/transactions", wallet)
+                        .param("limit", "5000")
+                        .header(HttpHeaders.AUTHORIZATION, bearer))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void statementRequiresAToken() throws Exception {
+        mockMvc.perform(get("/me/accounts/{id}/transactions", wallet))
+                .andExpect(status().isUnauthorized());
     }
 
     @Test

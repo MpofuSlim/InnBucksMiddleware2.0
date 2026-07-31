@@ -39,6 +39,8 @@ import java.util.function.Function;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import zw.co.innbucks.middleware.corebanking.value.TransactionHistoryQuery;
+import zw.co.innbucks.middleware.corebanking.value.TransactionPage;
 
 /**
  * Full-stack ledger flow against real Postgres: write-ahead row, outcome
@@ -86,6 +88,7 @@ class LedgerFlowIntegrationTest {
         @Override public TransactionResult transfer(TransferCommand cmd, IdempotencyKey key) { throw new UnsupportedOperationException(); }
         @Override public AccountRef openDepositAccount(CoreCustomerRef customer, String requestedExternalId, IdempotencyKey key) { throw new UnsupportedOperationException(); }
         @Override public TransactionResult getTransaction(TransactionLookup lookup) { return onGetTransaction.apply(lookup); }
+        @Override public TransactionPage listTransactions(TransactionHistoryQuery q) { return new TransactionPage(List.of(), 0); }
     }
 
     @TestConfiguration

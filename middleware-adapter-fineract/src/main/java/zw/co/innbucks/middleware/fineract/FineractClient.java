@@ -11,6 +11,7 @@ import zw.co.innbucks.middleware.fineract.dto.FineractDtos.ClientResponse;
 import zw.co.innbucks.middleware.fineract.dto.FineractDtos.CommandResponse;
 import zw.co.innbucks.middleware.fineract.dto.FineractDtos.SavingsAccountResponse;
 import zw.co.innbucks.middleware.fineract.dto.FineractDtos.SavingsTransactionResponse;
+import zw.co.innbucks.middleware.fineract.dto.FineractDtos.TransactionSearchPage;
 import zw.co.innbucks.middleware.fineract.dto.FineractDtos.TransferPageResponse;
 
 import java.math.BigDecimal;
@@ -93,6 +94,39 @@ public class FineractClient {
                         accountExternalId, transactionExternalId)
                 .retrieve()
                 .body(SavingsTransactionResponse.class));
+    }
+
+    /**
+     * One page of an account's transactions, newest first.
+     *
+     * <p>Ordered by {@code transactionDate} DESC then {@code id} DESC: value
+     * date alone is ambiguous for same-day entries, and a statement whose page
+     * boundaries shift between requests would double-show or skip lines.
+     * {@code locale} and {@code dateFormat} are required for the date filters
+     * to parse at all.
+     */
+    public TransactionSearchPage searchSavingsTransactions(String accountExternalId,
+                                                           LocalDate from, LocalDate to,
+                                                           int offset, int limit) {
+        return read(() -> readClient.get()
+                .uri(uri -> {
+                    uri.path("/v1/savingsaccounts/external-id/{acct}/transactions/search")
+                            .queryParam("offset", offset)
+                            .queryParam("limit", limit)
+                            .queryParam("orderBy", "transactionDate,id")
+                            .queryParam("sortOrder", "DESC")
+                            .queryParam("locale", properties.locale())
+                            .queryParam("dateFormat", properties.dateFormat());
+                    if (from != null) {
+                        uri.queryParam("fromDate", from.format(dateFormatter));
+                    }
+                    if (to != null) {
+                        uri.queryParam("toDate", to.format(dateFormatter));
+                    }
+                    return uri.build(accountExternalId);
+                })
+                .retrieve()
+                .body(TransactionSearchPage.class));
     }
 
     public TransferPageResponse findTransfersByExternalId(String externalId) {

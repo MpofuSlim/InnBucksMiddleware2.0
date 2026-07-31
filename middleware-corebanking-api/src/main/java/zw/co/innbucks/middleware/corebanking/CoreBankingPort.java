@@ -10,7 +10,9 @@ import zw.co.innbucks.middleware.corebanking.value.CoreCustomerRef;
 import zw.co.innbucks.middleware.corebanking.value.CustomerProfile;
 import zw.co.innbucks.middleware.corebanking.value.DepositAccountSummary;
 import zw.co.innbucks.middleware.corebanking.value.IdempotencyKey;
+import zw.co.innbucks.middleware.corebanking.value.TransactionHistoryQuery;
 import zw.co.innbucks.middleware.corebanking.value.TransactionLookup;
+import zw.co.innbucks.middleware.corebanking.value.TransactionPage;
 import zw.co.innbucks.middleware.corebanking.value.TransactionResult;
 import zw.co.innbucks.middleware.corebanking.value.TxRef;
 
@@ -103,4 +105,14 @@ public interface CoreBankingPort {
      * operator; never guess.
      */
     TransactionResult getTransaction(TransactionLookup lookup);
+
+    /**
+     * One page of the account's statement, newest first, as the CORE recorded
+     * it. A READ — retryable, and never a source of truth about our own
+     * in-flight movements: a row this middleware has parked as UNKNOWN has by
+     * definition no confirmed core entry, so it will not appear here until it
+     * reconciles. Callers that need to show pending activity must merge the
+     * local ledger themselves.
+     */
+    TransactionPage listTransactions(TransactionHistoryQuery query);
 }

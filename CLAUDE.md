@@ -284,7 +284,19 @@ there, or reference the aliases when writing runbook snippets:
    crash-retry with the same key answers from the EXISTING ledger row (never
    a second row — the core would replay the same result anyway; fresh attempt
    = fresh key); COMPLETED→SUCCESS, FAILED→FAILED, everything else→
-   PROCESSING). `CoreBankingExceptionHandler`: `CoreClientException` → 422
+   PROCESSING), and `GET /me/accounts/{accountId}/transactions` — the customer
+   STATEMENT, sourced from the CORE (not our ledger: an account also accrues
+   interest postings, fees and teller corrections that never crossed this
+   middleware, and a statement missing those would not reconcile against the
+   balance on `/me/accounts`; the trade-off is that a movement parked as
+   UNKNOWN has no confirmed core entry and appears only once it reconciles).
+   Ownership checked against the core's account list BEFORE the fetch; page
+   size hard-capped at 100 (`TransactionHistoryQuery` refuses limit < 1, and
+   the port contract forbids an unbounded query). Fineract gotcha: the search
+   endpoint returns Fineract's OWN page envelope (`totalFilteredRecords` /
+   `pageItems`) and dates as `[yyyy,m,d]` ARRAYS from the legacy Gson
+   serializer — both shapes are accepted. `CoreBankingExceptionHandler`:
+   `CoreClientException` → 422
    `core_rejected` (upstream wording allowed), auth/server/transient → 502/503
    generic (ops detail stays in logs). Amounts cross the API in MINOR units.
    Contract pinned by `RegisterFlowIntegrationTest` +
