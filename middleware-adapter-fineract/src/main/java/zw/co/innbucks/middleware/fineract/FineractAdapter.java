@@ -315,8 +315,11 @@ public class FineractAdapter implements CoreBankingPort {
         BigDecimal amount = t.amount() == null ? BigDecimal.ZERO : t.amount();
         return new TransactionEntry(
                 String.valueOf(t.id()),
-                // Present only when the movement came through us — Fineract
-                // returns "" rather than null for an unset externalId.
+                // Present only when the movement came through us. Fineract's
+                // ExternalIdAdapter emits a BARE STRING, or JsonNull when the
+                // id is empty — and Gson drops nulls, so the key is usually
+                // just absent. Blank is checked too, cheaply, rather than
+                // trusting that to stay true.
                 t.externalId() == null || t.externalId().isBlank() ? null : t.externalId(),
                 direction(t),
                 narrative(t),
