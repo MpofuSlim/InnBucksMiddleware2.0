@@ -65,20 +65,42 @@ openssl pkcs12 -export -in fineract.crt -inkey fineract.key \
 # Safe: the P12 is password-protected and that password lives in .env at 0600,
 # so a readable keystore alone yields nothing.
 chmod 644 fineract-keystore.p12
-# Truststore for the middleware (containing ONLY the CA):
-keytool -importcert -noprompt -file cell-ca.crt -alias innbucks-cell-ca \
-  -keystore innbucks-cell-truststore.p12 -storetype PKCS12
 ```
 
-No JDK on the box? Run `keytool` from a throwaway container instead, then take
-ownership of what it wrote as root:
+### The middleware truststore MUST contain the public CAs too
+
+> [!WARNING]
+> `-Djavax.net.ssl.trustStore` **replaces** the JVM's default `cacerts`; it does
+> not add to it. A truststore holding only the cell CA makes the middleware
+> trust Fineract and **nothing else on the internet** — the SMS/notification
+> gateway, and any other outbound HTTPS, fail with:
+> ```
+> PKIX path building failed: unable to find valid certification path to requested target
+> ```
+> Fineract keeps working the whole time, so this surfaces late — on the first
+> outbound call that isn't Fineract. Build the store from the JVM's default
+> trust anchors and add the cell CA alongside them.
 
 ```sh
-docker run --rm -v "$PWD":/w -w /w eclipse-temurin:21-jre \
-  keytool -importcert -noprompt -file cell-ca.crt -alias innbucks-cell-ca \
-  -keystore innbucks-cell-truststore.p12 -storetype PKCS12 -storepass '<pw>'
-sudo chown "$(id -u):$(id -g)" innbucks-cell-truststore.p12
+cd deploy/fineract/ssl
+TRUSTSTORE_PW=<generate: openssl rand -hex 24>
+
+docker run --rm -v "$PWD":/w -w /w -e PW="$TRUSTSTORE_PW" eclipse-temurin:21-jre sh -c '
+  set -e
+  rm -f /w/ts.p12
+  keytool -importkeystore -noprompt \
+    -srckeystore "$JAVA_HOME/lib/security/cacerts" -srcstorepass changeit \
+    -destkeystore /w/ts.p12 -deststoretype PKCS12 -deststorepass "$PW"
+  keytool -importcert -noprompt -file /w/cell-ca.crt -alias innbucks-cell-ca \
+    -keystore /w/ts.p12 -storetype PKCS12 -storepass "$PW"
+  keytool -list -keystore /w/ts.p12 -storepass "$PW" | grep -c trustedCertEntry
+'
+sudo chown "$(id -u):$(id -g)" ts.p12
+mv -f ts.p12 innbucks-cell-truststore.p12
 ```
+
+That trailing `-list | grep -c` is the check that matters: expect roughly 150
+entries. **`1` means you built the CA-only store and outbound HTTPS will fail.**
 
 Wire the truststore into the **middleware** service (root
 `docker-compose.yml`): mount it and extend `JAVA_TOOL_OPTIONS`:
