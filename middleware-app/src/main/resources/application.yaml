@@ -196,6 +196,12 @@ fineract:
   savings-product-id: ${FINERACT_SAVINGS_PRODUCT_ID:}
   payment-type-id: ${FINERACT_PAYMENT_TYPE_ID:}
   currency: ${FINERACT_CURRENCY:}
+  # Shared secret for the inbound Fineract web hook (core-initiated movement
+  # alerts). Blank = webhook disabled, warned at boot. Fineract's hook can set
+  # no auth header, so this token IS the auth, carried in the URL path; the
+  # endpoint answers 404 to any other value. Generate: openssl rand -hex 32.
+  # provision-cell.sh registers the hook with the same value.
+  core-events-token: ${FINERACT_CORE_EVENTS_TOKEN:}
   locale: ${FINERACT_LOCALE:en}
   date-format: ${FINERACT_DATE_FORMAT:yyyy-MM-dd}
   connect-timeout: ${FINERACT_CONNECT_TIMEOUT:2s}
@@ -240,3 +246,10 @@ logging:
     level: "%5p [%X{country:-},%X{correlationId:-},%X{traceId:-},%X{spanId:-}]"
   level:
     zw.co.innbucks.middleware: INFO
+
+springdoc:
+  # The internal core-event webhook must not appear in the API doc: its path
+  # embeds the shared-secret token as a template variable, and an internal
+  # surface documented on a public Swagger page invites probing. Per-profile
+  # files toggle Swagger on/off; this exclusion applies everywhere.
+  paths-to-exclude: /internal/**

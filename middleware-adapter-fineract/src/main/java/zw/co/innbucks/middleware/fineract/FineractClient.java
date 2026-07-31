@@ -6,6 +6,7 @@ import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientResponseException;
 import zw.co.innbucks.middleware.corebanking.value.TxRef;
+import zw.co.innbucks.middleware.fineract.dto.FineractDtos;
 import zw.co.innbucks.middleware.fineract.dto.FineractDtos.ClientAccountsResponse;
 import zw.co.innbucks.middleware.fineract.dto.FineractDtos.ClientResponse;
 import zw.co.innbucks.middleware.fineract.dto.FineractDtos.CommandResponse;
@@ -76,6 +77,26 @@ public class FineractClient {
                 .uri("/v1/clients/external-id/{externalId}/accounts", clientExternalId)
                 .retrieve()
                 .body(ClientAccountsResponse.class));
+    }
+
+    /**
+     * By NUMERIC id — the only handle a Fineract hook payload carries. Used by
+     * the core-event receiver to positively re-read what actually happened
+     * before anyone is told about it; @return null on a positive 404.
+     */
+    public SavingsAccountResponse findSavingsById(long savingsId) {
+        return read(() -> readClient.get()
+                .uri("/v1/savingsaccounts/{id}", savingsId)
+                .retrieve()
+                .body(SavingsAccountResponse.class));
+    }
+
+    /** The single transaction, by the numeric ids a hook event carries; null on a positive 404. */
+    public FineractDtos.SavingsTransaction findSavingsTransactionById(long savingsId, long transactionId) {
+        return read(() -> readClient.get()
+                .uri("/v1/savingsaccounts/{id}/transactions/{txnId}", savingsId, transactionId)
+                .retrieve()
+                .body(FineractDtos.SavingsTransaction.class));
     }
 
     /** @return the savings account, or null on a positive 404. */

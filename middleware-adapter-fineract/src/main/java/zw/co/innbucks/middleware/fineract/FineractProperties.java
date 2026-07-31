@@ -67,6 +67,16 @@ public record FineractProperties(
         @NotBlank
         String currency,
 
+        /**
+         * Shared secret for the inbound core-event webhook
+         * (/internal/core-events/fineract/{token}). Fineract's Web hook can
+         * carry no auth header, so the token rides the URL path. Blank =
+         * webhook disabled (warned at boot); provision-cell.sh registers the
+         * hook with the same value. Optional on purpose — a cell without it
+         * boots fine, it just misses teller-initiated alerts.
+         */
+        String coreEventsToken,
+
         /** Locale sent in every mutating body — Fineract requires it alongside dates. */
         @NotBlank
         String locale,

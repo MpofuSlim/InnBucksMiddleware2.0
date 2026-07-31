@@ -179,6 +179,37 @@ class TransactionMessageComposerTest {
         assertThat(body).contains("USD 1,234,567.89");
     }
 
+    @Test
+    void aCoreObservedCreditReadsLikeAnyOtherCredit() {
+        String body = composer.composeObserved(new zw.co.innbucks.middleware.corebanking.value.CoreMovementObserved(
+                MINE, TransactionDirection.CREDIT, new MinorUnits(60000, "USD"),
+                "Deposit", null, "42", Instant.parse("2026-07-31T12:05:00Z")));
+
+        assertThat(body).isEqualTo("InnBucks. Account ending 6e7f credited with USD 600.00 "
+                + "on 31-Jul-2026 at 14.05. Ref. 42. Narration - Deposit.");
+    }
+
+    @Test
+    void aCoreObservedDebitSaysDebitedAndSurvivesAMissingRef() {
+        String body = composer.composeObserved(new zw.co.innbucks.middleware.corebanking.value.CoreMovementObserved(
+                MINE, TransactionDirection.DEBIT, new MinorUnits(1500, "USD"),
+                null, null, null, Instant.parse("2026-07-31T12:05:00Z")));
+
+        assertThat(body).isEqualTo("InnBucks. Account ending 6e7f debited with USD 15.00 "
+                + "on 31-Jul-2026 at 14.05.");
+    }
+
+    @Test
+    void observedCopySurvivesTheGatewaysCharsetUntouched() {
+        for (TransactionDirection direction : TransactionDirection.values()) {
+            String body = composer.composeObserved(new zw.co.innbucks.middleware.corebanking.value.CoreMovementObserved(
+                    MINE, direction, new MinorUnits(123456789, "USD"),
+                    "Interest Posting", null, "42", Instant.parse("2026-07-31T12:05:00Z")));
+            assertThat(SmsTextSanitizer.toGsmSafe(body)).isEqualTo(body);
+            assertThat(body.length()).isLessThanOrEqualTo(160);
+        }
+    }
+
     /**
      * The gateway 400s on {@code ! : / ? " * ;}. Every template must already be
      * inside its whitelist — this fails the moment someone writes {@code Ref:}

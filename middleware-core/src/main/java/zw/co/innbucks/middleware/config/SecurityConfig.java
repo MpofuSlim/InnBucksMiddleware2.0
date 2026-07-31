@@ -61,6 +61,14 @@ public class SecurityConfig {
                         // rate limited; everything money-touching stays behind
                         // the JWT (anyRequest below).
                         .requestMatchers(org.springframework.http.HttpMethod.POST, "/register").permitAll()
+                        // Internal core-event webhook (three-files-must-agree):
+                        // (1) the receiving controller enforces its shared
+                        // token constant-time — without THIS permitAll the JWT
+                        // filter 401s the core's POST before that check runs;
+                        // (3) the edge must never route /internal/** — the
+                        // core reaches it over the private cell network only
+                        // (nginx deny pinned in the runbook).
+                        .requestMatchers(org.springframework.http.HttpMethod.POST, "/internal/core-events/**").permitAll()
                         .anyRequest().authenticated()
                 )
                 .oauth2ResourceServer(oauth2 -> oauth2

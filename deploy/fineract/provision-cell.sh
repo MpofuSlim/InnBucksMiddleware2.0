@@ -315,6 +315,39 @@ else
   log "payment type exists id=${PAYMENT_TYPE_ID}"
 fi
 
+# 4c. Web hook -> middleware, so a teller/admin posting still SMSes the
+# customer. Registered only when CORE_EVENTS_TOKEN is provided; idempotent by
+# hook name (delete-and-recreate, so URL/token rotation is just a re-run).
+# The token IS the auth — Fineract's Web hook template cannot set a header —
+# so it rides the URL path, over the private cell network only.
+if [[ -n "${CORE_EVENTS_TOKEN:-}" ]]; then
+  MIDDLEWARE_HOOK_URL="${MIDDLEWARE_INTERNAL_URL:-http://innbucks-middleware:8090}/internal/core-events/fineract/${CORE_EVENTS_TOKEN}"
+  log "4c/7 registering core-event web hook ..."
+  WEB_TEMPLATE_ID=$(api GET "/v1/hooks/template" \
+    | jq -r '[.templates[]? // empty | select(.name == "Web")] | .[0].id // empty')
+  [[ -n "$WEB_TEMPLATE_ID" ]] || WEB_TEMPLATE_ID=$(api GET "/v1/hooks/template" \
+    | jq -r '[.. | objects | select(.name? == "Web")] | .[0].id // empty')
+  [[ -n "$WEB_TEMPLATE_ID" ]] || fail "no 'Web' hook template on this build — cannot register the core-event hook"
+  # createHook stores displayName AS the hook's name, so match either field.
+  EXISTING_HOOK_ID=$(api GET "/v1/hooks" \
+    | jq -r '[.[]? | select((.displayName? == "innbucks-middleware-core-events")
+                        or (.name? == "innbucks-middleware-core-events"))] | .[0].id // empty')
+  if [[ -n "$EXISTING_HOOK_ID" ]]; then
+    # Recreate rather than diff: the URL embeds the token, and a stale token
+    # is precisely the misconfiguration a re-run must fix.
+    api DELETE "/v1/hooks/${EXISTING_HOOK_ID}" >/dev/null || true
+  fi
+  api POST "/v1/hooks" "$(jq -n --argjson t "$WEB_TEMPLATE_ID" --arg url "$MIDDLEWARE_HOOK_URL" '{
+        name:"Web", displayName:"innbucks-middleware-core-events", isActive:true, templateId:$t,
+        config:{"Payload URL":$url, "Content Type":"json"},
+        events:[{entityName:"SAVINGSACCOUNT", actionName:"DEPOSIT"},
+                {entityName:"SAVINGSACCOUNT", actionName:"WITHDRAWAL"}]
+      }')" >/dev/null || fail "hook registration failed — check the payload against this build's /v1/hooks API"
+  log "core-event hook registered -> ${MIDDLEWARE_HOOK_URL%/*}/<token>"
+else
+  log "4c/7 CORE_EVENTS_TOKEN not set — skipping the core-event web hook (teller/admin postings will not SMS customers)"
+fi
+
 log "5/7 ensuring least-privilege roles ..."
 AVAILABLE=$(api GET "/v1/permissions" | jq -r '.[].code')
 for p in "${READ_PERMS[@]}" "${WRITE_PERMS[@]}"; do
