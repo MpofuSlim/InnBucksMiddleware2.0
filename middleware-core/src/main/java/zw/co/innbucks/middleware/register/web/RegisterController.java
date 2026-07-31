@@ -19,6 +19,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RestController;
+import zw.co.innbucks.middleware.common.msisdn.InvalidMsisdnException;
 import zw.co.innbucks.middleware.idempotency.IdempotencyService;
 import zw.co.innbucks.middleware.register.CustomerAlreadyExistsException;
 import zw.co.innbucks.middleware.register.RegisterRequest;
@@ -72,6 +73,31 @@ public class RegisterController {
         IdempotencyService.Result<RegisterResponse> result =
                 registerService.register(idempotencyKey, request);
         return ResponseEntity.status(result.status()).body(result.body());
+    }
+
+    /**
+     * A malformed phone number on SIGN-UP is a validation failure, not an
+     * authentication one.
+     *
+     * <p>Without this, {@code InvalidMsisdnException} falls through to
+     * {@code AuthExceptionHandler}, which answers every one of them with
+     * login's deliberately-vague 401 — "The phone number or PIN you entered is
+     * incorrect" — on a screen that has no PIN field and no sign-in to fail.
+     * That anti-enumeration wording earns its keep on {@code /auth/login};
+     * here it earns nothing. Registration already distinguishes a known number
+     * (409 above) by design, so a distinct 400 for a badly-shaped one leaks
+     * nothing that endpoint doesn't already tell you.
+     */
+    @ExceptionHandler(InvalidMsisdnException.class)
+    public ResponseEntity<ProblemDetail> invalidMsisdn(InvalidMsisdnException ex) {
+        ProblemDetail body = ProblemDetail.forStatus(HttpStatus.BAD_REQUEST);
+        body.setType(URI.create("about:blank"));
+        body.setTitle("Check the phone number");
+        body.setDetail("That phone number doesn't look right. "
+                + "Please enter it in the format used in your country and try again.");
+        body.setProperty("errorCode", "invalid_msisdn");
+        return ResponseEntity.badRequest()
+                .contentType(MediaType.APPLICATION_PROBLEM_JSON).body(body);
     }
 
     @ExceptionHandler(CustomerAlreadyExistsException.class)

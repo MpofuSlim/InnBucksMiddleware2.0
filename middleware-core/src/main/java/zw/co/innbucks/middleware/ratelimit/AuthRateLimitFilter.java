@@ -37,13 +37,16 @@ public class AuthRateLimitFilter extends OncePerRequestFilter {
 
     private final RateLimitProperties properties;
     private final RateLimiterService rateLimiter;
+    private final ClientIpResolver clientIpResolver;
     private final ObjectMapper objectMapper;
 
     public AuthRateLimitFilter(RateLimitProperties properties,
                                RateLimiterService rateLimiter,
+                               ClientIpResolver clientIpResolver,
                                ObjectMapper objectMapper) {
         this.properties = properties;
         this.rateLimiter = rateLimiter;
+        this.clientIpResolver = clientIpResolver;
         this.objectMapper = objectMapper;
     }
 
@@ -62,7 +65,7 @@ public class AuthRateLimitFilter extends OncePerRequestFilter {
             return;
         }
 
-        String key = "ip:" + rule.name() + ":" + clientIp(request);
+        String key = "ip:" + rule.name() + ":" + clientIpResolver.resolve(request);
         RateLimitDecision decision = rateLimiter.tryConsume(key, rule.limit());
         if (decision.allowed()) {
             chain.doFilter(request, response);
@@ -91,16 +94,6 @@ public class AuthRateLimitFilter extends OncePerRequestFilter {
         };
     }
 
-    private String clientIp(HttpServletRequest request) {
-        if (properties.trustForwardedFor()) {
-            String forwarded = request.getHeader("X-Forwarded-For");
-            if (forwarded != null && !forwarded.isBlank()) {
-                int comma = forwarded.indexOf(',');
-                return (comma > 0 ? forwarded.substring(0, comma) : forwarded).trim();
-            }
-        }
-        return request.getRemoteAddr();
-    }
 
     private void writeTooManyRequests(HttpServletResponse response, long retryAfterSeconds) throws IOException {
         ProblemDetail problem = ProblemDetail.forStatus(HttpStatus.TOO_MANY_REQUESTS);

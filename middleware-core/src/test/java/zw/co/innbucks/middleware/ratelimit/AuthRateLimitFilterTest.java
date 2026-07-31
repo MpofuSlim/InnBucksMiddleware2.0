@@ -17,9 +17,10 @@ class AuthRateLimitFilterTest {
 
     private AuthRateLimitFilter filter(boolean enabled, boolean trustXff) {
         RateLimitProperties props = new RateLimitProperties(
-                enabled, trustXff,
+                enabled, trustXff, 1,
                 TWO_PER_MIN, TWO_PER_MIN, TWO_PER_MIN, TWO_PER_MIN, TWO_PER_MIN, TWO_PER_MIN, TWO_PER_MIN);
-        return new AuthRateLimitFilter(props, new RateLimiterService(props), new ObjectMapper());
+        return new AuthRateLimitFilter(props, new RateLimiterService(props),
+                new ClientIpResolver(props), new ObjectMapper());
     }
 
     private MockHttpServletResponse post(AuthRateLimitFilter filter, String uri, String ip) throws Exception {

@@ -27,7 +27,21 @@ public record RateLimitProperties(
          * that sets the header — otherwise it is client-spoofable and a caller can
          * rotate it to dodge the per-IP limit.
          */
+        /**
+         * Read the client IP from X-Forwarded-For instead of the socket peer.
+         * Required behind any proxy; UNSAFE unless the origin refuses traffic
+         * that did not come through that proxy.
+         */
         boolean trustForwardedFor,
+
+        /**
+         * How many proxies sit between the internet and this app (nginx alone
+         * = 1, CDN + nginx = 2, ...). The client IP is taken that many entries
+         * from the RIGHT of the X-Forwarded-For chain, which is the last one a
+         * caller cannot forge. 0 keeps the old leftmost-entry behaviour and is
+         * warned about at startup — see ClientIpResolver.
+         */
+        int trustedProxyCount,
 
         Limit ipLogin,
         Limit ipRefresh,

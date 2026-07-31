@@ -154,6 +154,14 @@ innbucks:
     # socket peer IS the client. Set true ONLY behind a trusted proxy/LB that
     # sets X-Forwarded-For — the header is otherwise client-spoofable.
     trust-forwarded-for: ${RATE_LIMIT_TRUST_FORWARDED_FOR:false}
+    # How many proxies sit between the internet and this app (nginx alone = 1;
+    # Cloudflare + nginx = 2; add one for every extra hop, e.g. a serverless
+    # FE proxy in front). The client IP is taken that many entries from the
+    # RIGHT of X-Forwarded-For — the last entry a caller cannot forge. 0 keeps
+    # the old leftmost-entry behaviour, which ANY caller can set, and logs a
+    # loud warning at startup. Counting only helps while the origin refuses
+    # traffic that did not come through those proxies — firewall it.
+    trusted-proxy-count: ${RATE_LIMIT_TRUSTED_PROXY_COUNT:0}
     # capacity = requests allowed per refill-period (greedy refill).
     ip-login:
       capacity: ${RATE_LIMIT_IP_LOGIN_CAPACITY:15}
