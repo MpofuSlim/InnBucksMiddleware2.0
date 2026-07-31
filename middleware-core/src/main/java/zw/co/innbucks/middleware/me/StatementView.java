@@ -17,8 +17,11 @@ public record StatementView(
         List<StatementEntryView> entries,
 
         @Schema(description = "Total entries matching the filter, ignoring paging — for "
-                + "\"showing 20 of 143\" without walking every page.", example = "143")
-        long totalCount,
+                + "\"showing 20 of 143\" without walking every page. NULLABLE: the core "
+                + "does not always report a total, and null means UNKNOWN, not zero. "
+                + "Page until a page comes back with fewer than `limit` entries rather "
+                + "than relying on this.", example = "143", nullable = true)
+        Long totalCount,
 
         @Schema(description = "Echoed paging, so a client can page without tracking its own state.",
                 example = "0")

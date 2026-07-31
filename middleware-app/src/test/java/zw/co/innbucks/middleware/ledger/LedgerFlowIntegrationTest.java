@@ -88,7 +88,7 @@ class LedgerFlowIntegrationTest {
         @Override public TransactionResult transfer(TransferCommand cmd, IdempotencyKey key) { throw new UnsupportedOperationException(); }
         @Override public AccountRef openDepositAccount(CoreCustomerRef customer, String requestedExternalId, IdempotencyKey key) { throw new UnsupportedOperationException(); }
         @Override public TransactionResult getTransaction(TransactionLookup lookup) { return onGetTransaction.apply(lookup); }
-        @Override public TransactionPage listTransactions(TransactionHistoryQuery q) { return new TransactionPage(List.of(), 0); }
+        @Override public TransactionPage listTransactions(TransactionHistoryQuery q) { return new TransactionPage(List.of(), 0L); }
     }
 
     @TestConfiguration

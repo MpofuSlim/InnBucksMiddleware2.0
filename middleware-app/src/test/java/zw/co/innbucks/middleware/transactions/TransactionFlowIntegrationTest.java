@@ -173,7 +173,7 @@ class TransactionFlowIntegrationTest {
                     new TransactionEntry("9", null, TransactionDirection.CREDIT, "Interest Posting",
                             new MinorUnits(250L, "KES"), null,
                             LocalDate.of(2026, 7, 1), false)),
-                    143);
+                    143L);
         };
 
         mockMvc.perform(get("/me/accounts/{id}/transactions", wallet)
@@ -205,7 +205,7 @@ class TransactionFlowIntegrationTest {
         AtomicInteger statementCalls = new AtomicInteger();
         stubPort.onListTransactions = query -> {
             statementCalls.incrementAndGet();
-            return new TransactionPage(List.of(), 0);
+            return new TransactionPage(List.of(), 0L);
         };
 
         mockMvc.perform(get("/me/accounts/{id}/transactions", "someone-else:wallet")

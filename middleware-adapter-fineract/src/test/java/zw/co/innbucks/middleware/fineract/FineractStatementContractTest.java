@@ -128,6 +128,51 @@ class FineractStatementContractTest {
         assertThat(page.totalCount()).isZero();
     }
 
+    /**
+     * Observed on the live cell (2026-07-31): a full page of transactions came
+     * back with NO count field, and against a primitive {@code long} Jackson
+     * rejected the entire document — the customer's statement 500'd while the
+     * data was sitting right there in the body. Unknown total must degrade to
+     * null, never to a parse failure and never to zero.
+     */
+    @Test
+    void aPageWithNoTotalStillYieldsItsTransactions() {
+        wireMock.stubFor(get(urlPathEqualTo(PATH)).willReturn(okJson("""
+                {"pageItems":[
+                   {"id":15,"externalId":"ref-abc","entryType":"DEBIT",
+                    "transactionType":{"id":2,"value":"Withdrawal","deposit":false,"withdrawal":true},
+                    "amount":600.00,"runningBalance":15.00,"reversed":false,"date":[2026,7,31]}
+                 ]}""")));
+
+        TransactionPage page = adapter.listTransactions(query(null, null, 0, 20));
+
+        assertThat(page.entries()).hasSize(1);
+        assertThat(page.entries().get(0).coreId()).isEqualTo("15");
+        // Unknown, NOT zero — zero would tell a customer they have no history.
+        assertThat(page.totalCount()).isNull();
+    }
+
+    /**
+     * Fineract also ships the Spring Data envelope on some search endpoints.
+     * Accepting both means an upstream version bump that flips the wrapper
+     * doesn't silently return every customer an empty statement.
+     */
+    @Test
+    void acceptsTheSpringDataPageEnvelopeToo() {
+        wireMock.stubFor(get(urlPathEqualTo(PATH)).willReturn(okJson("""
+                {"totalElements":42,
+                 "content":[
+                   {"id":15,"externalId":"ref-abc","entryType":"DEBIT",
+                    "transactionType":{"id":2,"value":"Withdrawal","deposit":false,"withdrawal":true},
+                    "amount":600.00,"runningBalance":15.00,"reversed":false,"date":[2026,7,31]}
+                 ]}""")));
+
+        TransactionPage page = adapter.listTransactions(query(null, null, 0, 20));
+
+        assertThat(page.entries()).hasSize(1);
+        assertThat(page.totalCount()).isEqualTo(42);
+    }
+
     @Test
     void acceptsAnIsoStringDateSoAnUpstreamSerializerChangeDoesNotBreakStatements() {
         wireMock.stubFor(get(urlPathEqualTo(PATH)).willReturn(okJson("""

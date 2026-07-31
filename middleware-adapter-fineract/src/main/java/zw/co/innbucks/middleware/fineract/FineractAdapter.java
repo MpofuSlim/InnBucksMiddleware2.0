@@ -300,8 +300,9 @@ public class FineractAdapter implements CoreBankingPort {
                 query.account().externalId(), query.from(), query.to(), query.offset(), query.limit());
         if (page == null || page.pageItems() == null) {
             // A positive 404 on the account, or an empty page — an empty
-            // statement is a legitimate answer, not a failure.
-            return new TransactionPage(List.of(), 0);
+            // statement is a legitimate answer, not a failure. Here 0 is a
+            // real count, not a stand-in for "unknown": there are no entries.
+            return new TransactionPage(List.of(), 0L);
         }
         String currency = properties.currency();
         List<TransactionEntry> entries = page.pageItems().stream()
