@@ -118,6 +118,15 @@ Build: `./mvnw verify` at the root. Run locally:
 * **CI supply chain**: every third-party GitHub Action is pinned to an
   immutable commit SHA with a `# vX.Y.Z` comment. Least-privilege
   `permissions:` per workflow.
+* **Release pipeline** (`.github/workflows/release.yml`): a merge to `main` or
+  a `v*` tag runs the FULL test suite as a gate, builds the image, Trivy-scans
+  CRITICAL/HIGH against the governed `.trivyignore` BEFORE any push, then
+  pushes `ghcr.io/mpofuslim/innbucks-middleware:{latest,sha-<commit>}` with a
+  SLSA provenance attestation + SBOM. The test gate exists because the
+  Dockerfile builds with `-DskipTests` — without it a merge could publish a
+  fully-attested image that was never tested. Deploys PULL a pinned
+  `sha-<commit>`; building on the box yields an unscanned, unattested image
+  and is a debugging tool, not a deploy.
 
 ## Country-aware architecture (mandatory)
 
@@ -393,6 +402,4 @@ Next (in order):
 Deferred (documented, not forgotten): KMS/Secrets Manager custody + rotation
 runbook; per-customer namespacing of inbound Idempotency-Keys
 (HMAC(customerUuid ‖ key)) before propagation; velocity/amount limit tables;
-Postgres backup/DR runbook; ShedLock; PENDING_VERIFICATION expiry job;
-release workflow (build → Trivy scan → push → attest, per ticketing's
-supply-chain rules).
+Postgres backup/DR runbook; ShedLock; PENDING_VERIFICATION expiry job.

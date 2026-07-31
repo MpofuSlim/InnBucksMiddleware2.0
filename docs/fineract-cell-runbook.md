@@ -402,15 +402,45 @@ services:
         -Djavax.net.ssl.trustStorePassword=${TRUSTSTORE_PASSWORD:?set TRUSTSTORE_PASSWORD in .env}
 ```
 
-Build and start. If the box's buildx predates 0.17 (`compose build requires
-buildx 0.17.0 or later`), build with the legacy builder — the Dockerfile uses
-no BuildKit-only features, so the image is identical:
+Then start it. **Pull a published, scanned image — do not build on the box.**
+The Release workflow (`.github/workflows/release.yml`) gates on the test
+suite, builds, Trivy-scans CRITICAL/HIGH, pushes to GHCR and attests SLSA
+provenance. Every merge to `main` publishes `:latest` and
+`:sha-<commit>`; a `v*` tag publishes that too.
+
+```sh
+# Pin the version this cell runs. :latest is mutable — fine for staging,
+# never for a cell you need to reason about after the fact.
+echo "IMAGE_TAG=sha-<commit>" >> .env
+
+docker compose pull middleware
+docker compose up -d
+docker compose logs -f middleware
+```
+
+Verify what you're about to run was built by this repo, not handed to you:
+
+```sh
+gh attestation verify oci://ghcr.io/mpofuslim/innbucks-middleware@<digest> \
+  --repo MpofuSlim/InnBucksMiddleware2.0
+```
+
+Rolling back is then re-pinning `IMAGE_TAG` to the previous `sha-` tag and
+`docker compose up -d` — no rebuild, and the exact bytes that were running
+before.
+
+Building locally is the fallback when you need an unmerged change on the box.
+If the box's buildx predates 0.17 (`compose build requires buildx 0.17.0 or
+later`), use the legacy builder — the Dockerfile has no BuildKit-only
+features, so the image is identical:
 
 ```sh
 DOCKER_BUILDKIT=0 docker build -t ghcr.io/mpofuslim/innbucks-middleware:dev .
 docker compose up -d
-docker compose logs -f middleware
 ```
+
+A locally built image is unscanned and unattested. Treat it as a debugging
+tool, not a deploy.
 
 Three lines confirm a good boot: `Started MiddlewareApplication`,
 `ProductionSecretsGuard: all 5 guarded secrets pass`, and

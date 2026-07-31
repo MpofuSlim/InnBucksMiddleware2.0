@@ -1,0 +1,13 @@
+# Governed CVE waiver list for the InnBucks middleware image scan.
+#
+# RULES (a waiver without all three is a review failure):
+#   * every entry carries: the CVE id, an owner, a one-line reason, and a
+#     review-by date — as a comment directly above the id
+#   * prefer fixing/upgrading over waiving; a waiver is a scheduled debt,
+#     not a dismissal
+#   * remove entries at their review date or renew them consciously
+#
+# The Release workflow scans CRITICAL/HIGH before it pushes, so a red gate
+# blocks publication rather than reporting after the fact.
+
+# (no waivers yet)
