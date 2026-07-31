@@ -98,6 +98,31 @@ public class OtpController {
         }
     }
 
+    /**
+     * Covers {@code /verify} only — {@code /request} swallows this inline to
+     * keep its always-204 contract.
+     *
+     * <p>{@code OtpService.verify} normalises the MSISDN before it looks at
+     * any challenge, so a badly-shaped number threw
+     * {@code InvalidMsisdnException} out of this controller and landed in
+     * {@code AuthExceptionHandler}: a 401 reading "The phone number or PIN you
+     * entered is incorrect" on an OTP screen that has no PIN field. Nothing
+     * about the number's SHAPE is a secret — the app applies the same rules
+     * client-side — so answering with a plain 400 leaks nothing and tells the
+     * caller what is actually wrong. Whether a challenge EXISTS stays
+     * concealed, which is the part that matters, and is handled below.
+     */
+    @ExceptionHandler(InvalidMsisdnException.class)
+    public ResponseEntity<ProblemDetail> invalidMsisdn(InvalidMsisdnException ex) {
+        ProblemDetail body = ProblemDetail.forStatus(HttpStatus.BAD_REQUEST);
+        body.setType(PROBLEM_TYPE);
+        body.setTitle("Check the phone number");
+        body.setDetail("That phone number doesn't look right. "
+                + "Please enter it in the format used in your country and try again.");
+        body.setProperty("errorCode", "invalid_msisdn");
+        return ResponseEntity.badRequest().body(body);
+    }
+
     @ExceptionHandler(OtpVerificationException.class)
     public ResponseEntity<ProblemDetail> verificationFailure(OtpVerificationException ex) {
         log.warn("OTP verification failed: {}", ex.getReason());
