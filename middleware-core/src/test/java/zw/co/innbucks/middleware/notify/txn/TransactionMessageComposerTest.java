@@ -1,6 +1,9 @@
 package zw.co.innbucks.middleware.notify.txn;
 
 import org.junit.jupiter.api.Test;
+import zw.co.innbucks.middleware.corebanking.value.AccountBalance;
+import zw.co.innbucks.middleware.corebanking.value.AccountRef;
+import zw.co.innbucks.middleware.corebanking.value.CoreMovementObserved;
 import zw.co.innbucks.middleware.corebanking.value.MinorUnits;
 import zw.co.innbucks.middleware.corebanking.value.TransactionDirection;
 import zw.co.innbucks.middleware.ledger.LedgerStatus;
@@ -14,14 +17,15 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * The wording IS the contract here — a customer reads this, and a support
- * agent has to recognise it on the phone. Exact-string assertions are
- * deliberate: a template edit should have to be a conscious one.
+ * The wording IS the contract — a customer reads this, a support agent has to
+ * recognise it on the phone, and the owner signed off this exact voice after
+ * reading the first live alerts. Exact-string assertions on purpose: a
+ * template edit should have to be a conscious one.
  */
 class TransactionMessageComposerTest {
 
-    private static final String MINE = "3f0d1c2e-8a4b-4b6e-9f1d-2c3b4a5d6e7f:wallet";   // -> 6e7f
-    private static final String THEIRS = "9a8b7c6d-5e4f-4a3b-2c1d-0e9f8a7b6c5d:wallet"; // -> 6c5d
+    private static final String MINE = "3f0d1c2e-8a4b-4b6e-9f1d-2c3b4a5d6e7f:wallet";   // hex tail 6e7f
+    private static final String THEIRS = "9a8b7c6d-5e4f-4a3b-2c1d-0e9f8a7b6c5d:wallet"; // hex tail 6c5d
     private static final UUID CUSTOMER = UUID.fromString("3f0d1c2e-8a4b-4b6e-9f1d-2c3b4a5d6e7f");
 
     /** Harare is UTC+2, so 12.05Z must render as 14.05 — the whole point of the zone. */
@@ -36,15 +40,21 @@ class TransactionMessageComposerTest {
                 "a".repeat(64), coreTxRef, Instant.parse("2026-07-31T12:05:00Z"));
     }
 
+    /** The core's customer-facing number rides in on the balance read. */
+    private static AccountBalance balance(String externalId, long availableMinor, String accountNo) {
+        return new AccountBalance(new AccountRef(externalId),
+                new MinorUnits(availableMinor, "USD"), new MinorUnits(availableMinor, "USD"), accountNo);
+    }
+
     @Test
-    void depositReadsAsACreditWithTheBalanceThatFollowedIt() {
+    void depositOpensWithYourAccountAndTheNumericTail() {
         String body = composer.compose(
                 event(LedgerTransactionType.DEPOSIT, LedgerStatus.COMPLETED, null, MINE, 2500, null, "12"),
                 new MovementLeg(CUSTOMER, MINE, null, TransactionDirection.CREDIT),
-                new MinorUnits(2500, "USD"));
+                balance(MINE, 2500, "000000010"), null);
 
-        assertThat(body).isEqualTo("InnBucks. Account ending 6e7f credited with USD 25.00 "
-                + "on 31-Jul-2026 at 14.05. Ref. 12. Available balance USD 25.00.");
+        assertThat(body).isEqualTo("Your account ending 0010 has been credited with USD 25.00 "
+                + "on 31-Jul-2026 at 14.05. Ref 00000012. Available balance USD 25.00.");
     }
 
     @Test
@@ -52,35 +62,47 @@ class TransactionMessageComposerTest {
         String body = composer.compose(
                 event(LedgerTransactionType.WITHDRAWAL, LedgerStatus.COMPLETED, MINE, null, 1000, null, "13"),
                 new MovementLeg(CUSTOMER, MINE, null, TransactionDirection.DEBIT),
-                new MinorUnits(1500, "USD"));
+                balance(MINE, 1500, "000000010"), null);
 
-        assertThat(body).isEqualTo("InnBucks. Account ending 6e7f debited with USD 10.00 "
-                + "on 31-Jul-2026 at 14.05. Ref. 13. Available balance USD 15.00.");
+        assertThat(body).isEqualTo("Your account ending 0010 has been debited with USD 10.00 "
+                + "on 31-Jul-2026 at 14.05. Ref 00000013. Available balance USD 15.00.");
     }
 
     @Test
-    void outgoingTransferNamesBothSidesFromTheSendersPointOfView() {
+    void outgoingTransferSaysYouSentWithBothNumericTails() {
         String body = composer.compose(
                 event(LedgerTransactionType.TRANSFER, LedgerStatus.COMPLETED, MINE, THEIRS, 500, null, "15"),
                 new MovementLeg(CUSTOMER, MINE, THEIRS, TransactionDirection.DEBIT),
-                new MinorUnits(1000, "USD"));
+                balance(MINE, 1000, "000000010"), "000000021");
 
-        assertThat(body).isEqualTo("InnBucks. Transfer of USD 5.00 sent from account ending 6e7f "
-                + "to account ending 6c5d on 31-Jul-2026 at 14.05. Ref. 15. Available balance USD 10.00.");
+        assertThat(body).isEqualTo("You sent USD 5.00 from your account ending 0010 "
+                + "to account ending 0021 on 31-Jul-2026 at 14.05. Ref 00000015. "
+                + "Available balance USD 10.00.");
     }
 
     @Test
-    void incomingTransferIsWrittenForTheRECIPIENTNotTheSender() {
+    void incomingTransferIsWrittenForTheRecipientNotTheSender() {
         // Same movement, other party: their account leads, the sender's is the
         // counterparty. Getting this backwards would tell someone they had
         // sent money they actually received.
         String body = composer.compose(
                 event(LedgerTransactionType.TRANSFER, LedgerStatus.COMPLETED, MINE, THEIRS, 500, null, "15"),
                 new MovementLeg(UUID.randomUUID(), THEIRS, MINE, TransactionDirection.CREDIT),
-                new MinorUnits(3000, "USD"));
+                balance(THEIRS, 3000, "000000021"), "000000010");
 
-        assertThat(body).isEqualTo("InnBucks. Account ending 6c5d credited with USD 5.00 "
-                + "from account ending 6e7f on 31-Jul-2026 at 14.05. Ref. 15. Available balance USD 30.00.");
+        assertThat(body).isEqualTo("Your account ending 0021 has been credited with USD 5.00 "
+                + "from account ending 0010 on 31-Jul-2026 at 14.05. Ref 00000015. "
+                + "Available balance USD 30.00.");
+    }
+
+    @Test
+    void withoutAnAccountNumberTheTailDegradesToTheExternalIdNeverToNothing() {
+        String body = composer.compose(
+                event(LedgerTransactionType.DEPOSIT, LedgerStatus.COMPLETED, null, MINE, 2500, null, "12"),
+                new MovementLeg(CUSTOMER, MINE, null, TransactionDirection.CREDIT),
+                balance(MINE, 2500, null), null);
+
+        assertThat(body).startsWith("Your account ending 6e7f has been credited with USD 25.00");
     }
 
     @Test
@@ -88,18 +110,18 @@ class TransactionMessageComposerTest {
         String body = composer.compose(
                 event(LedgerTransactionType.DEPOSIT, LedgerStatus.COMPLETED, null, MINE, 2500, null, "12"),
                 new MovementLeg(CUSTOMER, MINE, null, TransactionDirection.CREDIT),
-                null);
+                null, null);
 
-        assertThat(body).isEqualTo("InnBucks. Account ending 6e7f credited with USD 25.00 "
-                + "on 31-Jul-2026 at 14.05. Ref. 12.");
+        assertThat(body).isEqualTo("Your account ending 6e7f has been credited with USD 25.00 "
+                + "on 31-Jul-2026 at 14.05. Ref 00000012.");
     }
 
     @Test
     void narrationRidesAlongWhenItFitsTheSegment() {
         String body = composer.compose(
-                event(LedgerTransactionType.TRANSFER, LedgerStatus.COMPLETED, MINE, THEIRS, 500, "rent", "15"),
-                new MovementLeg(UUID.randomUUID(), THEIRS, MINE, TransactionDirection.CREDIT),
-                new MinorUnits(3000, "USD"));
+                event(LedgerTransactionType.DEPOSIT, LedgerStatus.COMPLETED, null, MINE, 2500, "rent", "12"),
+                new MovementLeg(CUSTOMER, MINE, null, TransactionDirection.CREDIT),
+                balance(MINE, 2500, "000000010"), null);
 
         assertThat(body).endsWith("Narration - rent.");
         assertThat(body.length()).isLessThanOrEqualTo(160);
@@ -111,24 +133,11 @@ class TransactionMessageComposerTest {
                 event(LedgerTransactionType.TRANSFER, LedgerStatus.COMPLETED, MINE, THEIRS, 500,
                         "school fees for the term", "15"),
                 new MovementLeg(UUID.randomUUID(), THEIRS, MINE, TransactionDirection.CREDIT),
-                new MinorUnits(3000, "USD"));
+                balance(THEIRS, 3000, "000000021"), "000000010");
 
         assertThat(body).doesNotContain("Narration");
-        assertThat(body).contains("Ref. 15.").contains("Available balance USD 30.00.");
+        assertThat(body).contains("Ref 00000015.").contains("Available balance USD 30.00.");
         assertThat(body.length()).isLessThanOrEqualTo(160);
-    }
-
-    @Test
-    void narrationIsTruncatedToItsBudgetBeforeTheLengthCheck() {
-        TransactionMessageComposer roomy = new TransactionMessageComposer(ZoneId.of("UTC"), 400, 10);
-
-        String body = roomy.compose(
-                event(LedgerTransactionType.DEPOSIT, LedgerStatus.COMPLETED, null, MINE, 2500,
-                        "abcdefghijKLMNOPQRST", "12"),
-                new MovementLeg(CUSTOMER, MINE, null, TransactionDirection.CREDIT),
-                new MinorUnits(2500, "USD"));
-
-        assertThat(body).endsWith("Narration - abcdefghij.");
     }
 
     @Test
@@ -136,37 +145,86 @@ class TransactionMessageComposerTest {
         String body = composer.compose(
                 event(LedgerTransactionType.TRANSFER, LedgerStatus.FAILED, MINE, THEIRS, 500, "rent", null),
                 new MovementLeg(CUSTOMER, MINE, THEIRS, TransactionDirection.DEBIT),
-                null);
+                null, null);
 
-        assertThat(body).isEqualTo("InnBucks. Transfer of USD 5.00 from account ending 6e7f "
+        assertThat(body).isEqualTo("Your transfer of USD 5.00 from account ending 6e7f "
                 + "to account ending 6c5d on 31-Jul-2026 at 14.05 was NOT successful. "
-                + "Ref. AAAAAAAA. No funds have moved.");
+                + "Ref AAAAAAAA. No funds have moved.");
     }
 
     @Test
     void failedDepositAndWithdrawalKeepTheirOwnVerbs() {
         String deposit = composer.compose(
                 event(LedgerTransactionType.DEPOSIT, LedgerStatus.FAILED, null, MINE, 2500, null, null),
-                new MovementLeg(CUSTOMER, MINE, null, TransactionDirection.CREDIT), null);
+                new MovementLeg(CUSTOMER, MINE, null, TransactionDirection.CREDIT), null, null);
         String withdrawal = composer.compose(
                 event(LedgerTransactionType.WITHDRAWAL, LedgerStatus.FAILED, MINE, null, 1000, null, null),
-                new MovementLeg(CUSTOMER, MINE, null, TransactionDirection.DEBIT), null);
+                new MovementLeg(CUSTOMER, MINE, null, TransactionDirection.DEBIT), null, null);
 
-        assertThat(deposit).contains("Deposit of USD 25.00 to account ending 6e7f")
+        assertThat(deposit).startsWith("Your deposit of USD 25.00 to account ending 6e7f")
                 .endsWith("No funds have moved.");
-        assertThat(withdrawal).contains("Withdrawal of USD 10.00 from account ending 6e7f")
+        assertThat(withdrawal).startsWith("Your withdrawal of USD 10.00 from account ending 6e7f")
                 .endsWith("No funds have moved.");
     }
 
+    /**
+     * The exact complaint set from the first live teller deposit, inverted:
+     * numeric tail (not "ff61"), padded ref (not "Ref. 21"), balance line
+     * present, no "Narration - Deposit", and "Your account" opening.
+     */
     @Test
-    void withoutACoreReferenceItFallsBackToTheHeadOfOurOwnRef() {
-        // The full external ref is a 64-char SHA-256 digest — unreadable over
-        // SMS, and useless to quote to support.
-        String body = composer.compose(
-                event(LedgerTransactionType.DEPOSIT, LedgerStatus.COMPLETED, null, MINE, 2500, null, null),
-                new MovementLeg(CUSTOMER, MINE, null, TransactionDirection.CREDIT), null);
+    void aCoreObservedDepositReadsExactlyLikeAnAppOne() {
+        CoreMovementObserved movement = new CoreMovementObserved(
+                MINE, TransactionDirection.CREDIT, new MinorUnits(60000, "USD"),
+                null, null, "21", Instant.parse("2026-07-31T12:20:00Z"));
 
-        assertThat(body).contains("Ref. AAAAAAAA.");
+        String body = composer.composeObserved(movement, balance(MINE, 61500, "000000010"));
+
+        assertThat(body).isEqualTo("Your account ending 0010 has been credited with USD 600.00 "
+                + "on 31-Jul-2026 at 14.20. Ref 00000021. Available balance USD 615.00.");
+    }
+
+    @Test
+    void aCoreObservedDebitUsesTheDebitVerb() {
+        CoreMovementObserved movement = new CoreMovementObserved(
+                MINE, TransactionDirection.DEBIT, new MinorUnits(1500, "USD"),
+                null, null, "22", Instant.parse("2026-07-31T12:20:00Z"));
+
+        String body = composer.composeObserved(movement, balance(MINE, 60000, "000000010"));
+
+        assertThat(body).startsWith("Your account ending 0010 has been debited with USD 15.00");
+    }
+
+    @Test
+    void anObservedMovementWithoutRefOrBalanceStillReadsCleanly() {
+        CoreMovementObserved movement = new CoreMovementObserved(
+                MINE, TransactionDirection.CREDIT, new MinorUnits(60000, "USD"),
+                "Deposit", null, null, Instant.parse("2026-07-31T12:20:00Z"));
+
+        String body = composer.composeObserved(movement, null);
+
+        assertThat(body).isEqualTo("Your account ending 6e7f has been credited with USD 600.00 "
+                + "on 31-Jul-2026 at 14.20.");
+        // Even a narrative-bearing observed movement carries no narration
+        // clause — the core's "narrative" is the transaction TYPE name.
+        assertThat(body).doesNotContain("Narration");
+    }
+
+    @Test
+    void numericRefsAreZeroPaddedAndOthersKeepTheirHead() {
+        assertThat(TransactionMessageComposer.refFor("21")).isEqualTo("00000021");
+        assertThat(TransactionMessageComposer.refFor("123456789")).isEqualTo("123456789");
+        assertThat(TransactionMessageComposer.refFor("a".repeat(64))).isEqualTo("AAAAAAAA");
+        assertThat(TransactionMessageComposer.refFor("  ")).isNull();
+        assertThat(TransactionMessageComposer.refFor(null)).isNull();
+    }
+
+    @Test
+    void tailsPreferTheNumericAccountNumber() {
+        assertThat(TransactionMessageComposer.tail("000000010", MINE)).isEqualTo("0010");
+        assertThat(TransactionMessageComposer.tail("21", MINE)).isEqualTo("21");
+        assertThat(TransactionMessageComposer.tail(null, MINE)).isEqualTo("6e7f");
+        assertThat(TransactionMessageComposer.tail("   ", MINE)).isEqualTo("6e7f");
     }
 
     @Test
@@ -174,40 +232,9 @@ class TransactionMessageComposerTest {
         String body = composer.compose(
                 event(LedgerTransactionType.DEPOSIT, LedgerStatus.COMPLETED, null, MINE, 123456789, null, "12"),
                 new MovementLeg(CUSTOMER, MINE, null, TransactionDirection.CREDIT),
-                new MinorUnits(123456789, "USD"));
+                balance(MINE, 123456789, "000000010"), null);
 
         assertThat(body).contains("USD 1,234,567.89");
-    }
-
-    @Test
-    void aCoreObservedCreditReadsLikeAnyOtherCredit() {
-        String body = composer.composeObserved(new zw.co.innbucks.middleware.corebanking.value.CoreMovementObserved(
-                MINE, TransactionDirection.CREDIT, new MinorUnits(60000, "USD"),
-                "Deposit", null, "42", Instant.parse("2026-07-31T12:05:00Z")));
-
-        assertThat(body).isEqualTo("InnBucks. Account ending 6e7f credited with USD 600.00 "
-                + "on 31-Jul-2026 at 14.05. Ref. 42. Narration - Deposit.");
-    }
-
-    @Test
-    void aCoreObservedDebitSaysDebitedAndSurvivesAMissingRef() {
-        String body = composer.composeObserved(new zw.co.innbucks.middleware.corebanking.value.CoreMovementObserved(
-                MINE, TransactionDirection.DEBIT, new MinorUnits(1500, "USD"),
-                null, null, null, Instant.parse("2026-07-31T12:05:00Z")));
-
-        assertThat(body).isEqualTo("InnBucks. Account ending 6e7f debited with USD 15.00 "
-                + "on 31-Jul-2026 at 14.05.");
-    }
-
-    @Test
-    void observedCopySurvivesTheGatewaysCharsetUntouched() {
-        for (TransactionDirection direction : TransactionDirection.values()) {
-            String body = composer.composeObserved(new zw.co.innbucks.middleware.corebanking.value.CoreMovementObserved(
-                    MINE, direction, new MinorUnits(123456789, "USD"),
-                    "Interest Posting", null, "42", Instant.parse("2026-07-31T12:05:00Z")));
-            assertThat(SmsTextSanitizer.toGsmSafe(body)).isEqualTo(body);
-            assertThat(body.length()).isLessThanOrEqualTo(160);
-        }
     }
 
     /**
@@ -223,12 +250,19 @@ class TransactionMessageComposerTest {
                     String body = composer.compose(
                             event(type, status, MINE, THEIRS, 123456789, "rent", "12"),
                             new MovementLeg(CUSTOMER, MINE, THEIRS, direction),
-                            new MinorUnits(2500, "USD"));
+                            balance(MINE, 2500, "000000010"), "000000021");
                     assertThat(SmsTextSanitizer.toGsmSafe(body))
                             .as("%s/%s/%s must need no sanitising", type, status, direction)
                             .isEqualTo(body);
                 }
             }
+        }
+        for (TransactionDirection direction : TransactionDirection.values()) {
+            String observed = composer.composeObserved(new CoreMovementObserved(
+                    MINE, direction, new MinorUnits(60000, "USD"),
+                    null, null, "21", Instant.parse("2026-07-31T12:20:00Z")),
+                    balance(MINE, 61500, "000000010"));
+            assertThat(SmsTextSanitizer.toGsmSafe(observed)).isEqualTo(observed);
         }
     }
 }

@@ -126,8 +126,10 @@ class TransactionNotifierTest {
         verify(sms, times(2)).send(to.capture(), body.capture());
 
         assertThat(to.getAllValues()).containsExactly("+263782606983", "+263771234567");
-        assertThat(body.getAllValues().get(0)).contains("Transfer of USD 5.00 sent from account ending 6e7f");
-        assertThat(body.getAllValues().get(1)).contains("Account ending 6c5d credited with USD 5.00");
+        assertThat(body.getAllValues().get(0))
+                .contains("You sent USD 5.00 from your account ending 6e7f to account ending 6c5d");
+        assertThat(body.getAllValues().get(1))
+                .contains("Your account ending 6c5d has been credited with USD 5.00 from account ending 6e7f");
     }
 
     @Test
@@ -137,8 +139,10 @@ class TransactionNotifierTest {
         notifier.deliver(event(LedgerTransactionType.TRANSFER, LedgerStatus.COMPLETED,
                 SENDER_ACCT, RECIPIENT_ACCT));
 
-        verify(port).getBalance(new AccountRef(SENDER_ACCT));
-        verify(port).getBalance(new AccountRef(RECIPIENT_ACCT));
+        // At least once each: the leg's own balance read plus the display-only
+        // counterparty account-number read hit the same call.
+        verify(port, org.mockito.Mockito.atLeastOnce()).getBalance(new AccountRef(SENDER_ACCT));
+        verify(port, org.mockito.Mockito.atLeastOnce()).getBalance(new AccountRef(RECIPIENT_ACCT));
     }
 
     @Test

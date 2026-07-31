@@ -127,7 +127,7 @@ class TransactionFlowIntegrationTest {
         stubPort.onListAccounts = ref -> List.of(new DepositAccountSummary(
                 new AccountRef(wallet), "InnBucks Wallet", "KES", new MinorUnits(150000L, "KES")));
         stubPort.onGetBalance = account -> new AccountBalance(account,
-                new MinorUnits(150000L, "KES"), new MinorUnits(150000L, "KES"));
+                new MinorUnits(150000L, "KES"), new MinorUnits(150000L, "KES"), "000000010");
         stubPort.onGetProfile = ref -> new CustomerProfile(
                 new zw.co.innbucks.middleware.corebanking.value.CoreCustomerRef(ref.externalId()),
                 "Tariro", "Moyo", "ACTIVE");
@@ -390,11 +390,10 @@ class TransactionFlowIntegrationTest {
         String alert = smsSender.messages.poll(10, TimeUnit.SECONDS);
         assertThat(alert).isNotNull();
         assertThat(alert)
-                .startsWith("+254712000099 | InnBucks. Account ending ")
-                .contains(" credited with KES 250.00 on ")
-                // The core's own reference, not our 64-char SHA-256 external ref.
-                .contains("Ref. CORE-501.")
-                // Balance read for the account the message is about.
+                // The owner's voice: "Your account", NUMERIC tail from the
+                // core's accountNo, padded core reference, balance line.
+                .startsWith("+254712000099 | Your account ending 0010 has been credited with KES 250.00 on ")
+                .contains("Ref CORE-501.")
                 .contains("Available balance KES 1,500.00.")
                 .endsWith("Narration - cash in.");
     }

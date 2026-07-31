@@ -11,8 +11,8 @@ import org.springframework.transaction.event.TransactionalEventListener;
 import zw.co.innbucks.middleware.common.msisdn.MsisdnMasking;
 import zw.co.innbucks.middleware.corebanking.CoreBankingPort;
 import zw.co.innbucks.middleware.corebanking.value.AccountRef;
+import zw.co.innbucks.middleware.corebanking.value.AccountBalance;
 import zw.co.innbucks.middleware.corebanking.value.CoreCustomerRef;
-import zw.co.innbucks.middleware.corebanking.value.MinorUnits;
 import zw.co.innbucks.middleware.corebanking.value.TransactionDirection;
 import zw.co.innbucks.middleware.customer.Customer;
 import zw.co.innbucks.middleware.customer.CustomerRepository;
@@ -201,8 +201,12 @@ public class TransactionNotifier {
                         leg.customerId(), event.transactionId());
                 return;
             }
-            MinorUnits balance = event.completed() ? balanceOf(leg.accountId()) : null;
-            String body = composer.compose(event, leg, balance);
+            AccountBalance balance = event.completed() ? balanceOf(leg.accountId()) : null;
+            // The other side's customer-facing account number, for the message
+            // tail only — its balance is read but NEVER rendered here.
+            String counterpartyNumber = event.completed() && leg.counterparty() != null
+                    ? accountNumberOf(leg.counterparty()) : null;
+            String body = composer.compose(event, leg, balance, counterpartyNumber);
             smsSender.send(customer.getMsisdn(), body);
             counter(event, direction, "sent").increment();
             log.info("Transaction alert sent to {} for ledger row id={} type={} leg={}",
@@ -216,18 +220,28 @@ public class TransactionNotifier {
     }
 
     /** Best-effort: a balance we cannot read costs the message its balance line, nothing more. */
-    private MinorUnits balanceOf(String accountId) {
+    private AccountBalance balanceOf(String accountId) {
         CoreBankingPort port = corePort.getIfAvailable();
         if (port == null || accountId == null) {
             return null;
         }
         try {
-            return port.getBalance(new AccountRef(accountId)).available();
+            return port.getBalance(new AccountRef(accountId));
         } catch (RuntimeException ex) {
             log.warn("Balance read failed for account {} — sending the alert without a balance line: {}",
                     AccountMasking.maskAccount(accountId), ex.toString());
             return null;
         }
+    }
+
+    /**
+     * The counterparty's customer-facing account NUMBER, for display masking
+     * only. Null (falling back to the externalId tail) when the read fails —
+     * a display nicety must never cost the alert.
+     */
+    private String accountNumberOf(String accountId) {
+        AccountBalance balance = balanceOf(accountId);
+        return balance == null ? null : balance.accountNumber();
     }
 
     private Counter counter(SettledMovementEvent event, String leg, String outcome) {
