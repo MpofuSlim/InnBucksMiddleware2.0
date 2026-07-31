@@ -42,6 +42,15 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # EVERY var in .env reaches the container. Without this, only the
+    # explicit environment: entries below did, and each new slice's tunables
+    # had to be added there BY HAND — forgetting one meant the operator set a
+    # value in .env and the app silently ran without it (that is exactly how
+    # FINERACT_CORE_EVENTS_TOKEN shipped dead: token in .env, webhook
+    # disabled, no error anywhere). The explicit entries below now carry only
+    # what needs a computed value or a fail-fast `:?` check — for those,
+    # environment: wins over env_file, so the checks still fire.
+    env_file: .env
     environment:
       # Datasource — reach the in-network Postgres by service name.
       DATASOURCE_URL: jdbc:postgresql://postgres:5432/innbucks
