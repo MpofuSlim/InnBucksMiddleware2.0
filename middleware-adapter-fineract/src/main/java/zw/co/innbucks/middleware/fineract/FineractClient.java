@@ -119,7 +119,7 @@ public class FineractClient {
         putLocaleAndDateFormat(body);
         return write(idempotencyKey, () -> writeClient.post()
                 .uri("/v1/clients")
-                .header(IDEMPOTENCY_HEADER, idempotencyKey)
+                .header(IDEMPOTENCY_HEADER, FineractIdempotencyKey.forCore(idempotencyKey))
                 .body(body)
                 .retrieve()
                 .body(CommandResponse.class));
@@ -134,7 +134,7 @@ public class FineractClient {
         putLocaleAndDateFormat(body);
         return write(idempotencyKey, () -> writeClient.post()
                 .uri("/v1/savingsaccounts")
-                .header(IDEMPOTENCY_HEADER, idempotencyKey)
+                .header(IDEMPOTENCY_HEADER, FineractIdempotencyKey.forCore(idempotencyKey))
                 .body(body)
                 .retrieve()
                 .body(CommandResponse.class));
@@ -146,7 +146,7 @@ public class FineractClient {
         putLocaleAndDateFormat(body);
         return write(idempotencyKey, () -> writeClient.post()
                 .uri("/v1/savingsaccounts/{id}?command=approve", savingsId)
-                .header(IDEMPOTENCY_HEADER, idempotencyKey)
+                .header(IDEMPOTENCY_HEADER, FineractIdempotencyKey.forCore(idempotencyKey))
                 .body(body)
                 .retrieve()
                 .body(CommandResponse.class));
@@ -158,7 +158,7 @@ public class FineractClient {
         putLocaleAndDateFormat(body);
         return write(idempotencyKey, () -> writeClient.post()
                 .uri("/v1/savingsaccounts/{id}?command=activate", savingsId)
-                .header(IDEMPOTENCY_HEADER, idempotencyKey)
+                .header(IDEMPOTENCY_HEADER, FineractIdempotencyKey.forCore(idempotencyKey))
                 .body(body)
                 .retrieve()
                 .body(CommandResponse.class));
@@ -192,7 +192,7 @@ public class FineractClient {
         return write(idempotencyKey, () -> writeClient.post()
                 .uri("/v1/savingsaccounts/external-id/{acct}/transactions?command={cmd}",
                         accountExternalId, command)
-                .header(IDEMPOTENCY_HEADER, idempotencyKey)
+                .header(IDEMPOTENCY_HEADER, FineractIdempotencyKey.forCore(idempotencyKey))
                 .body(body)
                 .retrieve()
                 .body(CommandResponse.class));
@@ -216,7 +216,7 @@ public class FineractClient {
         putLocaleAndDateFormat(body);
         return write(idempotencyKey, () -> writeClient.post()
                 .uri("/v1/accounttransfers")
-                .header(IDEMPOTENCY_HEADER, idempotencyKey)
+                .header(IDEMPOTENCY_HEADER, FineractIdempotencyKey.forCore(idempotencyKey))
                 .body(body)
                 .retrieve()
                 .body(CommandResponse.class));

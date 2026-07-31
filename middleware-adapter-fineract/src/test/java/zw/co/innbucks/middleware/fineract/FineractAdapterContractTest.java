@@ -104,11 +104,11 @@ class FineractAdapterContractTest {
         // Each leg is dedup'd upstream under its OWN key — a crash between legs
         // must not make a retry replay the wrong leg's cached result.
         wireMock.verify(postRequestedFor(urlEqualTo("/v1/savingsaccounts"))
-                .withHeader("Idempotency-Key", equalTo("reg-key:create")));
+                .withHeader("Idempotency-Key", equalTo(FineractIdempotencyKey.forCore("reg-key:create"))));
         wireMock.verify(postRequestedFor(urlEqualTo("/v1/savingsaccounts/11?command=approve"))
-                .withHeader("Idempotency-Key", equalTo("reg-key:approve")));
+                .withHeader("Idempotency-Key", equalTo(FineractIdempotencyKey.forCore("reg-key:approve"))));
         wireMock.verify(postRequestedFor(urlEqualTo("/v1/savingsaccounts/11?command=activate"))
-                .withHeader("Idempotency-Key", equalTo("reg-key:activate")));
+                .withHeader("Idempotency-Key", equalTo(FineractIdempotencyKey.forCore("reg-key:activate"))));
     }
 
     @Test
