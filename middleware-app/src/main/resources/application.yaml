@@ -174,6 +174,7 @@ fineract:
   write-password: ${FINERACT_WRITE_PASSWORD:}
   office-id: ${FINERACT_OFFICE_ID:1}
   savings-product-id: ${FINERACT_SAVINGS_PRODUCT_ID:}
+  payment-type-id: ${FINERACT_PAYMENT_TYPE_ID:}
   currency: ${FINERACT_CURRENCY:}
   locale: ${FINERACT_LOCALE:en}
   date-format: ${FINERACT_DATE_FORMAT:yyyy-MM-dd}

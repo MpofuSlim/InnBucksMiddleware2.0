@@ -53,6 +53,7 @@ fineract:
   write-username: ${FINERACT_WRITE_USERNAME:mifos}
   write-password: ${FINERACT_WRITE_PASSWORD:password}
   savings-product-id: ${FINERACT_SAVINGS_PRODUCT_ID:1}
+  payment-type-id: ${FINERACT_PAYMENT_TYPE_ID:1}
   currency: ${FINERACT_CURRENCY:KES}
 
 management:

@@ -80,6 +80,7 @@ fineract:
   write-password: test-write-secret
   office-id: 1
   savings-product-id: 1
+  payment-type-id: 1
   currency: KES
   locale: en
   date-format: yyyy-MM-dd

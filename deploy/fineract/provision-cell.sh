@@ -6,6 +6,7 @@
 #   2. (optional) rotate the built-in admin password    ROTATE_ADMIN_PASSWORD
 #   3. allow the cell currency
 #   4. create the wallet savings product                -> FINERACT_SAVINGS_PRODUCT_ID
+#   4b. create the payment type for wallet movements    -> FINERACT_PAYMENT_TYPE_ID
 #   5. create TWO least-privilege roles (read / write) after verifying every
 #      permission code exists on this build — never ALL_FUNCTIONS
 #   6. create the two AppUsers the middleware rides     innbucks-mw-read / -write
@@ -25,6 +26,7 @@
 #   ROTATE_ADMIN_PASSWORD if set, admin's password is changed to this FIRST
 #                         (on a re-run, also accepted as the CURRENT password)
 #   PRODUCT_NAME          default: InnBucks Wallet   PRODUCT_SHORT: IBWL
+#   PAYMENT_TYPE_NAME     default: InnBucks Wallet
 #   CURL_OPTS             e.g. --cacert cell-ca.crt  (avoid -k outside first-boot checks)
 #   RUN_SMOKE             1 to run the probe sequence (leaves a SMOKE-Probe client behind)
 #
@@ -75,6 +77,7 @@ MW_WRITE_PASSWORD="${MW_WRITE_PASSWORD:?export MW_WRITE_PASSWORD}"
 CELL_CURRENCY="${CELL_CURRENCY:?export CELL_CURRENCY (ISO-4217, e.g. USD)}"
 PRODUCT_NAME="${PRODUCT_NAME:-InnBucks Wallet}"
 PRODUCT_SHORT="${PRODUCT_SHORT:-IBWL}"
+PAYMENT_TYPE_NAME="${PAYMENT_TYPE_NAME:-InnBucks Wallet}"
 CURL_OPTS="${CURL_OPTS:-}"
 
 # Every code below is checked against the running build before the roles are
@@ -295,6 +298,23 @@ else
   log "product exists id=${PRODUCT_ID}"
 fi
 
+log "4b/7 ensuring payment type '${PAYMENT_TYPE_NAME}' ..."
+# Fineract validates paymentTypeId as notNull() on EVERY savings deposit and
+# withdrawal (SavingsAccountTransactionDataValidator.validate) — a cell without
+# one 400s every money movement the middleware attempts, not just the smoke.
+PAYMENT_TYPE_ID=$(api GET "/v1/paymenttypes" \
+  | jq -r --arg n "$PAYMENT_TYPE_NAME" '[.. | objects | select(.name? == $n)] | .[0].id // empty')
+if [[ -z "$PAYMENT_TYPE_ID" ]]; then
+  PAYMENT_TYPE_ID=$(api POST "/v1/paymenttypes" "$(jq -n --arg n "$PAYMENT_TYPE_NAME" '{
+        name:$n, description:"InnBucks middleware wallet movements",
+        isCashPayment:false, position:1
+      }')" | jq -r '[.. | objects | select(.resourceId? != null)] | .[0].resourceId // empty')
+  [[ -n "$PAYMENT_TYPE_ID" ]] || fail "could not create payment type '${PAYMENT_TYPE_NAME}' — check CREATE_PAYMENTTYPE permission"
+  log "created payment type id=${PAYMENT_TYPE_ID}"
+else
+  log "payment type exists id=${PAYMENT_TYPE_ID}"
+fi
+
 log "5/7 ensuring least-privilege roles ..."
 AVAILABLE=$(api GET "/v1/permissions" | jq -r '.[].code')
 for p in "${READ_PERMS[@]}" "${WRITE_PERMS[@]}"; do
@@ -391,8 +411,8 @@ if [[ "${RUN_SMOKE:-0}" == "1" ]]; then
     "$(jq -n --arg d "$TODAY" '{activatedOnDate:$d, locale:"en", dateFormat:"yyyy-MM-dd"}')" \
     innbucks-mw-write "$MW_WRITE_PASSWORD" >/dev/null
   api POST "/v1/savingsaccounts/external-id/${CLIENT_EXT}%3Awallet/transactions?command=deposit" \
-    "$(jq -n --arg d "$TODAY" --arg ref "$REF" '{
-        transactionDate:$d, transactionAmount:1.00, externalId:$ref,
+    "$(jq -n --arg d "$TODAY" --arg ref "$REF" --argjson pt "$PAYMENT_TYPE_ID" '{
+        transactionDate:$d, transactionAmount:1.00, externalId:$ref, paymentTypeId:$pt,
         locale:"en", dateFormat:"yyyy-MM-dd"}')" \
     innbucks-mw-write "$MW_WRITE_PASSWORD" >/dev/null
   # Reconciliation read with the READ credential — proves both AppUsers.
@@ -406,6 +426,7 @@ fi
 log "DONE. Middleware .env values:"
 cat >&2 <<EOF
   FINERACT_SAVINGS_PRODUCT_ID=${PRODUCT_ID}
+  FINERACT_PAYMENT_TYPE_ID=${PAYMENT_TYPE_ID}
   FINERACT_CURRENCY=${CELL_CURRENCY}
   FINERACT_OFFICE_ID=1
   FINERACT_READ_USERNAME=innbucks-mw-read

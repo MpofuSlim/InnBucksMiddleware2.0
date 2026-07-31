@@ -182,6 +182,9 @@ public class FineractClient {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("transactionDate", today());
         body.put("transactionAmount", amount);
+        // Mandatory on savings transactions — Fineract validates it notNull()
+        // with no conditional, so omitting it 400s every deposit/withdrawal.
+        body.put("paymentTypeId", properties.paymentTypeId());
         // The reconciliation handle: ALWAYS attached, which is what makes a
         // later 404-by-ref a POSITIVE "this write never landed".
         body.put("externalId", transactionExternalId);

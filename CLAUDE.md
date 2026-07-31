@@ -252,8 +252,12 @@ there, or reference the aliases when writing runbook snippets:
    settable) → absent transfer stays UNKNOWN, parked for the operator; the
    customer-retry path is still fully dedup'd upstream by Idempotency-Key.
    Adapter activates on `innbucks.core.provider=fineract` (then every
-   `fineract.*` property is boot-required). Contract pinned by standalone
-   WireMock tests (22 cases). Gotcha: colon-bearing externalIds
+   `fineract.*` property is boot-required). **`FINERACT_PAYMENT_TYPE_ID`
+   is boot-required too**: Fineract validates `paymentTypeId` as `notNull()`
+   on every savings deposit/withdrawal, so a cell without one 400s every
+   money movement — `provision-cell.sh` creates the payment type and prints
+   the id. Contract pinned by standalone
+   WireMock tests (23 cases). Gotcha: colon-bearing externalIds
    (`<uuid>:wallet`) hit the wire percent-encoded (`%3A`) — WireMock stub
    URLs must match the encoded form.
 

@@ -105,7 +105,22 @@ class FineractClientContractTest {
                 // The reconciliation handle is ALWAYS attached.
                 .withRequestBody(matchingJsonPath("$.externalId", equalTo("ref-1")))
                 .withRequestBody(matchingJsonPath("$.transactionDate", equalTo("2026-07-30")))
+                // Fineract validates paymentTypeId notNull() on every savings
+                // transaction — omitting it 400s the whole money movement.
+                .withRequestBody(matchingJsonPath("$.paymentTypeId", equalTo("7")))
                 .withRequestBody(matchingJsonPath("$.locale", equalTo("en"))));
+    }
+
+    @Test
+    void withdrawalCarriesThePaymentTypeToo() {
+        wireMock.stubFor(post(urlPathEqualTo("/v1/savingsaccounts/external-id/acct-1/transactions"))
+                .willReturn(okJson("{\"resourceId\":101,\"changes\":{\"transactionAmount\":5.00}}")));
+
+        client.withdraw("acct-1", new BigDecimal("5.00"), "ref-w", "key-w");
+
+        wireMock.verify(postRequestedFor(urlPathEqualTo("/v1/savingsaccounts/external-id/acct-1/transactions"))
+                .withQueryParam("command", equalTo("withdrawal"))
+                .withRequestBody(matchingJsonPath("$.paymentTypeId", equalTo("7"))));
     }
 
     @Test

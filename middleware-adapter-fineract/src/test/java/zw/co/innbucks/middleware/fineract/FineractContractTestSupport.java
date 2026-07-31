@@ -35,7 +35,7 @@ final class FineractContractTestSupport {
                 TENANT,
                 READ_USER, READ_PASS,
                 WRITE_USER, WRITE_PASS,
-                1L, 3L, "KES", "en", "yyyy-MM-dd",
+                1L, 3L, 7L, "KES", "en", "yyyy-MM-dd",
                 Duration.ofSeconds(2), Duration.ofSeconds(5),
                 new FineractProperties.Resilience(false, 20, 10, 50,
                         Duration.ofSeconds(30), 3, Duration.ofSeconds(8), 3, Duration.ofMillis(50)));
