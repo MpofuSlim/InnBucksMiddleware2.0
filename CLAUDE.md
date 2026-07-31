@@ -201,6 +201,41 @@ there, or reference the aliases when writing runbook snippets:
   `docs/fineract-cell-runbook.md`.
 * `innbucks-prod` — production. Deliberate, runbook-driven changes only.
 
+### Deploying to a cell after a merge
+
+> [!IMPORTANT]
+> **Every time a PR merges to `main`, output the exact pull + run commands for
+> the new image.** This is a standing expectation — don't make the operator ask.
+
+Deploys are manual `docker compose` on the box. The Release workflow gates on
+the test suite, Trivy-scans, pushes `ghcr.io/mpofuslim/innbucks-middleware`
+as `:latest` **and** `:sha-<commit>`, and attests provenance — so the box
+never builds, it pulls. Confirm the merge commit's Release run is green first.
+
+```sh
+cd ~/InnBucksMiddleware2.0
+git pull
+
+# The tag is the FULL 40-char SHA (metadata-action `type=sha,format=long`).
+# A short SHA is not a tag that exists — it fails with "manifest unknown".
+TAG="sha-$(git rev-parse origin/main)"
+
+sed -i '/^IMAGE_TAG=/d' .env && echo "IMAGE_TAG=$TAG" >> .env
+docker pull "ghcr.io/mpofuslim/innbucks-middleware:$TAG"
+
+# --force-recreate is NOT optional: the compose override bind-mounts the
+# truststore as a single FILE, which binds the inode; a plain restart keeps
+# the old container and the old image. --no-build because the service still
+# carries a build: section for the local-build fallback.
+docker compose up -d --no-build --force-recreate middleware
+docker compose logs -f middleware
+```
+
+Pin `IMAGE_TAG` to a `sha-` tag, never leave a cell on mutable `:latest` —
+rollback is then re-pinning the previous tag and re-running the same two
+commands, with the exact bytes that were running before. Full procedure
+(TLS, truststore, edge, smoke) in `docs/fineract-cell-runbook.md`.
+
 ## Slice progression
 
 1. **Scaffold + core port** — multi-module build; ported OradianMiddleware's
@@ -390,8 +425,77 @@ there, or reference the aliases when writing runbook snippets:
    `StepUpFlowIntegrationTest`, and the device-mismatch case in
    `LoginFlowIntegrationTest`.
 
+6. **Release workflow — DONE.** `.github/workflows/release.yml`, mirroring the
+   ticketing fleet's supply chain: a `test` job GATES the image build (no
+   artifact is ever attested from a red commit), build with `load: true,
+   push: false` so Trivy scans the exact bytes CRITICAL/HIGH before they can
+   leave the runner, then push with `provenance: mode=max` + `sbom: true` +
+   a GitHub-native signed build-provenance attestation. Tags `:latest` (main
+   only), `:sha-<full-commit>`, and `v*` tags. `.trivyignore` is a governed
+   waiver list (owner + per-CVE reasoning + review date); the Dockerfile
+   runtime stage does a blanket `apk --no-cache upgrade` inside the pinned
+   Alpine branch — a named-package list made the gate a tripwire on every new
+   advisory — plus hard `apk info -e '<pkg>>=<fixed>'` floor assertions, but
+   ONLY for CVEs whose fix exists in the branch (an assertion Alpine can't
+   satisfy fails every build forever; verify with `apk policy <pkg>` before
+   adding one). See the deploy commands under **Environments** above.
+
+7. **Transaction alerts (customer SMS on every money movement) — DONE.**
+   `notify/txn`: one SMS after money ACTUALLY moves — deposit, withdrawal,
+   outgoing transfer, and the incoming leg when the destination account
+   belongs to a customer of this cell. Rides the same `SmsSender` (so the
+   same WhatsApp fallback) as OTP.
+   - **The seam is `LedgerService.transition()`**, which publishes
+     `SettledMovementEvent` for COMPLETED/FAILED only. Being at the one
+     chokepoint means a row the reconciler resolves an hour later alerts
+     exactly like one that completed on the request thread, and a future
+     caller cannot forget to. SUBMITTED and UNKNOWN are deliberately SILENT —
+     UNKNOWN is precisely the state where any message we could send might be
+     false.
+   - **Subordinate to the movement, structurally.** The listener is
+     `@TransactionalEventListener(AFTER_COMMIT)` (nobody is told about a
+     movement that then rolled back) `@Async` on a bounded pool (a slow
+     gateway must not add latency to the money path), and NOTHING escapes it
+     — an exception from an after-commit callback propagates to the caller of
+     `commit()`, which would make a dead SMS gateway look like a failed
+     deposit. This is the deliberate OPPOSITE of the OTP path, where delivery
+     failure DOES roll the challenge back. Fire-and-forget: a crash between
+     commit and send loses the message; the ledger + statement are the record.
+   - **Incoming-transfer recipients are resolved POSITIVELY.** The
+     `<customerUuid>:wallet` convention only yields a CANDIDATE; it is then
+     confirmed against the core's own account list for that customer before
+     anything is sent. Acting on the convention alone would send one
+     customer's amounts to another customer's phone. A core without
+     `CLIENT_ASSIGNED_EXTERNAL_ID` will need a persisted account→customer
+     map here, not a convention.
+   - **Copy constraints are load-bearing.** The gateway 400s on
+     ``! : / ? " * ;`` — hence `Ref.` and `14.05`, never `Ref:`/`14:05`;
+     `TransactionMessageComposerTest` asserts every template round-trips
+     `SmsTextSanitizer` unchanged, so a colon creeping back in fails the
+     build. Messages are budgeted to ONE 160-char GSM-7 segment: a narration
+     that would overflow is DROPPED (the alert still sends) rather than
+     silently doubling the per-transaction SMS bill. Accounts are masked to
+     their last four identifying characters, matching the `accountId` tail
+     the app already shows. Timestamps render in the deployment country's
+     civil zone (`Country.zoneId()`, ZW → Africa/Harare) — storage and logs
+     stay UTC.
+   - **Cost + config.** `innbucks.notify.transactions.*` (`TXN_ALERTS_*`):
+     `enabled` (default on), `notify-on-failure` (default OFF — the app
+     already renders the error and a core outage would SMS everyone who
+     tried; a transfer recipient is NEVER told about a failure), zone,
+     length budgets. This multiplies SMS spend by transaction volume — a
+     transfer between two of our customers is two messages. Watch
+     `innbucks.transaction.notifications{type,leg,outcome}`;
+     `outcome=failed` rising means customers are moving money blind, and
+     `outcome=dropped` means the queue saturated.
+   Contract pinned by `TransactionMessageComposerTest` (exact wording),
+   `TransactionNotifierTest` (routing + guard rails) and the
+   `aCompletedDepositAlertsTheCustomer` / silent-on-UNKNOWN cases in
+   `TransactionFlowIntegrationTest` — the last of which is the only proof the
+   after-commit + async wiring actually fires in a real context.
+
 Next (in order):
-6. **Veengu adapter** behind the same port (`V-Tenant`/`V-Access-Token`
+8. **Veengu adapter** behind the same port (`V-Tenant`/`V-Access-Token`
    headers, consent-then-execute saga, REVERSAL capability).
    **ON HOLD until the full Veengu API spec is in hand (owner's call,
    2026-07-30)** — do NOT start it from the older specs pinned in

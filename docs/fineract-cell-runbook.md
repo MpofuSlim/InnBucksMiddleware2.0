@@ -409,12 +409,27 @@ provenance. Every merge to `main` publishes `:latest` and
 `:sha-<commit>`; a `v*` tag publishes that too.
 
 ```sh
+# Log in once per box (classic PAT, read:packages scope is enough to pull).
+echo "$GHCR_TOKEN" | docker login ghcr.io -u mpofuslim --password-stdin
+
 # Pin the version this cell runs. :latest is mutable — fine for staging,
 # never for a cell you need to reason about after the fact.
-echo "IMAGE_TAG=sha-<commit>" >> .env
+#
+# The tag is the FULL 40-character commit SHA (the workflow uses
+# `type=sha,format=long`). A 7-character short SHA is not a tag that exists
+# and fails with "manifest unknown" — copy it from `git rev-parse origin/main`,
+# not from the abbreviated log.
+sed -i '/^IMAGE_TAG=/d' .env && echo "IMAGE_TAG=sha-$(git rev-parse origin/main)" >> .env
 
-docker compose pull middleware
-docker compose up -d
+# Plain `docker pull`, not `docker compose pull`: the middleware service still
+# carries a `build:` section (for the local-build fallback below), and compose
+# treats buildable services inconsistently across versions.
+docker pull "ghcr.io/mpofuslim/innbucks-middleware:sha-$(git rev-parse origin/main)"
+
+# --force-recreate is not optional: the compose override bind-mounts the
+# truststore as a SINGLE FILE, which binds the inode. A plain restart keeps
+# the old container (and the old image) alive.
+docker compose up -d --no-build --force-recreate middleware
 docker compose logs -f middleware
 ```
 

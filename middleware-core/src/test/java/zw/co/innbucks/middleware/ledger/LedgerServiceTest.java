@@ -4,6 +4,7 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.jdbc.core.JdbcTemplate;
 import zw.co.innbucks.middleware.audit.AuditAction;
 import zw.co.innbucks.middleware.audit.AuditOutcome;
@@ -35,13 +36,14 @@ class LedgerServiceTest {
     private final JdbcTemplate jdbcTemplate = mock(JdbcTemplate.class);
     private final AuditService auditService = mock(AuditService.class);
     private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+    private final ApplicationEventPublisher events = mock(ApplicationEventPublisher.class);
     private final Clock clock = Clock.fixed(Instant.parse("2026-07-30T10:00:00Z"), ZoneOffset.UTC);
 
     private LedgerService service;
 
     @BeforeEach
     void setUp() {
-        service = new LedgerService(repository, jdbcTemplate, auditService, meterRegistry, clock);
+        service = new LedgerService(repository, jdbcTemplate, auditService, meterRegistry, events, clock);
     }
 
     private LedgerTransaction row(UUID id, LedgerStatus status) {

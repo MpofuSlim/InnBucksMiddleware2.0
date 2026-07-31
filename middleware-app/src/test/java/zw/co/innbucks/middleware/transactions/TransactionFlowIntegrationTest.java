@@ -20,6 +20,7 @@ import zw.co.innbucks.middleware.common.country.Country;
 import zw.co.innbucks.middleware.corebanking.CoreProvider;
 import zw.co.innbucks.middleware.corebanking.exception.CoreClientException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreUnknownOutcomeException;
+import zw.co.innbucks.middleware.corebanking.value.AccountBalance;
 import zw.co.innbucks.middleware.corebanking.value.AccountRef;
 import zw.co.innbucks.middleware.corebanking.value.CustomerProfile;
 import zw.co.innbucks.middleware.corebanking.value.DepositAccountSummary;
@@ -27,6 +28,7 @@ import zw.co.innbucks.middleware.corebanking.value.MinorUnits;
 import zw.co.innbucks.middleware.corebanking.value.TransactionResult;
 import zw.co.innbucks.middleware.corebanking.value.TransactionState;
 import zw.co.innbucks.middleware.corebanking.value.TxRef;
+import zw.co.innbucks.middleware.otp.SmsSender;
 import zw.co.innbucks.middleware.support.PostgresTestContainer;
 import zw.co.innbucks.middleware.support.SettableCorePort;
 
@@ -34,6 +36,9 @@ import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -62,6 +67,22 @@ class TransactionFlowIntegrationTest {
         SettableCorePort settableCorePort() {
             return new SettableCorePort();
         }
+
+        /** Captures what the transaction-alert listener actually dispatched. */
+        @Bean
+        @Primary
+        CapturingSmsSender capturingSmsSender() {
+            return new CapturingSmsSender();
+        }
+    }
+
+    static class CapturingSmsSender implements SmsSender {
+        final BlockingQueue<String> messages = new LinkedBlockingQueue<>();
+
+        @Override
+        public void send(String e164Msisdn, String body) {
+            messages.add(e164Msisdn + " | " + body);
+        }
     }
 
     @Autowired
@@ -75,6 +96,9 @@ class TransactionFlowIntegrationTest {
 
     @Autowired
     JwtIssuer issuer;
+
+    @Autowired
+    CapturingSmsSender smsSender;
 
     MockMvc mockMvc;
     UUID customerId;
@@ -99,8 +123,11 @@ class TransactionFlowIntegrationTest {
                 customerId.toString(), Country.KE, "basic", CustomerScopes.DEFAULT, null, null));
 
         coreDeposits.set(0);
+        smsSender.messages.clear();
         stubPort.onListAccounts = ref -> List.of(new DepositAccountSummary(
                 new AccountRef(wallet), "InnBucks Wallet", "KES", new MinorUnits(150000L, "KES")));
+        stubPort.onGetBalance = account -> new AccountBalance(account,
+                new MinorUnits(150000L, "KES"), new MinorUnits(150000L, "KES"));
         stubPort.onGetProfile = ref -> new CustomerProfile(
                 new zw.co.innbucks.middleware.corebanking.value.CoreCustomerRef(ref.externalId()),
                 "Tariro", "Moyo", "ACTIVE");
@@ -290,6 +317,35 @@ class TransactionFlowIntegrationTest {
         // never FAILED, because the money may have moved.
         assertThat(jdbcTemplate.queryForObject(
                 "SELECT status FROM ledger_transaction", String.class)).isEqualTo("UNKNOWN");
+
+        // And NOT a word to the customer. An UNKNOWN row is precisely the case
+        // where any message we could send — "sent" or "failed" — might be false.
+        assertThat(smsSender.messages.poll(1, TimeUnit.SECONDS)).isNull();
+    }
+
+    /**
+     * The wiring proof for transaction alerts. The listener is an
+     * {@code AFTER_COMMIT} hook dispatched onto a background pool, so no unit
+     * test can show it actually fires inside a real context — only this can.
+     */
+    @Test
+    void aCompletedDepositAlertsTheCustomer() throws Exception {
+        mockMvc.perform(post("/transactions/deposit")
+                        .header(HttpHeaders.AUTHORIZATION, bearer).header("Idempotency-Key", "dep-sms-1")
+                        .contentType(MediaType.APPLICATION_JSON).content(depositBody(25000)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("SUCCESS"));
+
+        String alert = smsSender.messages.poll(10, TimeUnit.SECONDS);
+        assertThat(alert).isNotNull();
+        assertThat(alert)
+                .startsWith("+254712000099 | InnBucks. Account ending ")
+                .contains(" credited with KES 250.00 on ")
+                // The core's own reference, not our 64-char SHA-256 external ref.
+                .contains("Ref. CORE-501.")
+                // Balance read for the account the message is about.
+                .contains("Available balance KES 1,500.00.")
+                .endsWith("Narration - cash in.");
     }
 
     @Test
