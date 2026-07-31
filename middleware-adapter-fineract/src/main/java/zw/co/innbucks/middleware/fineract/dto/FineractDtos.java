@@ -1,5 +1,6 @@
 package zw.co.innbucks.middleware.fineract.dto;
 
+import com.fasterxml.jackson.annotation.JsonAlias;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 
 import java.math.BigDecimal;
@@ -16,12 +17,25 @@ public final class FineractDtos {
     }
 
     /**
-     * Fineract's own Page wrapper for the transaction search endpoint —
-     * {@code {"totalFilteredRecords": N, "pageItems": [...]}}, not Spring's.
+     * The transaction-search page envelope.
+     *
+     * <p>Two shapes are accepted because Fineract ships both: its own legacy
+     * {@code {"totalFilteredRecords": N, "pageItems": [...]}} wrapper, and the
+     * Spring Data {@code {"totalElements": N, "content": [...]}} form that the
+     * newer search endpoints use. Aliasing costs nothing and means a Fineract
+     * upgrade that flips the envelope doesn't take the statement down.
+     *
+     * <p><b>{@code totalFilteredRecords} is boxed on purpose.</b> A live cell
+     * returned the page with the count field ABSENT, and against a primitive
+     * {@code long} Jackson refuses the whole document — so a perfectly good
+     * page of transactions became a 500. Null here means "the core did not say
+     * how many there are", which is a legitimate answer the caller has to be
+     * able to represent rather than a parse failure.
      */
     @JsonIgnoreProperties(ignoreUnknown = true)
-    public record TransactionSearchPage(long totalFilteredRecords,
-                                        List<SavingsTransaction> pageItems) {
+    public record TransactionSearchPage(
+            @JsonAlias("totalElements") Long totalFilteredRecords,
+            @JsonAlias("content") List<SavingsTransaction> pageItems) {
     }
 
     /**

@@ -48,7 +48,7 @@ public class SettableCorePort implements CoreBankingPort {
     /** Defaults to an empty page — unlike the others, a statement has a sensible
      *  no-op so tests that never exercise it don't have to configure it. */
     public volatile Function<TransactionHistoryQuery, TransactionPage> onListTransactions =
-            query -> new TransactionPage(List.of(), 0);
+            query -> new TransactionPage(List.of(), 0L);
     public volatile TriFunction<CoreCustomerRef, String, IdempotencyKey, AccountRef> onOpenDepositAccount =
             (customer, extId, key) -> { throw new IllegalStateException("stub onOpenDepositAccount not configured"); };
 
