@@ -1,0 +1,201 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - "v*"
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - ".github/workflows/release.yml"
+      - "**/pom.xml"
+      - "mvnw"
+      - ".mvn/**"
+      - ".trivyignore"
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+  # OWASP A08 — build/artifact integrity. id-token mints the short-lived OIDC
+  # token for keyless signing; attestations stores the SLSA build-provenance
+  # attestation. Both only matter on push (signing is skipped for PRs).
+  id-token: write
+  attestations: write
+
+env:
+  IMAGE_NAME: innbucks-middleware
+
+jobs:
+  # Gate: no image is built, scanned, attested or pushed from a commit whose
+  # test suite is red. The Dockerfile builds with -DskipTests, so without this
+  # job a merge to main could publish a fully-attested image that was never
+  # tested — the provenance would certify an untested artifact. Duplicates
+  # ci.yml's verify deliberately: Release triggers independently (push, tags,
+  # workflow_dispatch), so gating on "CI passed somewhere else" leaves those
+  # paths unguarded.
+  test:
+    name: Test (gates image build)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up JDK
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      # The @SpringBootTest suites need Docker for the Postgres Testcontainer;
+      # ubuntu-latest ships it, so no extra setup — but if that ever changes,
+      # this is the job that breaks first.
+      - name: Build + test + integration-test
+        run: ./mvnw -B -ntp verify
+
+  build:
+    name: Build, scan, push, attest
+    needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+      # Third-party actions pinned to immutable commit SHAs (OWASP A08 —
+      # supply-chain integrity); Dependabot keeps the SHA + version comment in
+      # sync. Never downgrade a pin back to a floating tag.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4.5.1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          # Lowercase: GHCR rejects a mixed-case path, and the owner login is
+          # not necessarily lowercase.
+          images: ghcr.io/mpofuslim/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,format=long
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=tag
+            type=ref,event=pr
+
+      # Build into the local daemon (load) WITHOUT pushing, so Trivy scans the
+      # exact bytes before they can leave the runner. Provenance/SBOM are not
+      # set here: they need the registry exporter, which is incompatible with
+      # `load: true`. The push step re-runs from the gha cache (near-instant)
+      # with attestations on.
+      - name: Build image (load for scanning, no push)
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: Dockerfile
+          load: true
+          push: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=middleware
+          cache-to: type=gha,scope=middleware,mode=max
+
+      # A08: install Trivy from an IMMUTABLE version tag, never the mutable
+      # `main` branch. This job holds packages:write + id-token:write +
+      # attestations:write, so remote code piped to a shell here could push
+      # malicious images AND mint valid provenance for them. Pin both the
+      # installer ref and the installed version; bump deliberately (Dependabot
+      # does not track a raw curl).
+      - name: Install Trivy
+        env:
+          TRIVY_VERSION: "0.69.3"
+        run: |
+          # install.sh resolves the tag via the GitHub API, which
+          # intermittently rate-limits shared runners and fails with a
+          # misleading "unable to find v<X>". Same pinned version on every
+          # attempt — the retry adds resilience, not mutability.
+          for attempt in 1 2 3; do
+            if curl -sSfL "https://raw.githubusercontent.com/aquasecurity/trivy/v${TRIVY_VERSION}/contrib/install.sh" \
+              | sudo sh -s -- -b /usr/local/bin "v${TRIVY_VERSION}"; then
+              exit 0
+            fi
+            echo "Trivy install attempt ${attempt} failed; retrying in $((attempt * 15))s..."
+            sleep $((attempt * 15))
+          done
+          echo "::error::Trivy install failed after 3 attempts"
+          exit 1
+
+      # Gate: scan the LOADED local image and fail before the push step runs.
+      # Scanning after a push would make Trivy a report, not a gate — the
+      # vulnerable image would already be pullable.
+      - name: Scan image with Trivy
+        run: |
+          IMAGE=$(echo "${{ steps.meta.outputs.tags }}" | head -n 1)
+          trivy image \
+            --severity CRITICAL,HIGH \
+            --vuln-type os,library \
+            --ignore-unfixed \
+            --exit-code 1 \
+            --no-progress \
+            --ignorefile .trivyignore \
+            "$IMAGE"
+
+      # Push only after the scan passes, with a SLSA provenance attestation +
+      # SBOM attached in the registry. Cache-served from the build above.
+      - name: Push image + attach provenance & SBOM
+        id: push
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=middleware
+          provenance: mode=max
+          sbom: true
+
+      # GitHub-native SLSA build-provenance, signed keylessly via the runner's
+      # OIDC identity. Lets anyone verify a digest was built by THIS repo:
+      #   gh attestation verify oci://ghcr.io/mpofuslim/innbucks-middleware@<digest> \
+      #     --repo MpofuSlim/InnBucksMiddleware2.0
+      #
+      # Ticketing wraps this in a retry because its 7-leg matrix contends for
+      # the OIDC token endpoint. There is one image here and so no contention —
+      # a single step is honest; add the retry if it ever proves flaky.
+      - name: Attest build provenance
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-name: ghcr.io/mpofuslim/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Summary
+        if: github.event_name != 'pull_request'
+        run: |
+          {
+            echo "### Image published"
+            echo
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+            echo
+            echo "digest: \`${{ steps.push.outputs.digest }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

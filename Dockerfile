@@ -24,7 +24,15 @@ RUN ./mvnw -B -DskipTests package \
     && cp middleware-app/target/*.jar /workspace/app.jar
 
 FROM eclipse-temurin:21-jre-alpine AS runtime
-# Refresh the apk index + force-upgrade OpenSSL by name.
+# Refresh the apk index and upgrade EVERY package in the branch.
+#
+# This used to upgrade three packages by name (libssl3/libcrypto3/openssl).
+# That made the Release Trivy gate a tripwire on every future Alpine advisory:
+# libexpat and p11-kit both went HIGH with fixes already published, and the
+# build stayed on the vulnerable versions because they weren't on the list.
+# A blanket upgrade within the pinned Alpine branch picks up security point
+# releases as they ship — which is what the branch exists for — instead of
+# requiring a Dockerfile edit per CVE.
 #
 # Defence-in-depth, two layers:
 #   1) ARG ALPINE_SECURITY_REFRESH busts the Docker layer cache so this RUN
@@ -33,19 +41,21 @@ FROM eclipse-temurin:21-jre-alpine AS runtime
 #      a stale index replays forever. Bump the date string (or override via
 #      --build-arg in CI) for future advisories.
 #   2) `apk info -e '<pkg>>=<fixed-version>'` HARD-ASSERTS the installed version
-#      after the upgrade. If Alpine's mirror is lagging (or the upgrade line is
-#      ever deleted in a refactor), `docker build` fails immediately with a
-#      clear signal — strictly better than a green build + red Trivy a few
-#      minutes later. The security invariant belongs at the boundary that
-#      can't be skipped.
+#      after the upgrade, for CVEs we have actually been bitten by. If Alpine's
+#      mirror is lagging (or the upgrade line is ever deleted in a refactor),
+#      `docker build` fails immediately with a clear signal — strictly better
+#      than a green build + red Trivy a few minutes later. The security
+#      invariant belongs at the boundary that can't be skipped.
 #
-# CVE-2026-45447 (HIGH) — libssl3 / libcrypto3 / openssl PKCS#7 / S/MIME
-# signed-message handling. Fixed in alpine 3.5.7-r0. Trivy fails the build
-# on HIGH/CRITICAL CVEs.
-ARG ALPINE_SECURITY_REFRESH=2026-06-19-cve-2026-45447
+# Asserted floors — only for CVEs whose fix EXISTS in the pinned branch. An
+# assertion for a version Alpine 3.23 does not carry would fail every build
+# forever; see .trivyignore for the ones that need a base-image move instead.
+#   CVE-2026-45447 (HIGH) — libssl3/libcrypto3/openssl PKCS#7 / S/MIME
+#     signed-message handling; fixed in 3.5.7-r0.
+ARG ALPINE_SECURITY_REFRESH=2026-07-31-blanket-upgrade
 RUN echo "Security refresh: $ALPINE_SECURITY_REFRESH" \
  && apk update \
- && apk --no-cache upgrade libssl3 libcrypto3 openssl \
+ && apk --no-cache upgrade \
  && apk info -e 'libssl3>=3.5.7-r0' \
  && apk info -e 'libcrypto3>=3.5.7-r0' \
  && apk info -e 'openssl>=3.5.7-r0' \

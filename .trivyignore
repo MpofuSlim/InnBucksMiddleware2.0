@@ -1,0 +1,38 @@
+# Governed CVE waiver list for the InnBucks middleware image scan.
+#
+# RULES (a waiver without all three is a review failure):
+#   * every entry carries: the CVE id, an owner, a one-line reason, and a
+#     review-by date — as a comment directly above the id
+#   * prefer fixing/upgrading over waiving; a waiver is a scheduled debt,
+#     not a dismissal
+#   * remove entries at their review date or renew them consciously
+#
+# The Release workflow scans CRITICAL/HIGH before it pushes, so a red gate
+# blocks publication rather than reporting after the fact.
+
+# ---------------------------------------------------------------------------
+# Alpine 3.23 — NO FIX AVAILABLE IN THE PINNED BRANCH.
+#
+# Trivy reports a "fixed version" for these, which is why --ignore-unfixed does
+# not drop them, but that fix lands in a LATER Alpine branch. Verified against
+# the base image:
+#     apk policy libexpat p11-kit
+#     libexpat: 2.8.1-r0 (only)     p11-kit: 0.25.5-r2 (only)
+# There is nothing to upgrade to; the exit is a base-image bump when
+# eclipse-temurin ships a 3.24-based 21-jre-alpine, which is also when these
+# waivers should be deleted rather than renewed.
+#
+# owner: mpofuslim
+# review by: 2026-10-31
+
+# libexpat 2.8.1-r0 — handler call-depth tracking (56131) and copyString
+# integer overflow (56408). Reached only via native XML parsing; this service
+# parses JSON over HTTP and does not feed untrusted XML to expat, so the
+# exposure is indirect at worst. Not a dismissal — revisit at the date above.
+CVE-2026-56131
+CVE-2026-56408
+
+# p11-kit 0.25.5-r2 — NULL dereference via C_DeriveKey with specific NULL
+# parameters. Requires a PKCS#11 token path; the middleware uses JKS/PKCS12
+# files for TLS trust and no hardware/softoken PKCS#11 module.
+CVE-2026-2100

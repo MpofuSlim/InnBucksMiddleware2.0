@@ -38,7 +38,7 @@
         <!-- Postgres JDBC: 42.7.10 had CVE-2026-42198 (HIGH) — client-side DoS via
              malicious SCRAM-SHA-256 response. 42.7.11 fixes it. Same rationale as
              the Tomcat override: pin here, drop when the Boot BOM catches up. -->
-        <postgresql.version>42.7.11</postgresql.version>
+        <postgresql.version>42.7.12</postgresql.version>
         <!-- Bucket4j: token-bucket rate limiting on the public auth surface.
              Not managed by the Spring Boot BOM, so pin explicitly. -->
         <bucket4j.version>8.10.1</bucket4j.version>
