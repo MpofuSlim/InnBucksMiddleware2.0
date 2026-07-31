@@ -538,8 +538,46 @@ commands, with the exact bytes that were running before. Full procedure
    `TransactionFlowIntegrationTest` — the last of which is the only proof the
    after-commit + async wiring actually fires in a real context.
 
+8. **Core-initiated movement alerts (Fineract webhook) — DONE.** A teller/
+   admin posting money directly in the core sends no SMS through slice 7's
+   ledger seam (no ledger row → no event — found in staging when an admin
+   deposit stayed silent). Closed with the core talking BACK to us:
+   - **`CoreMovementListener` SPI in the port module** (the inverse of
+     `CoreBankingPort`): adapters translate their core's event wire format
+     into `CoreMovementObserved` and invoke it; nothing downstream learns a
+     core-specific field. `CoreMovementAlertService` implements it.
+   - **Fineract side**: `provision-cell.sh` (step 4c, needs
+     `CORE_EVENTS_TOKEN`) registers a Web hook on SAVINGSACCOUNT
+     DEPOSIT/WITHDRAWAL pointing at
+     `/internal/core-events/fineract/{token}` over the PRIVATE cell network.
+     Fineract's Web hook can set no auth header, so the token rides the URL
+     and IS the auth (constant-time compare; wrong/absent token → 404, not
+     401 — don't confirm the endpoint exists). Three-files-must-agree:
+     controller token + SecurityConfig permitAll + nginx
+     `location /middleware/internal/ { return 404; }` (runbook) —
+     springdoc `paths-to-exclude` keeps it out of Swagger.
+   - **The hook body is a TRIGGER, never a source of truth**: it carries the
+     pre-validation request, so the only fields read are the two numeric ids,
+     and everything customer-facing is POSITIVELY re-read from Fineract via
+     the read credential (`findSavingsById` + `findSavingsTransactionById`).
+     A lying payload cannot reach a customer.
+   - **Dedup by reference**: our movements attach the ledger `external_ref`
+     to the core transaction; the hook echoes it back; a ref found in our
+     ledger = already alerted via the ledger seam → dropped
+     (`outcome=deduped_ours`), or every app deposit would SMS twice.
+     Ownership is still POSITIVELY confirmed against the core's account list
+     (naming convention = candidate only), reversed transactions are silent,
+     and unprovable ownership means NO message, never a guess.
+   - `FINERACT_CORE_EVENTS_TOKEN` blank = webhook disabled (boot warns) — a
+     cell upgrades with zero config change and simply keeps the old gap
+     until the operator provisions the token + re-runs provision-cell.sh.
+   Contract pinned by `FineractCoreEventControllerTest` (WireMock, 10 cases
+   incl. wrong-token 404 + re-read verification), `CoreMovementAlertServiceTest`
+   (dedup, ownership, never-throw) and the observed-copy cases in
+   `TransactionMessageComposerTest`.
+
 Next (in order):
-8. **Veengu adapter** behind the same port (`V-Tenant`/`V-Access-Token`
+9. **Veengu adapter** behind the same port (`V-Tenant`/`V-Access-Token`
    headers, consent-then-execute saga, REVERSAL capability).
    **ON HOLD until the full Veengu API spec is in hand (owner's call,
    2026-07-30)** — do NOT start it from the older specs pinned in

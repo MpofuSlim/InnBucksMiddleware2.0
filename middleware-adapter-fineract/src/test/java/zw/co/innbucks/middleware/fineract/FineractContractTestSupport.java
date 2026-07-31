@@ -17,7 +17,7 @@ import java.util.Base64;
  * (same headers, factory, timeouts), pointed at WireMock. Pure JUnit — no
  * Spring context, per the contract-test convention.
  */
-final class FineractContractTestSupport {
+public final class FineractContractTestSupport {
 
     static final String READ_USER = "innbucks-mw-read";
     static final String READ_PASS = "read-secret";
@@ -29,19 +29,23 @@ final class FineractContractTestSupport {
     private FineractContractTestSupport() {
     }
 
-    static FineractProperties properties(int port) {
+    public static FineractProperties properties(int port) {
+        return propertiesWithCoreEventsToken(port, "test-core-events-token");
+    }
+
+    public static FineractProperties propertiesWithCoreEventsToken(int port, String coreEventsToken) {
         return new FineractProperties(
                 "http://localhost:" + port,
                 TENANT,
                 READ_USER, READ_PASS,
                 WRITE_USER, WRITE_PASS,
-                1L, 3L, 7L, "KES", "en", "yyyy-MM-dd",
+                1L, 3L, 7L, "KES", coreEventsToken, "en", "yyyy-MM-dd",
                 Duration.ofSeconds(2), Duration.ofSeconds(5),
                 new FineractProperties.Resilience(false, 20, 10, 50,
                         Duration.ofSeconds(30), 3, Duration.ofSeconds(8), 3, Duration.ofMillis(50)));
     }
 
-    static FineractClient client(FineractProperties properties) {
+    public static FineractClient client(FineractProperties properties) {
         return new FineractClient(
                 restClient(properties, READ_USER, READ_PASS),
                 restClient(properties, WRITE_USER, WRITE_PASS),

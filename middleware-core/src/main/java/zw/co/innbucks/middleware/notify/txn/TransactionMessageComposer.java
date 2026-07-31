@@ -104,6 +104,28 @@ public final class TransactionMessageComposer {
                 .formatted(BRAND, core, when, event.customerFacingRef());
     }
 
+    /**
+     * Copy for a movement the CORE reported (teller/admin posting, interest,
+     * correction). Same template family as the credit/debit wording above so a
+     * customer sees ONE consistent voice regardless of which door the money
+     * came through; no balance line, because the observing path has no
+     * settled-balance read to quote.
+     */
+    public String composeObserved(zw.co.innbucks.middleware.corebanking.value.CoreMovementObserved movement) {
+        String account = AccountMasking.maskAccount(movement.accountExternalId());
+        String amount = money(movement.amount().amount(), movement.amount().currencyCode());
+        String when = WHEN.format(movement.occurredAt().atZone(zone));
+        String verb = movement.direction() == TransactionDirection.CREDIT ? "credited" : "debited";
+        String ref = movement.coreTxRef() == null || movement.coreTxRef().isBlank()
+                ? null : movement.coreTxRef().trim();
+
+        String base = "%s Account ending %s %s with %s on %s.".formatted(BRAND, account, verb, amount, when);
+        if (ref != null) {
+            base += " Ref. %s.".formatted(ref);
+        }
+        return withNarrationIfItFits(base, movement.narrative());
+    }
+
     private String withNarrationIfItFits(String base, String narrative) {
         if (narrative == null || narrative.isBlank()) {
             return base;

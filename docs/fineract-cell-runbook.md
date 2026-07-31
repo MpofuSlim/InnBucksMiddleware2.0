@@ -139,6 +139,11 @@ export MW_READ_PASSWORD="$(./provision-cell.sh --gen-password)"
 export MW_WRITE_PASSWORD="$(./provision-cell.sh --gen-password)"
 export CELL_CURRENCY=USD
 export CURL_OPTS="--cacert ssl/cell-ca.crt"
+# Optional but recommended: registers Fineract's Web hook back to the
+# middleware so a teller/admin posting still SMSes the customer. Put the SAME
+# value in the middleware .env as FINERACT_CORE_EVENTS_TOKEN (it is the
+# webhook's auth, carried in the URL over the private cell network).
+export CORE_EVENTS_TOKEN="$(openssl rand -hex 32)"
 RUN_SMOKE=1 ./provision-cell.sh
 ```
 
@@ -471,6 +476,15 @@ or Swagger loads but every "Try it out" 404s:
 
 ```nginx
 location = /middleware { return 301 /middleware/; }
+
+# Internal-only surface — the Fineract core-event webhook lives under
+# /internal/** and must be reachable ONLY over the private cell network
+# (Fineract calls http://innbucks-middleware:8090 directly). This deny is
+# layer 3 of the three-files-must-agree pattern: the controller's shared
+# token and SecurityConfig's permitAll are the other two. nginx picks the
+# LONGEST matching prefix, so this wins over /middleware/ below regardless
+# of order.
+location /middleware/internal/ { return 404; }
 
 location /middleware/ {
     proxy_pass http://127.0.0.1:8090/;   # trailing slash strips the prefix
