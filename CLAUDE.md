@@ -257,9 +257,14 @@ there, or reference the aliases when writing runbook snippets:
    on every savings deposit/withdrawal, so a cell without one 400s every
    money movement — `provision-cell.sh` creates the payment type and prints
    the id. Contract pinned by standalone
-   WireMock tests (23 cases). Gotcha: colon-bearing externalIds
+   WireMock tests (29 cases). Gotchas: colon-bearing externalIds
    (`<uuid>:wallet`) hit the wire percent-encoded (`%3A`) — WireMock stub
-   URLs must match the encoded form.
+   URLs must match the encoded form; and the `Idempotency-Key` we send is
+   NOT our key — Fineract stores it in a `VARCHAR(50)` column, so
+   `FineractIdempotencyKey.forCore` re-hashes our 64-char key (plus its
+   saga-leg suffix) to 22 base64url chars. Re-hash, never truncate: the leg
+   suffix is at the END, so truncation would collapse create/approve/activate
+   into one key and Fineract would dedup the legs against each other.
 
 3b. **Customer-facing endpoints through the port** — the mobile surface is
    live: `POST /register` (public, `@SecurityRequirements({})`, per-IP

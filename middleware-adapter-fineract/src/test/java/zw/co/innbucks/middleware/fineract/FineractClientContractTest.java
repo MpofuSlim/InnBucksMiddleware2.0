@@ -78,7 +78,7 @@ class FineractClientContractTest {
                 // Write ops MUST ride the write AppUser + tenant + idempotency key.
                 .withHeader("Authorization", equalTo(basicAuth(WRITE_USER, WRITE_PASS)))
                 .withHeader("Fineract-Platform-TenantId", equalTo("default"))
-                .withHeader("Idempotency-Key", equalTo("key-1"))
+                .withHeader("Idempotency-Key", equalTo(FineractIdempotencyKey.forCore("key-1")))
                 .withRequestBody(matchingJsonPath("$.officeId", equalTo("1")))
                 .withRequestBody(matchingJsonPath("$.externalId", equalTo("cust-uuid-1")))
                 .withRequestBody(matchingJsonPath("$.firstname", equalTo("Tariro")))
@@ -100,7 +100,8 @@ class FineractClientContractTest {
         assertThat(response.resourceId()).isEqualTo(99L);
         wireMock.verify(postRequestedFor(urlPathEqualTo("/v1/savingsaccounts/external-id/acct-1/transactions"))
                 .withQueryParam("command", equalTo("deposit"))
-                .withHeader("Idempotency-Key", equalTo("key-2"))
+                // Compressed to fit Fineract's VARCHAR(50) column — never the raw key.
+                .withHeader("Idempotency-Key", equalTo(FineractIdempotencyKey.forCore("key-2")))
                 .withRequestBody(matchingJsonPath("$.transactionAmount", equalTo("25.5")))
                 // The reconciliation handle is ALWAYS attached.
                 .withRequestBody(matchingJsonPath("$.externalId", equalTo("ref-1")))
@@ -131,7 +132,7 @@ class FineractClientContractTest {
         client.transfer(7L, 11L, 8L, 12L, new BigDecimal("100.00"), "rent", "key-3");
 
         wireMock.verify(postRequestedFor(urlEqualTo("/v1/accounttransfers"))
-                .withHeader("Idempotency-Key", equalTo("key-3"))
+                .withHeader("Idempotency-Key", equalTo(FineractIdempotencyKey.forCore("key-3")))
                 .withRequestBody(matchingJsonPath("$.fromAccountType", equalTo("2")))
                 .withRequestBody(matchingJsonPath("$.toAccountType", equalTo("2")))
                 .withRequestBody(matchingJsonPath("$.fromAccountId", equalTo("11")))
