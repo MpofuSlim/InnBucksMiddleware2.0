@@ -15,6 +15,38 @@ public final class FineractDtos {
     private FineractDtos() {
     }
 
+    /**
+     * Fineract's own Page wrapper for the transaction search endpoint —
+     * {@code {"totalFilteredRecords": N, "pageItems": [...]}}, not Spring's.
+     */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record TransactionSearchPage(long totalFilteredRecords,
+                                        List<SavingsTransaction> pageItems) {
+    }
+
+    /**
+     * A statement line. {@code date} arrives as a [yyyy,m,d] ARRAY from the
+     * Gson-based legacy serializer, not an ISO string, so it is taken as a raw
+     * Object and normalised in the adapter. Object rather than a Jackson node
+     * type deliberately: these DTOs should not care which Jackson major
+     * version the assembly is on.
+     */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record SavingsTransaction(Long id,
+                                     String externalId,
+                                     TransactionTypeData transactionType,
+                                     String entryType,
+                                     BigDecimal amount,
+                                     BigDecimal runningBalance,
+                                     Boolean reversed,
+                                     Object date) {
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record TransactionTypeData(Long id, String code, String value,
+                                      Boolean deposit, Boolean withdrawal) {
+    }
+
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record ClientResponse(Long id, String externalId, String firstname, String lastname,
                                  Boolean active) {

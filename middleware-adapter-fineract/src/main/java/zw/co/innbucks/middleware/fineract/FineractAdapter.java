@@ -33,6 +33,13 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.time.LocalDate;
+import zw.co.innbucks.middleware.fineract.dto.FineractDtos.TransactionSearchPage;
+import zw.co.innbucks.middleware.fineract.dto.FineractDtos;
+import zw.co.innbucks.middleware.corebanking.value.TransactionPage;
+import zw.co.innbucks.middleware.corebanking.value.TransactionHistoryQuery;
+import zw.co.innbucks.middleware.corebanking.value.TransactionEntry;
+import zw.co.innbucks.middleware.corebanking.value.TransactionDirection;
 
 /**
  * {@link CoreBankingPort} on Apache Fineract. Key behaviours:
@@ -285,6 +292,90 @@ public class FineractAdapter implements CoreBankingPort {
                     "Amount currency " + amount.currencyCode()
                             + " does not match the cell currency " + properties.currency(), null);
         }
+    }
+
+    @Override
+    public TransactionPage listTransactions(TransactionHistoryQuery query) {
+        TransactionSearchPage page = client.searchSavingsTransactions(
+                query.account().externalId(), query.from(), query.to(), query.offset(), query.limit());
+        if (page == null || page.pageItems() == null) {
+            // A positive 404 on the account, or an empty page — an empty
+            // statement is a legitimate answer, not a failure.
+            return new TransactionPage(List.of(), 0);
+        }
+        String currency = properties.currency();
+        List<TransactionEntry> entries = page.pageItems().stream()
+                .map(t -> toEntry(t, currency))
+                .toList();
+        return new TransactionPage(entries, page.totalFilteredRecords());
+    }
+
+    private TransactionEntry toEntry(FineractDtos.SavingsTransaction t, String currency) {
+        BigDecimal amount = t.amount() == null ? BigDecimal.ZERO : t.amount();
+        return new TransactionEntry(
+                String.valueOf(t.id()),
+                // Present only when the movement came through us — Fineract
+                // returns "" rather than null for an unset externalId.
+                t.externalId() == null || t.externalId().isBlank() ? null : t.externalId(),
+                direction(t),
+                narrative(t),
+                MinorUnits.ofMajor(amount, currency),
+                t.runningBalance() == null ? null : MinorUnits.ofMajor(t.runningBalance(), currency),
+                parseDate(t.date()),
+                Boolean.TRUE.equals(t.reversed()));
+    }
+
+    /**
+     * Direction from the ACCOUNT's side. {@code entryType} is authoritative
+     * when present; the deposit/withdrawal booleans are the fallback for entry
+     * types that predate it (interest posting, fees). Anything unrecognised is
+     * treated as a DEBIT — on a statement, understating a credit is the safer
+     * error.
+     */
+    private static TransactionDirection direction(FineractDtos.SavingsTransaction t) {
+        if (t.entryType() != null) {
+            return "CREDIT".equalsIgnoreCase(t.entryType())
+                    ? TransactionDirection.CREDIT : TransactionDirection.DEBIT;
+        }
+        FineractDtos.TransactionTypeData type = t.transactionType();
+        return type != null && Boolean.TRUE.equals(type.deposit())
+                ? TransactionDirection.CREDIT : TransactionDirection.DEBIT;
+    }
+
+    private static String narrative(FineractDtos.SavingsTransaction t) {
+        FineractDtos.TransactionTypeData type = t.transactionType();
+        if (type == null) {
+            return "Transaction";
+        }
+        return type.value() != null ? type.value()
+                : (type.code() != null ? type.code() : "Transaction");
+    }
+
+    /**
+     * Fineract's legacy Gson serializer emits LocalDate as a {@code [yyyy,m,d]}
+     * ARRAY, not an ISO string. Both shapes are accepted so a serializer change
+     * upstream doesn't silently break every statement.
+     */
+    private static LocalDate parseDate(Object raw) {
+        if (raw == null) {
+            throw new CoreServerException(CoreProvider.FINERACT,
+                    "Fineract returned a transaction with no date", null);
+        }
+        if (raw instanceof List<?> parts && parts.size() >= 3) {
+            return LocalDate.of(asInt(parts.get(0)), asInt(parts.get(1)), asInt(parts.get(2)));
+        }
+        if (raw instanceof CharSequence text) {
+            return LocalDate.parse(text);
+        }
+        throw new CoreServerException(CoreProvider.FINERACT,
+                "Unrecognised transaction date shape from Fineract: " + raw, null);
+    }
+
+    private static int asInt(Object value) {
+        if (value instanceof Number n) {
+            return n.intValue();
+        }
+        return Integer.parseInt(String.valueOf(value));
     }
 
     /**

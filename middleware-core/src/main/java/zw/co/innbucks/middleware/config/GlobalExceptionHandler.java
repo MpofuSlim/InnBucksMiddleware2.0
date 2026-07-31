@@ -128,6 +128,38 @@ public class GlobalExceptionHandler {
                 "insufficient_scope");
     }
 
+    /**
+     * Ownership failures are 403 wherever they come from. This lived on
+     * TransactionController alone, so the same exception from the statement
+     * endpoint fell through to the catch-all and surfaced as a 500 — an
+     * authorization failure dressed up as a server fault.
+     */
+    @ExceptionHandler(zw.co.innbucks.middleware.transactions.AccountOwnershipException.class)
+    public ResponseEntity<ProblemDetail> ownership(
+            zw.co.innbucks.middleware.transactions.AccountOwnershipException ex) {
+        log.info("Account ownership refused: {}", ex.getMessage());
+        return problem(HttpStatus.FORBIDDEN,
+                "Not your account",
+                "You can only access accounts that belong to you.",
+                "account_ownership_mismatch");
+    }
+
+    /**
+     * Bean-validation on @RequestParam/@PathVariable (an @Validated controller)
+     * raises ConstraintViolationException, NOT MethodArgumentNotValidException —
+     * a different type that the body-validation handler above does not catch.
+     * Without this, an out-of-range page size answered 500 instead of 400.
+     */
+    @ExceptionHandler(jakarta.validation.ConstraintViolationException.class)
+    public ResponseEntity<ProblemDetail> constraintViolation(
+            jakarta.validation.ConstraintViolationException ex) {
+        log.info("Request parameter validation failed: {}", ex.getMessage());
+        return problem(HttpStatus.BAD_REQUEST,
+                "Invalid request",
+                "One or more query parameters are out of range.",
+                "validation_failed");
+    }
+
     @ExceptionHandler(zw.co.innbucks.middleware.idempotency.IdempotencyConflictException.class)
     public ResponseEntity<ProblemDetail> idempotencyConflict(
             zw.co.innbucks.middleware.idempotency.IdempotencyConflictException ex) {
