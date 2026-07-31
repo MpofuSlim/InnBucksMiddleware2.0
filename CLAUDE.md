@@ -549,7 +549,10 @@ commands, with the exact bytes that were running before. Full procedure
    - **Fineract side**: `provision-cell.sh` (step 4c, needs
      `CORE_EVENTS_TOKEN`) registers a Web hook on SAVINGSACCOUNT
      DEPOSIT/WITHDRAWAL pointing at
-     `/internal/core-events/fineract/{token}` over the PRIVATE cell network.
+     `/internal/core-events/fineract/{token}/` over the PRIVATE cell network
+     (trailing slash REQUIRED — Fineract's Retrofit client rejects a
+     slash-less Payload URL and posts the slashed form; the controller maps
+     both spellings).
      Fineract's Web hook can set no auth header, so the token rides the URL
      and IS the auth (constant-time compare; wrong/absent token → 404, not
      401 — don't confirm the endpoint exists). Three-files-must-agree:

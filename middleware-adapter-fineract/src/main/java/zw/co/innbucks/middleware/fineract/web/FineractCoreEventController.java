@@ -85,7 +85,16 @@ public class FineractCoreEventController {
         }
     }
 
-    @PostMapping("/internal/core-events/fineract/{token}")
+    /**
+     * Both spellings on purpose. Fineract's Web hook hands the Payload URL to
+     * Retrofit, which REQUIRES a trailing slash ({@code baseUrl must end in /}
+     * — hook registration 500s without one) and then posts to that slashed
+     * URL. Spring stopped matching trailing-slash variants implicitly, so
+     * without the second mapping every hook fire would 404 — silently, since
+     * Fineract's callback just logs. The slash-less form stays for curl-driven
+     * smoke tests.
+     */
+    @PostMapping({"/internal/core-events/fineract/{token}", "/internal/core-events/fineract/{token}/"})
     public ResponseEntity<Void> onEvent(@PathVariable("token") String token,
                                         @RequestHeader(value = "X-Fineract-Entity", required = false) String entity,
                                         @RequestHeader(value = "X-Fineract-Action", required = false) String action,
