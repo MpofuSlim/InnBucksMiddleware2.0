@@ -17,10 +17,17 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static zw.co.innbucks.middleware.fineract.FineractContractTestSupport.*;
 
 /**
- * The statement wire contract. Fineract's transaction search returns its own
- * page envelope ({@code totalFilteredRecords} / {@code pageItems}) and — via
- * the legacy Gson serializer — dates as {@code [yyyy,m,d]} ARRAYS, which is the
- * shape most likely to break silently.
+ * The statement wire contract.
+ *
+ * <p>The live cell's {@code /transactions/search} returns a Spring Data page
+ * keyed {@code total} / {@code content} (captured 2026-07-31); other Fineract
+ * endpoints use the legacy {@code totalFilteredRecords} / {@code pageItems}
+ * wrapper, and a version bump could hand us Spring's default
+ * {@code totalElements}. All three are accepted and pinned below, because an
+ * unrecognised envelope means every customer silently gets an empty statement.
+ *
+ * <p>Dates arrive from the legacy Gson serializer as {@code [yyyy,m,d]}
+ * ARRAYS, with the ISO-string form also accepted.
  */
 class FineractStatementContractTest {
 
@@ -153,12 +160,59 @@ class FineractStatementContractTest {
     }
 
     /**
-     * Fineract also ships the Spring Data envelope on some search endpoints.
-     * Accepting both means an upstream version bump that flips the wrapper
-     * doesn't silently return every customer an empty statement.
+     * THE SHAPE THE LIVE CELL ACTUALLY RETURNS, captured verbatim from
+     * `/transactions/search` on 2026-07-31 — a Spring Data page whose count
+     * key is {@code total}, not Fineract's legacy {@code totalFilteredRecords}
+     * and not Spring's own {@code totalElements}:
+     *
+     * <pre>{"total":0,"content":[],"pageable":{"sort":{...},"pageNumber":0,"pageSize":3}}</pre>
+     *
+     * Every other stub in this class was written against an assumed envelope,
+     * which is exactly why the suite was green while production 500'd. This
+     * one is transcribed, not imagined.
      */
     @Test
-    void acceptsTheSpringDataPageEnvelopeToo() {
+    void mapsTheEnvelopeTheLiveCellActuallyReturns() {
+        wireMock.stubFor(get(urlPathEqualTo(PATH)).willReturn(okJson("""
+                {"total":42,
+                 "content":[
+                   {"id":15,"externalId":"ref-abc","entryType":"DEBIT",
+                    "transactionType":{"id":2,"value":"Withdrawal","deposit":false,"withdrawal":true},
+                    "amount":600.00,"runningBalance":15.00,"reversed":false,"date":[2026,7,31]}
+                 ],
+                 "pageable":{"sort":{"orders":[{"direction":"DESC","property":"transaction_date",
+                                                "ignoreCase":false,"nullHandling":"NATIVE"}]},
+                             "pageNumber":0,"pageSize":3}}""")));
+
+        TransactionPage page = adapter.listTransactions(query(null, null, 0, 20));
+
+        assertThat(page.entries()).hasSize(1);
+        assertThat(page.entries().get(0).coreId()).isEqualTo("15");
+        assertThat(page.totalCount()).isEqualTo(42);
+    }
+
+    /** The live cell's empty page, verbatim — `pageable` and all. */
+    @Test
+    void anEmptyLiveCellPageIsAnEmptyStatementNotAFailure() {
+        wireMock.stubFor(get(urlPathEqualTo(PATH)).willReturn(okJson("""
+                {"total":0,"content":[],"pageable":{"sort":{"orders":[
+                   {"direction":"DESC","property":"transaction_date","ignoreCase":false,"nullHandling":"NATIVE"},
+                   {"direction":"DESC","property":"created_on_utc","ignoreCase":false,"nullHandling":"NATIVE"},
+                   {"direction":"DESC","property":"id","ignoreCase":false,"nullHandling":"NATIVE"}]},
+                 "pageNumber":0,"pageSize":3}}""")));
+
+        TransactionPage page = adapter.listTransactions(query(null, null, 0, 3));
+
+        assertThat(page.entries()).isEmpty();
+        assertThat(page.totalCount()).isZero();
+    }
+
+    /**
+     * Spring's own default count key, in case a Fineract upgrade drops the
+     * custom {@code total} alias.
+     */
+    @Test
+    void acceptsSpringsOwnTotalElementsKeyToo() {
         wireMock.stubFor(get(urlPathEqualTo(PATH)).willReturn(okJson("""
                 {"totalElements":42,
                  "content":[

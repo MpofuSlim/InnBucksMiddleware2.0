@@ -336,10 +336,19 @@ commands, with the exact bytes that were running before. Full procedure
    UNKNOWN has no confirmed core entry and appears only once it reconciles).
    Ownership checked against the core's account list BEFORE the fetch; page
    size hard-capped at 100 (`TransactionHistoryQuery` refuses limit < 1, and
-   the port contract forbids an unbounded query). Fineract gotcha: the search
-   endpoint returns Fineract's OWN page envelope (`totalFilteredRecords` /
-   `pageItems`) and dates as `[yyyy,m,d]` ARRAYS from the legacy Gson
-   serializer — both shapes are accepted. `CoreBankingExceptionHandler`:
+   the port contract forbids an unbounded query). **Fineract gotcha — the
+   statement envelope, verified against a live cell (2026-07-31), NOT
+   assumed:** `/transactions/search` returns a Spring Data page keyed
+   `{"total":N,"content":[…],"pageable":{…}}`. It is NOT Fineract's legacy
+   `totalFilteredRecords`/`pageItems` wrapper (other endpoints do use that)
+   and NOT Spring's default `totalElements`. Modelling it on the legacy names
+   with a primitive `long` count 500'd every statement in production, because
+   Jackson rejects a whole document over one absent primitive. All three key
+   spellings are now aliased and the count is boxed; **`totalCount` is
+   nullable end-to-end — null is UNKNOWN, never zero**, and clients page until
+   a page returns fewer than `limit` entries. Dates arrive as `[yyyy,m,d]`
+   ARRAYS from the legacy Gson serializer (ISO strings also accepted).
+   `CoreBankingExceptionHandler`:
    `CoreClientException` → 422
    `core_rejected` (upstream wording allowed), auth/server/transient → 502/503
    generic (ops detail stays in logs). Amounts cross the API in MINOR units.
