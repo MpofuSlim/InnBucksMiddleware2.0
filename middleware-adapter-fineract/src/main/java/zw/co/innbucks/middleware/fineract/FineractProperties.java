@@ -53,6 +53,16 @@ public record FineractProperties(
         @NotNull
         Long savingsProductId,
 
+        /**
+         * Payment type stamped on every savings deposit/withdrawal.
+         * Fineract validates this as {@code notNull()} unconditionally
+         * (SavingsAccountTransactionDataValidator.validate), so a cell without
+         * it 400s every money movement — boot-required, never defaulted, since
+         * the id is per-cell and a wrong one mislabels every transaction.
+         */
+        @NotNull
+        Long paymentTypeId,
+
         /** The cell's currency; cross-checked against every balance the core reports. */
         @NotBlank
         String currency,
