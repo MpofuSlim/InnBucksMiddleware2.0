@@ -49,7 +49,15 @@ public record RateLimitProperties(
         Limit ipOtpVerify,
         Limit ipPin,
         Limit ipRegister,
-        Limit msisdnOtpRequest
+        Limit msisdnOtpRequest,
+
+        /**
+         * Per-CUSTOMER budget on POST /accounts/lookup — the anti-enumeration
+         * control on the phone->recipient oracle. Keyed by the authenticated
+         * customer id, not IP: NAT would let one abuser drain an office's
+         * shared budget, and a botnet sidesteps per-IP entirely.
+         */
+        Limit customerLookup
 ) {
 
     /** A bucket of {@code capacity} tokens, refilled greedily over {@code refillPeriod}. */

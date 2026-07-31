@@ -187,6 +187,12 @@ innbucks:
     msisdn-otp-request:
       capacity: ${RATE_LIMIT_MSISDN_OTP_REQUEST_CAPACITY:3}
       refill-period: ${RATE_LIMIT_MSISDN_OTP_REQUEST_WINDOW:15m}
+    # Per-CUSTOMER budget on the phone->recipient lookup (POST /accounts/lookup).
+    # 15/min covers any honest transfer flow; at that rate sweeping a country's
+    # number space takes years per account. Watch innbucks.recipient.lookup.
+    customer-lookup:
+      capacity: ${RATE_LIMIT_CUSTOMER_LOOKUP_CAPACITY:15}
+      refill-period: ${RATE_LIMIT_CUSTOMER_LOOKUP_WINDOW:1m}
 
 # Fineract cell wiring — only read when innbucks.core.provider=fineract, and
 # then every field is boot-required (fail-fast, like INNBUCKS_COUNTRY). TWO

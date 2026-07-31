@@ -144,6 +144,57 @@ class TransactionFlowIntegrationTest {
     }
 
     @Test
+    void recipientLookupResolvesAPhoneNumberOverHttp() throws Exception {
+        // A second customer to be found. KE cell in tests -> KE-shaped number.
+        UUID recipientId = UUID.randomUUID();
+        String recipientWallet = recipientId + ":wallet";
+        Instant now = Instant.now();
+        jdbcTemplate.update("""
+                INSERT INTO customer (id, country, msisdn, pin_hash, kyc_tier, core_provider,
+                                      core_external_id, status, failed_pin_attempts, created_at, updated_at)
+                VALUES (?, 'KE', '+254712000188', 'x', 'basic', 'FINERACT', ?, 'active', 0, ?, ?)
+                """, recipientId, recipientId.toString(), Timestamp.from(now), Timestamp.from(now));
+        stubPort.onListAccounts = ref -> List.of(new DepositAccountSummary(
+                new AccountRef(ref.externalId() + ":wallet"), "Wallet", "KES", new MinorUnits(1000L, "KES")));
+
+        mockMvc.perform(post("/accounts/lookup")
+                        .header(HttpHeaders.AUTHORIZATION, bearer)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"msisdn\":\"0712000188\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.accountId").value(recipientWallet))
+                .andExpect(jsonPath("$.displayName").value("Tariro M."))
+                .andExpect(jsonPath("$.msisdn").value("+254712000188"));
+    }
+
+    @Test
+    void recipientLookupMissesAndMalformedNumbersGetTheirOwnErrors() throws Exception {
+        mockMvc.perform(post("/accounts/lookup")
+                        .header(HttpHeaders.AUTHORIZATION, bearer)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"msisdn\":\"0712999999\"}"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.errorCode").value("recipient_not_found"));
+
+        // Malformed shape: a typo must read as a typo, and NEVER as login's
+        // "phone number or PIN" copy — the wrong-screen bug class.
+        mockMvc.perform(post("/accounts/lookup")
+                        .header(HttpHeaders.AUTHORIZATION, bearer)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"msisdn\":\"12345\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.errorCode").value("invalid_msisdn"));
+    }
+
+    @Test
+    void recipientLookupRequiresAToken() throws Exception {
+        mockMvc.perform(post("/accounts/lookup")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"msisdn\":\"0712000188\"}"))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
     void profileAndAccountsReadThroughThePort() throws Exception {
         mockMvc.perform(get("/me/profile").header(HttpHeaders.AUTHORIZATION, bearer))
                 .andExpect(status().isOk())

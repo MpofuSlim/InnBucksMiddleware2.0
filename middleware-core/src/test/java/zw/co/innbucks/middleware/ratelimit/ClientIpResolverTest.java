@@ -21,7 +21,7 @@ class ClientIpResolverTest {
     private static RateLimitProperties props(boolean trust, int hops) {
         RateLimitProperties.Limit limit = new RateLimitProperties.Limit(5, Duration.ofMinutes(1));
         return new RateLimitProperties(true, trust, hops,
-                limit, limit, limit, limit, limit, limit, limit);
+                limit, limit, limit, limit, limit, limit, limit, limit);
     }
 
     private static HttpServletRequest request(String forwardedFor, String realIp) {
