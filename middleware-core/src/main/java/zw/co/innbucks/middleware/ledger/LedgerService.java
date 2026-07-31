@@ -3,6 +3,7 @@ package zw.co.innbucks.middleware.ledger;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
@@ -11,6 +12,7 @@ import zw.co.innbucks.middleware.audit.AuditAction;
 import zw.co.innbucks.middleware.audit.AuditOutcome;
 import zw.co.innbucks.middleware.audit.AuditService;
 import zw.co.innbucks.middleware.common.correlation.CorrelationContext;
+import zw.co.innbucks.middleware.notify.txn.SettledMovementEvent;
 
 import java.sql.Timestamp;
 import java.time.Clock;
@@ -94,6 +96,7 @@ public class LedgerService {
     private final JdbcTemplate jdbcTemplate;
     private final AuditService auditService;
     private final MeterRegistry meterRegistry;
+    private final ApplicationEventPublisher events;
     private final Clock clock;
     private final Counter illegalTransitions;
 
@@ -101,11 +104,13 @@ public class LedgerService {
                          JdbcTemplate jdbcTemplate,
                          AuditService auditService,
                          MeterRegistry meterRegistry,
+                         ApplicationEventPublisher events,
                          Clock clock) {
         this.repository = repository;
         this.jdbcTemplate = jdbcTemplate;
         this.auditService = auditService;
         this.meterRegistry = meterRegistry;
+        this.events = events;
         this.clock = clock;
         this.illegalTransitions = Counter.builder("innbucks.ledger.illegal_transitions")
                 .description("Refused ledger state transitions — two code paths disagreeing about an outcome; an operator must look")
@@ -239,8 +244,41 @@ public class LedgerService {
         recordEvent(id, from, target, detail, correlationId, now);
         transitionCounter(tx.getType(), target).increment();
         auditTransition(tx, from, target, detail);
+        publishIfSettled(tx, target, now);
         log.info("ledger {} -> {} id={} externalRef={} coreTxRef={}",
                 from, target, id, tx.getExternalRef(), tx.getCoreTxRef());
+    }
+
+    /**
+     * Announce a TERMINAL outcome for customer-facing side effects (the
+     * transaction SMS). Published here, in the one chokepoint every status
+     * change passes through, so a row the reconciler resolves an hour later
+     * notifies exactly like one that completed on the request thread — and so
+     * a future caller cannot forget to.
+     *
+     * <p>Consumers run {@code AFTER_COMMIT} of THIS transaction: the row is
+     * durably terminal before anyone is told about it. SUBMITTED and UNKNOWN
+     * are deliberately silent — the first has no outcome yet, and the second
+     * means we cannot prove one, which is precisely when a message would be a
+     * lie. A parked row that later reconciles publishes its real outcome then.
+     */
+    private void publishIfSettled(LedgerTransaction tx, LedgerStatus target, Instant now) {
+        if (target != LedgerStatus.COMPLETED && target != LedgerStatus.FAILED) {
+            return;
+        }
+        events.publishEvent(new SettledMovementEvent(
+                tx.getId(),
+                tx.getCustomerId(),
+                tx.typeEnum(),
+                target,
+                tx.getSourceAccount(),
+                tx.getDestinationAccount(),
+                tx.getAmountMinor(),
+                tx.getCurrency(),
+                tx.getNarrative(),
+                tx.getExternalRef(),
+                tx.getCoreTxRef(),
+                tx.getCompletedAt() == null ? now : tx.getCompletedAt()));
     }
 
     /**

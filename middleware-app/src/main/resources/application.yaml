@@ -115,6 +115,26 @@ innbucks:
       api-key: ${WHATSAPP_API_KEY:}
       connect-timeout: ${WHATSAPP_CONNECT_TIMEOUT:2s}
       read-timeout: ${WHATSAPP_READ_TIMEOUT:10s}
+    # Customer transaction alerts — one SMS after money actually moves, on the
+    # same SmsSender (and so the same WhatsApp fallback) as OTP. COSTS MONEY
+    # PER MESSAGE: a deposit/withdrawal is one SMS, a transfer between two
+    # customers of this cell is two. Sent AFTER the ledger row commits
+    # terminal, on a bounded background pool, and a delivery failure can never
+    # affect the movement.
+    transactions:
+      enabled: ${TXN_ALERTS_ENABLED:true}
+      # Also alert the INITIATOR when a movement positively failed. Off by
+      # default — the app already shows the error, and a core outage would
+      # otherwise SMS everyone who tried. Never sent to a transfer recipient.
+      notify-on-failure: ${TXN_ALERTS_ON_FAILURE:false}
+      # Timestamp rendering only; storage/logs stay UTC. Blank = the
+      # deployment country's civil zone (ZW -> Africa/Harare, KE ->
+      # Africa/Nairobi), which is right for any single-country cell.
+      zone: ${TXN_ALERTS_ZONE:}
+      # 160 = one billed GSM-7 segment. The narration clause is dropped (the
+      # alert still sends) rather than spill into a second segment.
+      max-length: ${TXN_ALERTS_MAX_LENGTH:160}
+      max-narrative-length: ${TXN_ALERTS_MAX_NARRATIVE:24}
   stepup:
     # SMS re-approval of high-value withdrawals/transfers (deposits never step
     # up). A movement >= the caller's KYC-tier threshold (MINOR units of the

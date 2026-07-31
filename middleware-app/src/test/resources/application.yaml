@@ -54,6 +54,15 @@ innbucks:
       enabled: false
       connect-timeout: 1s
       read-timeout: 2s
+    # ON in tests on purpose: the alert path is an after-commit listener on a
+    # background pool, so "does it actually fire in a real context" is exactly
+    # what a unit test cannot answer. Blank zone exercises the country default.
+    transactions:
+      enabled: true
+      notify-on-failure: false
+      zone: ""
+      max-length: 160
+      max-narrative-length: 24
   stepup:
     # Real thresholds exercised by StepUpFlowIntegrationTest: amounts >= the
     # basic threshold require approval; small movements pass untouched.
