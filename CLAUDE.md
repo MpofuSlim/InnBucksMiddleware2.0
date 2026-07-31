@@ -159,6 +159,41 @@ Build: `./mvnw verify` at the root. Run locally:
 * New Boot-managed deps sometimes need explicit versions (`bcprov-jdk18on`);
   Testcontainers uses the imported BOM.
 
+## Fineract wire shapes — READ THE FORK, do not infer
+
+> [!IMPORTANT]
+> **Before modelling any Fineract response, open the endpoint in
+> `MpofuSlim/fineract` and read what it actually serialises.** This is not
+> optional diligence — inferring the statement envelope from the Fineract docs
+> instead of the source shipped a `500` on every customer statement, and cost
+> three follow-up PRs to walk back.
+
+Fineract serialises API responses with **Gson**
+(`DefaultToApiJsonSerializer` → `GoogleGsonSerializerHelper`), and Gson
+reflects over **FIELDS, not getters**. That one fact explains most surprises:
+
+- `GET .../transactions/search` returns `org.springframework.data.domain.Page`
+  → the JSON keys are `PageImpl`'s fields, so **`total` / `content` /
+  `pageable`** — NOT `totalElements` (a getter, so Gson never emits it) and
+  NOT Fineract's legacy `totalFilteredRecords` / `pageItems` wrapper, which
+  other endpoints genuinely do use.
+- `LocalDate` → `LocalDateAdapter` → a **`[yyyy, m, d]` ARRAY**, not an ISO
+  string.
+- `ExternalId` → `ExternalIdAdapter` → a **bare string**, or `JsonNull` when
+  empty; Gson drops nulls, so the key is usually just absent.
+- Plain enums (e.g. `TransactionEntryType`) have no adapter → `"CREDIT"` /
+  `"DEBIT"`.
+- `transient` fields are excluded by Gson, so they never appear.
+
+Where to look, per endpoint: the `*ApiResource` class for the return type,
+then that DTO's FIELDS, then `GoogleGsonSerializerHelper.registerTypeAdapters`
+for any type with a custom rendering.
+
+**A contract test that stubs a shape nobody observed pins your assumption, not
+the upstream service** — it stays green while production 500s. Every stub
+either transcribes a real response or matches a serializer read out of the
+fork; say which, in the test.
+
 ## Tests
 
 * Unit tests live beside their classes in `middleware-core` /
