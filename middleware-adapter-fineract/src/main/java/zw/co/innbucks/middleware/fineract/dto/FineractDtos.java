@@ -19,22 +19,31 @@ public final class FineractDtos {
     /**
      * The transaction-search page envelope.
      *
-     * <p>Two shapes are accepted because Fineract ships both: its own legacy
-     * {@code {"totalFilteredRecords": N, "pageItems": [...]}} wrapper, and the
-     * Spring Data {@code {"totalElements": N, "content": [...]}} form that the
-     * newer search endpoints use. Aliasing costs nothing and means a Fineract
-     * upgrade that flips the envelope doesn't take the statement down.
+     * <p><b>What this endpoint actually returns</b>, captured from a live cell
+     * (2026-07-31) rather than assumed:
      *
-     * <p><b>{@code totalFilteredRecords} is boxed on purpose.</b> A live cell
-     * returned the page with the count field ABSENT, and against a primitive
-     * {@code long} Jackson refuses the whole document — so a perfectly good
-     * page of transactions became a 500. Null here means "the core did not say
-     * how many there are", which is a legitimate answer the caller has to be
-     * able to represent rather than a parse failure.
+     * <pre>
+     * {"total":0,"content":[],"pageable":{"sort":{...},"pageNumber":0,"pageSize":3}}
+     * </pre>
+     *
+     * So it is a Spring Data page whose count key is {@code total} — neither
+     * Fineract's legacy {@code totalFilteredRecords}/{@code pageItems} wrapper
+     * (which other Fineract endpoints do use) nor Spring's own default
+     * {@code totalElements}. All three names are accepted: the deployed
+     * Fineract version decides which one arrives, and an upgrade that flips it
+     * must not take the statement down.
+     *
+     * <p><b>The count is boxed on purpose.</b> Before this endpoint was
+     * observed, the field was a primitive {@code long} under the legacy name —
+     * so the real response, which never carries that name, made Jackson reject
+     * the whole document and turned a perfectly good page of transactions into
+     * a 500. Null means "the core did not say how many there are": a
+     * legitimate answer the caller must be able to represent, not a parse
+     * failure and not zero.
      */
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record TransactionSearchPage(
-            @JsonAlias("totalElements") Long totalFilteredRecords,
+            @JsonAlias({"total", "totalElements"}) Long totalFilteredRecords,
             @JsonAlias("content") List<SavingsTransaction> pageItems) {
     }
 
