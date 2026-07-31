@@ -45,6 +45,14 @@
             <optional>true</optional>
         </dependency>
         <dependency>
+            <!-- MockMvc for ROUTE-level tests of the webhook controller — the
+                 handler-invocation style cannot catch a mapping gap (and one
+                 reached production: the trailing-slash form Fineract posts). -->
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
             <groupId>org.wiremock</groupId>
             <artifactId>wiremock-standalone</artifactId>
             <scope>test</scope>

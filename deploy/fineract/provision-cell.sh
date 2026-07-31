@@ -321,7 +321,11 @@ fi
 # The token IS the auth — Fineract's Web hook template cannot set a header —
 # so it rides the URL path, over the private cell network only.
 if [[ -n "${CORE_EVENTS_TOKEN:-}" ]]; then
-  MIDDLEWARE_HOOK_URL="${MIDDLEWARE_INTERNAL_URL:-http://innbucks-middleware:8090}/internal/core-events/fineract/${CORE_EVENTS_TOKEN}"
+  # The trailing slash is LOAD-BEARING: Fineract hands this URL to Retrofit,
+  # which rejects a slash-less base URL outright ("baseUrl must end in /" —
+  # the hook create 500s), and then POSTs to the slashed form, which the
+  # middleware's controller maps explicitly.
+  MIDDLEWARE_HOOK_URL="${MIDDLEWARE_INTERNAL_URL:-http://innbucks-middleware:8090}/internal/core-events/fineract/${CORE_EVENTS_TOKEN}/"
   log "4c/7 registering core-event web hook ..."
   WEB_TEMPLATE_ID=$(api GET "/v1/hooks/template" \
     | jq -r '[.templates[]? // empty | select(.name == "Web")] | .[0].id // empty')

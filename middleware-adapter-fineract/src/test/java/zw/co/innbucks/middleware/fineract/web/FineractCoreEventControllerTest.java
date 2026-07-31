@@ -10,6 +10,9 @@ import zw.co.innbucks.middleware.corebanking.CoreMovementListener;
 import zw.co.innbucks.middleware.corebanking.value.CoreMovementObserved;
 import zw.co.innbucks.middleware.corebanking.value.TransactionDirection;
 import zw.co.innbucks.middleware.fineract.FineractContractTestSupport;
+import org.springframework.http.MediaType;
+import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import zw.co.innbucks.middleware.fineract.FineractProperties;
 
 import java.util.List;
@@ -23,6 +26,7 @@ import static com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo;
 import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.options;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
  * The webhook receiver's contract: token gating, the positive re-read (the
@@ -224,5 +228,30 @@ class FineractCoreEventControllerTest {
                         new FineractCoreEventController.HookResponse(null, null), null))
                 .getStatusCode().value()).isEqualTo(200);
         assertThat(listener.received).isEmpty();
+    }
+
+    /**
+     * ROUTE-level proof, through MockMvc — every other test calls the handler
+     * method directly, which is how a mapping gap survived to production:
+     * Fineract's Retrofit client requires the Payload URL to end in "/" and
+     * then POSTs that slashed form, which Spring no longer implicitly matches
+     * to a slash-less mapping. Both spellings must route.
+     */
+    @org.junit.jupiter.api.Test
+    void bothUrlSpellingsRouteToTheHandler() throws Exception {
+        MockMvc mvc = MockMvcBuilders.standaloneSetup(controller).build();
+        String body = "{\"response\":{\"savingsId\":10,\"resourceId\":42}}";
+
+        // The slashed form is what Fineract actually sends.
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/internal/core-events/fineract/" + TOKEN + "/")
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isOk());
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/internal/core-events/fineract/" + TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isOk());
+        // A wrong token still 404s on both spellings.
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/internal/core-events/fineract/nope/")
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isNotFound());
     }
 }
