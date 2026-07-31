@@ -142,6 +142,51 @@ problem and waiting will not fix it — on a re-run, `ADMIN_PASSWORD` must be
 the value you rotated *to* (or leave `ROTATE_ADMIN_PASSWORD` exported at that
 same value and the script will work it out).
 
+### Lost the AppUser passwords (break-glass)
+
+Fineract has no way to read a password back, and `provision-cell.sh`
+deliberately will not change an existing user's password — so a lost
+`MW_WRITE_PASSWORD` means the middleware `.env` cannot be completed. Rather
+than hunt for the old values, mint all three fresh. Spring's delegating
+encoder stores `{bcrypt}$2b$...`, so the hashes can be written directly:
+
+```sh
+cd deploy/fineract
+
+ADMIN_PW=$(./provision-cell.sh --gen-password)
+READ_PW=$(./provision-cell.sh --gen-password)
+WRITE_PW=$(./provision-cell.sh --gen-password)
+printf '\nSAVE THESE\n  mifos             : %s\n  innbucks-mw-read  : %s\n  innbucks-mw-write : %s\n\n' \
+  "$ADMIN_PW" "$READ_PW" "$WRITE_PW"
+
+cat > /tmp/hash.py <<'PYEOF'
+import os, bcrypt
+for k in ("A", "R", "W"):
+    h = bcrypt.hashpw(os.environ[k].encode(), bcrypt.gensalt(10)).decode()
+    print(k + "_HASH='{bcrypt}" + h + "'")
+PYEOF
+
+eval "$(docker run --rm -v /tmp/hash.py:/hash.py:ro \
+  -e A="$ADMIN_PW" -e R="$READ_PW" -e W="$WRITE_PW" \
+  python:3-slim sh -c 'pip install -q bcrypt && python /hash.py')"
+
+docker compose exec -T fineract-db psql -U fineract -d fineract_default -v ON_ERROR_STOP=1 <<SQL
+UPDATE m_appuser SET password='${A_HASH}', firsttime_login_remaining=false, password_reset_required=false, nonexpired=true, nonlocked=true, nonexpired_credentials=true, enabled=true WHERE username='mifos';
+UPDATE m_appuser SET password='${R_HASH}', firsttime_login_remaining=false, password_reset_required=false, nonexpired=true, nonlocked=true, nonexpired_credentials=true, enabled=true WHERE username='innbucks-mw-read';
+UPDATE m_appuser SET password='${W_HASH}', firsttime_login_remaining=false, password_reset_required=false, nonexpired=true, nonlocked=true, nonexpired_credentials=true, enabled=true WHERE username='innbucks-mw-write';
+SQL
+
+docker compose restart fineract
+```
+
+Verify with an authenticated call. **`401` is the only failure** — the two
+middleware users correctly return `403` on `/v1/offices` because they hold no
+`READ_OFFICE`; that is least-privilege working, not a broken credential.
+
+The same UPDATE clears `nonlocked`, which matters because Fineract locks an
+account after repeated failed logins — retrying a stale password is enough to
+lock yourself out, and the symptom looks identical to a wrong password.
+
 ### Maker-checker must not gate the middleware's commands
 
 Fineract's dual-control workflow returns a **success-shaped response** for a
@@ -260,29 +305,154 @@ middleware, which is UTC everywhere by construction.
 
 ## 5. Wire and start the middleware
 
-In the repo root: `.env` gets the `FINERACT_*` values the script printed plus
-the five middleware secrets (`openssl rand -base64 48` each, all distinct),
-`INNBUCKS_COUNTRY`, `INNBUCKS_CORE_PROVIDER=fineract`, and
-`FINERACT_BASE_URL=https://fineract:8443/fineract-provider/api`. Then:
+`.env` in the repo root. The `FINERACT_*` values come from what
+`provision-cell.sh` printed — including **`FINERACT_PAYMENT_TYPE_ID`**, which
+is boot-required: Fineract validates `paymentTypeId` on every savings
+transaction, so a cell without it rejects every deposit and withdrawal.
 
 ```sh
-docker compose up -d
+umask 077
+cat > .env <<EOF
+SPRING_PROFILES_ACTIVE=uat          # uat keeps Swagger on; prod disables it
+INNBUCKS_COUNTRY=ZW
+INNBUCKS_CORE_PROVIDER=fineract
+
+POSTGRES_USER=innbucks
+POSTGRES_PASSWORD=$(openssl rand -base64 36 | tr -d '\n')
+
+JWT_SIGNING_KEY=$(openssl rand -base64 48 | tr -d '\n')
+VERIFICATION_SIGNING_KEY=$(openssl rand -base64 48 | tr -d '\n')
+NATIONAL_ID_HMAC_KEY=$(openssl rand -base64 48 | tr -d '\n')
+OTP_HMAC_SECRET=$(openssl rand -base64 48 | tr -d '\n')
+AUDIT_HMAC_SECRET=$(openssl rand -base64 48 | tr -d '\n')
+
+FINERACT_BASE_URL=https://fineract:8443/fineract-provider/api
+FINERACT_TENANT_ID=default
+FINERACT_READ_USERNAME=innbucks-mw-read
+FINERACT_READ_PASSWORD=<from provisioning>
+FINERACT_WRITE_USERNAME=innbucks-mw-write
+FINERACT_WRITE_PASSWORD=<from provisioning>
+FINERACT_OFFICE_ID=1
+FINERACT_SAVINGS_PRODUCT_ID=<from provisioning>
+FINERACT_PAYMENT_TYPE_ID=<from provisioning>
+FINERACT_CURRENCY=USD
+
+NOTIFY_PROVIDER=innbucks-gateway
+NOTIFY_API_URL=<platform team>
+NOTIFY_API_KEY=<platform team>
+NOTIFY_API_USERNAME=<platform team>
+NOTIFY_API_PASSWORD=<platform team>
+
+CORS_ALLOWED_ORIGINS=https://<the FE origin>
+TRUSTSTORE_PASSWORD=<from the TLS step>
+EOF
 ```
 
-End-to-end smoke, through the middleware:
+`NOTIFY_PROVIDER` is a hard switch, not auto-detection: filling in the four
+`NOTIFY_API_*` values while leaving `console` selected keeps OTP codes in the
+logs and sends nothing. Gateway mode makes all four boot-required.
+
+### The compose override (truststore, loopback, forwarded headers)
+
+```yaml
+# docker-compose.override.yml — gitignored, per-box
+services:
+  middleware:
+    # !override REPLACES the base list. Without the tag Compose MERGES them,
+    # and the container tries to bind 0.0.0.0:8090 and 127.0.0.1:8090 at once:
+    #   Error starting userland proxy: listen tcp4 0.0.0.0:8090: address already in use
+    ports: !override
+      - "127.0.0.1:8090:8090"
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./deploy/fineract/ssl/innbucks-cell-truststore.p12:/ssl/truststore.p12:ro
+    environment:
+      # Makes X-Forwarded-Prefix take effect, so springdoc emits URLs under
+      # the edge's path prefix instead of the container root.
+      SERVER_FORWARD_HEADERS_STRATEGY: framework
+      # Without this every customer shares ONE rate-limit bucket keyed on the
+      # proxy's address — the /register limiter either blocks everyone or
+      # means nothing. Only safe because 8090 is loopback-only above.
+      RATE_LIMIT_TRUST_FORWARDED_FOR: "true"
+      JAVA_TOOL_OPTIONS: >-
+        -XX:MaxRAMPercentage=70.0
+        -Djavax.net.ssl.trustStore=/ssl/truststore.p12
+        -Djavax.net.ssl.trustStorePassword=${TRUSTSTORE_PASSWORD:?set TRUSTSTORE_PASSWORD in .env}
+```
+
+Build and start. If the box's buildx predates 0.17 (`compose build requires
+buildx 0.17.0 or later`), build with the legacy builder — the Dockerfile uses
+no BuildKit-only features, so the image is identical:
+
+```sh
+DOCKER_BUILDKIT=0 docker build -t ghcr.io/mpofuslim/innbucks-middleware:dev .
+docker compose up -d
+docker compose logs -f middleware
+```
+
+Three lines confirm a good boot: `Started MiddlewareApplication`,
+`ProductionSecretsGuard: all 5 guarded secrets pass`, and
+`SmsSender: InnBucks notification gateway at <url>` (not the console stub).
+
+### The edge
+
+The middleware must not be published directly — plain 8090 puts customer PINs
+and JWTs in clear, and a directly reachable origin lets anyone forge
+`X-Forwarded-For` past the rate limiter. Terminate TLS at nginx and proxy to
+loopback. Serving under a path prefix (`/middleware`) needs the prefix header,
+or Swagger loads but every "Try it out" 404s:
+
+```nginx
+location = /middleware { return 301 /middleware/; }
+
+location /middleware/ {
+    proxy_pass http://127.0.0.1:8090/;   # trailing slash strips the prefix
+    proxy_http_version 1.1;
+    proxy_set_header Host               $host;
+    proxy_set_header X-Forwarded-For    $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto  https;
+    proxy_set_header X-Forwarded-Prefix /middleware;
+    proxy_read_timeout 60s;
+}
+```
+
+Placement inside the `server` block does not matter — nginx picks the longest
+matching prefix. Behind Cloudflare, restrict 443 at the firewall to
+[Cloudflare's ranges](https://www.cloudflare.com/ips/); otherwise the origin
+is reachable directly and the forwarded IP is attacker-controlled. Never use
+Cloudflare's "Flexible" mode — it leaves the edge-to-origin hop in plaintext.
+
+**Do not proxy Fineract itself to the public internet.** 8443 is loopback-only
+by design; an nginx `location` that forwards to it undoes the whole
+containment story and puts the core banking API online. Admin access is the
+SSH tunnel.
+
+Verify the prefix landed before handing the URL over — this is the check that
+catches a half-working edge:
+
+```sh
+curl -s https://<host>/middleware/v3/api-docs | jq '.servers'
+# must show https://<host>/middleware — a bare "/" means the prefix header
+# is not reaching the app and every FE call will 404
+```
+
+### End-to-end smoke, through the middleware
 
 1. `POST /register` (Idempotency-Key header) → 201 with the wallet id.
-2. OTP: with `NOTIFY_PROVIDER=innbucks-gateway` (+ the four `NOTIFY_API_*`
-   values from the platform team) the code arrives by real SMS — optionally
-   with `WHATSAPP_FALLBACK_ENABLED=true` (+ `WHATSAPP_*`) as the fallback
-   channel. On the `console` default, codes only appear in the middleware
-   logs — fine for UAT, and the app logs a page-worthy ERROR at boot to stop
-   that reaching go-live.
-3. `POST /auth/pin/set` → `POST /auth/login` → Bearer token.
+2. `/auth/otp/request` → real SMS on the gateway provider. Codes only appear
+   in the logs on the `console` stub, which a deployment profile flags with a
+   page-worthy ERROR at boot.
+3. `/auth/otp/verify` → `POST /auth/pin/set` → `POST /auth/login` → Bearer token.
 4. `GET /me/accounts` → the wallet with balance 0.
 5. `POST /transactions/deposit` then `/transfer` — watch
    `ledger_transaction` land COMPLETED and, for anything parked,
    `innbucks.ledger.parked_overdue` stay at zero.
+
+Tell the FE team three things or they will lose a day each: **amounts cross
+the API in MINOR units** (cents), **every state-changing call needs an
+`Idempotency-Key`** (and reusing one replays the original response, including
+a failure), and a fresh customer sits in `pending_verification` until the PIN
+is set — login before that is supposed to fail.
 
 ## 6. Upgrade / rollback
 
