@@ -213,7 +213,8 @@ public class FineractAdapter implements CoreBankingPort {
                 ? current : response.summary().availableBalance();
         return new AccountBalance(account,
                 MinorUnits.ofMajor(available, currency),
-                MinorUnits.ofMajor(current, currency));
+                MinorUnits.ofMajor(current, currency),
+                response.accountNo());
     }
 
     @Override

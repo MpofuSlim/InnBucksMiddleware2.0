@@ -71,7 +71,8 @@ class FineractCoreEventControllerTest {
     void setUp() {
         wireMock.resetAll();
         controller = new FineractCoreEventController(
-                FineractContractTestSupport.client(properties), properties, listener);
+                FineractContractTestSupport.client(properties), properties, listener,
+                java.time.Clock.fixed(java.time.Instant.parse("2026-07-31T12:20:00Z"), java.time.ZoneOffset.UTC));
         stubAccount();
         stubTransaction("""
                 {"id":42,"externalId":"","entryType":"CREDIT",
@@ -160,7 +161,8 @@ class FineractCoreEventControllerTest {
         FineractProperties disabled = FineractContractTestSupport.propertiesWithCoreEventsToken(
                 wireMock.port(), " ");
         FineractCoreEventController off = new FineractCoreEventController(
-                FineractContractTestSupport.client(disabled), disabled, listener);
+                FineractContractTestSupport.client(disabled), disabled, listener,
+                java.time.Clock.systemUTC());
 
         ResponseEntity<Void> response = off.onEvent(TOKEN, "SAVINGSACCOUNT", "DEPOSIT",
                 new FineractCoreEventController.HookEnvelope(

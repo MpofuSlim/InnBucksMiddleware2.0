@@ -86,7 +86,7 @@ class CoreMovementAlertServiceTest {
 
         assertThat(outcome).isEqualTo(CoreMovementAlertService.Outcome.SENT);
         verify(sms).send(eq("+263782606983"), org.mockito.ArgumentMatchers.contains(
-                "Account ending 6c5d credited with USD 600.00"));
+                "has been credited with USD 600.00"));
     }
 
     /**

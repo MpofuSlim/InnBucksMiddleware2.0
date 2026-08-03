@@ -8,6 +8,7 @@ import org.springframework.stereotype.Service;
 import zw.co.innbucks.middleware.common.msisdn.MsisdnMasking;
 import zw.co.innbucks.middleware.corebanking.CoreBankingPort;
 import zw.co.innbucks.middleware.corebanking.CoreMovementListener;
+import zw.co.innbucks.middleware.corebanking.value.AccountBalance;
 import zw.co.innbucks.middleware.corebanking.value.CoreCustomerRef;
 import zw.co.innbucks.middleware.corebanking.value.CoreMovementObserved;
 import zw.co.innbucks.middleware.customer.Customer;
@@ -122,8 +123,18 @@ public class CoreMovementAlertService implements CoreMovementListener {
                     AccountMasking.maskAccount(movement.accountExternalId()), candidate);
             return count(Outcome.OWNERSHIP_UNPROVEN, movement);
         }
+        // The balance is a courtesy; failure to read it costs the message its
+        // balance line and numeric tail, never the alert itself.
+        AccountBalance balance = null;
         try {
-            smsSender.send(customer.getMsisdn(), composer.composeObserved(movement));
+            balance = port.getBalance(new zw.co.innbucks.middleware.corebanking.value.AccountRef(
+                    movement.accountExternalId()));
+        } catch (RuntimeException ex) {
+            log.warn("Balance read failed for core-reported movement on account {} — alerting without it: {}",
+                    AccountMasking.maskAccount(movement.accountExternalId()), ex.toString());
+        }
+        try {
+            smsSender.send(customer.getMsisdn(), composer.composeObserved(movement, balance));
             log.info("Core-movement alert sent to {} for account {} coreTxRef={}",
                     MsisdnMasking.mask(customer.getMsisdn()),
                     AccountMasking.maskAccount(movement.accountExternalId()), movement.coreTxRef());

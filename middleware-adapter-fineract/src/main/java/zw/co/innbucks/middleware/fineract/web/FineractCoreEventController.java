@@ -20,9 +20,7 @@ import zw.co.innbucks.middleware.corebanking.CoreMovementListener;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.time.Instant;
-import java.time.LocalDate;
-import java.time.ZoneOffset;
+import java.time.Clock;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -68,14 +66,17 @@ public class FineractCoreEventController {
     private final FineractClient client;
     private final FineractProperties properties;
     private final CoreMovementListener movementListener;
+    private final Clock clock;
     private final String expectedToken;
 
     public FineractCoreEventController(FineractClient client,
                                        FineractProperties properties,
-                                       CoreMovementListener movementListener) {
+                                       CoreMovementListener movementListener,
+                                       Clock clock) {
         this.client = client;
         this.properties = properties;
         this.movementListener = movementListener;
+        this.clock = clock;
         this.expectedToken = properties.coreEventsToken() == null
                 ? "" : properties.coreEventsToken().trim();
         if (this.expectedToken.isEmpty()) {
@@ -154,34 +155,19 @@ public class FineractCoreEventController {
                 account.externalId(),
                 direction,
                 MinorUnits.ofMajor(amount, properties.currency()),
-                narrative(txn),
+                // No narrative: Fineract's transactionType().value() is just
+                // "Deposit"/"Withdrawal" — a customer already read that verb
+                // in the sentence, and the first live alert rendered it as a
+                // useless "Narration - Deposit." line.
+                null,
                 txn.externalId() == null || txn.externalId().isBlank() ? null : txn.externalId(),
                 String.valueOf(txn.id()),
-                occurredAt(txn.date())));
-    }
-
-    private static String narrative(FineractDtos.SavingsTransaction txn) {
-        return txn.transactionType() == null ? null : txn.transactionType().value();
-    }
-
-    /** The transaction's value date at UTC start-of-day; now() if the shape is unexpected — the SMS renders it in the cell zone. */
-    private static Instant occurredAt(Object rawDate) {
-        try {
-            if (rawDate instanceof List<?> parts && parts.size() >= 3) {
-                return LocalDate.of(intOf(parts.get(0)), intOf(parts.get(1)), intOf(parts.get(2)))
-                        .atStartOfDay(ZoneOffset.UTC).toInstant();
-            }
-            if (rawDate instanceof CharSequence text) {
-                return LocalDate.parse(text).atStartOfDay(ZoneOffset.UTC).toInstant();
-            }
-        } catch (RuntimeException ignored) {
-            // fall through
-        }
-        return Instant.now();
-    }
-
-    private static int intOf(Object value) {
-        return value instanceof Number n ? n.intValue() : Integer.parseInt(String.valueOf(value));
+                // Receipt time, NOT the transaction's value date: Fineract
+                // stores savings transactions as DATES, and rendering the
+                // date's midnight put "at 02.00" on a 14.20 deposit (00.00
+                // UTC in the cell's zone). The hook fires within seconds of
+                // the posting, so now() is the honest customer-facing time.
+                clock.instant()));
     }
 
     private static boolean constantTimeEquals(String expected, String presented) {

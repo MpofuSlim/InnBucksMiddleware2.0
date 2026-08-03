@@ -88,7 +88,7 @@ public final class FineractDtos {
     }
 
     @JsonIgnoreProperties(ignoreUnknown = true)
-    public record SavingsAccountResponse(Long id, String externalId, Long clientId,
+    public record SavingsAccountResponse(Long id, String externalId, String accountNo, Long clientId,
                                          StatusFlags status, CurrencyRef currency,
                                          SavingsSummaryData summary) {
     }
