@@ -4,6 +4,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import zw.co.innbucks.middleware.anomaly.AuthAnomalyDetector;
+import zw.co.innbucks.middleware.anomaly.AuthFailureKind;
 import zw.co.innbucks.middleware.audit.AuditAction;
 import zw.co.innbucks.middleware.audit.AuditOutcome;
 import zw.co.innbucks.middleware.audit.AuditService;
@@ -44,6 +46,7 @@ public class LoginService {
     private final AuthProperties authProperties;
     private final CountryProperties countryProperties;
     private final AuditService auditService;
+    private final AuthAnomalyDetector anomalyDetector;
     private final Clock clock;
 
     @Transactional
@@ -58,6 +61,10 @@ public class LoginService {
         if (maybe.isEmpty()) {
             // Constant-time-ish: hash a dummy so unknown-user and wrong-pin take similar time.
             pinHasher.matches(pin, DUMMY_HASH);
+            // Counted even though no account exists — attempts against numbers
+            // that are NOT registered are the enumeration half of a spray, and
+            // omitting them would hide the noisiest phase of the attack.
+            anomalyDetector.recordFailure(AuthFailureKind.LOGIN, normalisedMsisdn);
             throw new InvalidCredentialsException();
         }
 
@@ -71,6 +78,10 @@ public class LoginService {
                 || customer.getPinHash() == null) {
             auditService.record(AuditAction.PIN_NOT_SET, AuditOutcome.FAILURE,
                     customer.getId(), deviceHash);
+            // Confirms the number IS registered, so it is an enumeration oracle
+            // and belongs in the count. A genuine new customer hits this for one
+            // account only; a sprayer hits it across many.
+            anomalyDetector.recordFailure(AuthFailureKind.LOGIN, normalisedMsisdn);
             throw new PinNotSetException();
         }
 
@@ -79,6 +90,7 @@ public class LoginService {
                 && customer.getLockedUntil().isAfter(now)) {
             auditService.record(AuditAction.LOGIN_BLOCKED_LOCKED, AuditOutcome.FAILURE,
                     customer.getId(), deviceHash);
+            anomalyDetector.recordFailure(AuthFailureKind.LOGIN, normalisedMsisdn);
             throw new AccountLockedException(customer.getLockedUntil());
         }
 
@@ -86,6 +98,7 @@ public class LoginService {
         if (backoffSeconds > 0) {
             auditService.record(AuditAction.LOGIN_BLOCKED_BACKOFF, AuditOutcome.FAILURE,
                     customer.getId(), deviceHash);
+            anomalyDetector.recordFailure(AuthFailureKind.LOGIN, normalisedMsisdn);
             throw new BackoffActiveException(backoffSeconds);
         }
 
@@ -104,6 +117,7 @@ public class LoginService {
                 auditService.record(AuditAction.LOGIN_FAILURE, AuditOutcome.FAILURE,
                         customer.getId(), deviceHash);
             }
+            anomalyDetector.recordFailure(AuthFailureKind.LOGIN, normalisedMsisdn);
             throw new InvalidCredentialsException();
         }
 

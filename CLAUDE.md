@@ -115,6 +115,28 @@ Build: `./mvnw verify` at the root. Run locally:
   concurrent same-key requests can never double-execute. Replays return the
   ORIGINAL stored status. Same key + different body → 422; fresh claim in
   flight → 409; stale claim (>60s) taken over.
+* **Credential-spray detection** (`anomaly/AuthAnomalyDetector`): the
+  brute-force shape the other two controls are blind to — one source trying a
+  FEW PINs against MANY accounts. Per-account lockout fires at 7 failures (so
+  an attacker stops at 5 and moves on) and the per-IP bucket allows 15
+  logins/min (21,600 "legal" attempts a day), so a spray across 10,000 MSISDNs
+  currently triggers nothing. Thresholds count **DISTINCT ACCOUNTS per source
+  per window, never attempts** — that asymmetry is what makes auto-blocking
+  safe behind NAT (an office legitimately produces many failures from one
+  address, but not against 30 different accounts in 15 minutes). Alert at 10,
+  block the source from the auth endpoints at 30 (`innbucks.security.anomaly.*`
+  / `AUTH_ANOMALY_*`; `block-enabled=false` runs observe-only while tuning).
+  Fires ONCE per source per window — auditing every failure would serialise an
+  attack on `audit_chain_head`'s row lock and take money movements down with
+  it. **Nothing in the detector may throw**: it runs on the sign-in path, and a
+  monitoring fault must never become an auth outage — it fails open, loudly.
+  Depends on correct client-IP resolution, so it is only as good as
+  `RATE_LIMIT_TRUSTED_PROXY_COUNT` (0 = every user collapses into one
+  "source"). Metrics `innbucks.auth.failures` (the rate signal — Prometheus
+  catches the botnet case the per-source detector cannot) and
+  `innbucks.auth.spray.detected`; rules in
+  `deploy/prometheus/auth-anomaly-alerts.yml`. Pinned by
+  `AuthAnomalyDetectorTest` + the block cases in `AuthRateLimitFilterTest`.
 * **CI supply chain**: every third-party GitHub Action is pinned to an
   immutable commit SHA with a `# vX.Y.Z` comment. Least-privilege
   `permissions:` per workflow.
@@ -579,8 +601,31 @@ commands, with the exact bytes that were running before. Full procedure
    (dedup, ownership, never-throw) and the observed-copy cases in
    `TransactionMessageComposerTest`.
 
+9. **Credential-spray detection — DONE.** See the security invariant above.
+   The gap it closes was found by auditing the rate-limiting story end to end:
+   every existing control is scoped to ONE victim or ONE address, and a spray
+   defeats both by construction. Two deliberate scoping choices: the block
+   covers the AUTH endpoints only (a customer sharing an office NAT with an
+   attacker keeps using the token they already hold), and refresh-token
+   failures are NOT tracked (a 128-bit random secret is not brute-forceable,
+   and replay already triggers whole-family revocation).
+
+   **Still open from the same audit, in priority order** — the first three are
+   deployment settings, not code, and every one of them is exploitable today:
+   (1) `RATE_LIMIT_TRUST_FORWARDED_FOR` / `RATE_LIMIT_TRUSTED_PROXY_COUNT` are
+   still at their defaults (`false` / `0`) on the cell, so per-IP limits either
+   collapse every user into one bucket or key on a client-spoofable header;
+   correct values behind Cloudflare + nginx are `true` / `2`. (2) The origin's
+   443 is open to the world, so an attacker who finds it skips Cloudflare and
+   forges the whole XFF chain — which makes (1) decorative until fixed. (3)
+   `/fineract-provider/**` answers from the public internet. (4) **No rate
+   limit on `/transactions/*`** — a stolen token can fire movements as fast as
+   the core accepts them, and repeated transfers just under the step-up
+   threshold are unthrottled. (5) Velocity/amount limit tables (already
+   deferred below) are the real fix for (4).
+
 Next (in order):
-9. **Veengu adapter** behind the same port (`V-Tenant`/`V-Access-Token`
+10. **Veengu adapter** behind the same port (`V-Tenant`/`V-Access-Token`
    headers, consent-then-execute saga, REVERSAL capability).
    **ON HOLD until the full Veengu API spec is in hand (owner's call,
    2026-07-30)** — do NOT start it from the older specs pinned in

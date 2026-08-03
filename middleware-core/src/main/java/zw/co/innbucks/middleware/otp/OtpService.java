@@ -6,6 +6,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import zw.co.innbucks.middleware.anomaly.AuthAnomalyDetector;
+import zw.co.innbucks.middleware.anomaly.AuthFailureKind;
 import zw.co.innbucks.middleware.audit.AuditAction;
 import zw.co.innbucks.middleware.audit.AuditOutcome;
 import zw.co.innbucks.middleware.audit.AuditService;
@@ -94,6 +96,7 @@ public class OtpService {
     private final AuditService auditService;
     private final Clock clock;
     private final RateLimiterService rateLimiterService;
+    private final AuthAnomalyDetector anomalyDetector;
 
     @Transactional
     public void request(String rawMsisdn, OtpPurpose purpose) {
@@ -154,6 +157,7 @@ public class OtpService {
         Optional<ActiveChallenge> maybe = loadActive(msisdn, purpose);
         if (maybe.isEmpty()) {
             auditService.record(AuditAction.OTP_VERIFY_FAILED, AuditOutcome.FAILURE, null, null);
+            anomalyDetector.recordFailure(AuthFailureKind.OTP_VERIFY, msisdn);
             throw new OtpVerificationException(OtpVerificationException.Reason.NO_ACTIVE_CHALLENGE);
         }
 
@@ -162,11 +166,13 @@ public class OtpService {
 
         if (ch.expiresAt().isBefore(now)) {
             auditService.record(AuditAction.OTP_VERIFY_FAILED, AuditOutcome.FAILURE, null, null);
+            anomalyDetector.recordFailure(AuthFailureKind.OTP_VERIFY, msisdn);
             throw new OtpVerificationException(OtpVerificationException.Reason.EXPIRED);
         }
         if (ch.attempts() >= otpProperties.maxAttempts()) {
             jdbcTemplate.update(SUPERSEDE_SQL, Timestamp.from(now), msisdn, purpose.name());
             auditService.record(AuditAction.OTP_VERIFY_FAILED, AuditOutcome.FAILURE, null, null);
+            anomalyDetector.recordFailure(AuthFailureKind.OTP_VERIFY, msisdn);
             throw new OtpVerificationException(OtpVerificationException.Reason.ATTEMPTS_EXHAUSTED);
         }
 
@@ -174,6 +180,7 @@ public class OtpService {
 
         if (!constantTimeEquals(ch.codeHash(), otpHasher.hash(code))) {
             auditService.record(AuditAction.OTP_VERIFY_FAILED, AuditOutcome.FAILURE, null, null);
+            anomalyDetector.recordFailure(AuthFailureKind.OTP_VERIFY, msisdn);
             throw new OtpVerificationException(OtpVerificationException.Reason.CODE_MISMATCH);
         }
 

@@ -1,0 +1,118 @@
+# Prometheus alert rules for the authentication surface.
+#
+# Load alongside your other rule files and point Prometheus at the middleware's
+# MANAGEMENT port (9090) /actuator/prometheus — not the app port.
+#
+# Two complementary signals live here, and they catch different attacks:
+#
+#   * innbucks.auth.spray.detected — the middleware itself concluded that ONE
+#     source is working through MANY accounts. High confidence, low volume:
+#     page-worthy when it blocks, ticket-worthy when it only observes.
+#   * innbucks.auth.failures — the raw rate. This is the safety net for the
+#     attack the detector cannot see: an attacker spread across thousands of
+#     source addresses (a botnet), where no single source ever crosses the
+#     distinct-account threshold but the FLEET-WIDE failure rate still jumps.
+#     Rate alerting is deliberately left to Prometheus rather than built into
+#     the app, which has no memory across restarts and no view of history.
+#
+# Tune the rate thresholds against a week of your own traffic before enabling
+# the paging one — the starting values below assume a small cell and WILL be
+# wrong for a larger deployment.
+
+groups:
+  - name: innbucks-middleware-auth
+    rules:
+
+      # ---- Confirmed credential spraying -----------------------------------
+
+      - alert: CredentialSprayBlocked
+        expr: increase(innbucks_auth_spray_detected_total{action="blocked"}[5m]) > 0
+        for: 0m
+        labels:
+          severity: page
+        annotations:
+          summary: "Credential spray blocked ({{ $labels.kind }})"
+          description: >-
+            A source failed authentication against enough distinct accounts to
+            be blocked from the auth endpoints. Find it in the logs with
+            `grep "CREDENTIAL SPRAY"` on the middleware container, and in
+            audit_event where action = 'credential_spray_detected' (the source
+            address and distinct-account count are in the metadata column).
+            Consider blocking the address at the edge as well — the in-app
+            block lasts only innbucks.security.anomaly.block-duration.
+
+      - alert: CredentialSprayObserved
+        expr: increase(innbucks_auth_spray_detected_total{action="observed"}[15m]) > 0
+        for: 0m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Possible credential spray ({{ $labels.kind }})"
+          description: >-
+            A source crossed the ALERT threshold but not the block threshold.
+            Usually reconnaissance, or a misbehaving client retrying against
+            several accounts. Worth a look; not worth waking anyone.
+
+      # ---- Distributed brute force (what the detector cannot see) -----------
+
+      - alert: AuthFailureRateHigh
+        expr: sum(rate(innbucks_auth_failures_total[5m])) > 2
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Authentication failure rate elevated"
+          description: >-
+            Sustained failed sign-ins across the cell above the normal baseline.
+            If innbucks_auth_spray_detected_total is flat at the same time, the
+            attempts are spread across many source addresses — a distributed
+            attack that per-source detection cannot catch by design. Check the
+            edge (Cloudflare) for a matching traffic shape before touching the
+            app.
+
+      - alert: AuthFailureRateCritical
+        expr: sum(rate(innbucks_auth_failures_total[5m])) > 10
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Authentication failure rate CRITICAL"
+          description: >-
+            Failed sign-ins far above baseline. Treat as an attack in progress:
+            check innbucks_auth_spray_blocked_sources, the nginx access log for
+            the client mix, and be ready to rate-limit or challenge at the edge.
+
+      # ---- Lockout storm ----------------------------------------------------
+      #
+      # Accounts locking en masse means real customers are being locked out —
+      # either by an attack that is succeeding at causing denial of service, or
+      # by a client bug replaying a stale PIN. Both need a human.
+
+      - alert: AccountLockoutStorm
+        expr: increase(innbucks_auth_failures_total{kind="login"}[10m]) > 100
+        for: 0m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Unusual volume of login failures"
+          description: >-
+            Check audit_event for action = 'account_locked' in the same window.
+            A spike with FEW distinct customers is a client bug; a spike ACROSS
+            many customers is an attack causing customer-facing lockouts.
+
+      # ---- Detector health --------------------------------------------------
+
+      - alert: SprayBlockedSourcesSustained
+        expr: innbucks_auth_spray_blocked_sources > 5
+        for: 30m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Many sources blocked for spraying, sustained"
+          description: >-
+            More than five addresses have been blocked concurrently for half an
+            hour. Either a broad attack is underway, or the thresholds are too
+            tight for this deployment's NAT profile and are catching honest
+            traffic. Check a couple of the blocked addresses in audit_event
+            before loosening anything — a false positive locks real customers
+            out of signing in.

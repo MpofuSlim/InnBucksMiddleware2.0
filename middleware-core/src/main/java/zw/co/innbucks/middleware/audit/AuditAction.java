@@ -22,6 +22,14 @@ public enum AuditAction {
     PIN_SET_REJECTED,
     STEP_UP_APPROVED,
     STEP_UP_REJECTED,
+    /**
+     * One source failed authentication against enough DIFFERENT accounts inside
+     * the detection window to be a credential spray. Recorded once per source
+     * per window (never per attempt — that would serialise an attack on the
+     * audit chain's row lock), with the source and distinct-account count in
+     * the metadata.
+     */
+    CREDENTIAL_SPRAY_DETECTED,
     TRANSFER_DEPOSIT_SUCCESS,
     TRANSFER_DEPOSIT_FAILURE,
     WITHDRAWAL_SUCCESS,
