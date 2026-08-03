@@ -13,6 +13,7 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ProblemDetail;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
+import zw.co.innbucks.middleware.anomaly.AuthAnomalyDetector;
 import zw.co.innbucks.middleware.ratelimit.RateLimitProperties.Limit;
 
 import java.io.IOException;
@@ -38,15 +39,18 @@ public class AuthRateLimitFilter extends OncePerRequestFilter {
     private final RateLimitProperties properties;
     private final RateLimiterService rateLimiter;
     private final ClientIpResolver clientIpResolver;
+    private final AuthAnomalyDetector anomalyDetector;
     private final ObjectMapper objectMapper;
 
     public AuthRateLimitFilter(RateLimitProperties properties,
                                RateLimiterService rateLimiter,
                                ClientIpResolver clientIpResolver,
+                               AuthAnomalyDetector anomalyDetector,
                                ObjectMapper objectMapper) {
         this.properties = properties;
         this.rateLimiter = rateLimiter;
         this.clientIpResolver = clientIpResolver;
+        this.anomalyDetector = anomalyDetector;
         this.objectMapper = objectMapper;
     }
 
@@ -54,7 +58,7 @@ public class AuthRateLimitFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest request,
                                     HttpServletResponse response,
                                     FilterChain chain) throws ServletException, IOException {
-        if (!properties.enabled() || !"POST".equalsIgnoreCase(request.getMethod())) {
+        if (!"POST".equalsIgnoreCase(request.getMethod())) {
             chain.doFilter(request, response);
             return;
         }
@@ -65,7 +69,34 @@ public class AuthRateLimitFilter extends OncePerRequestFilter {
             return;
         }
 
-        String key = "ip:" + rule.name() + ":" + clientIpResolver.resolve(request);
+        String clientIp = clientIpResolver.resolve(request);
+
+        // A source caught spraying credentials is turned away from the whole
+        // auth surface, ahead of its bucket. Scoped to these endpoints on
+        // purpose: an already-authenticated customer sharing the address (an
+        // office NAT) keeps working with the token they already hold.
+        //
+        // Checked BEFORE the rate-limit master switch, and deliberately not
+        // gated by it: throttling and spray-blocking are separate controls with
+        // separate switches (innbucks.security.anomaly.*). Turning the buckets
+        // off — to debug a proxy-IP problem, say — must not quietly disable
+        // brute-force blocking as a side effect.
+        long blockedFor = anomalyDetector.isBlocked(clientIp)
+                ? anomalyDetector.remainingBlockSeconds(clientIp) : 0L;
+        if (blockedFor > 0) {
+            // Same 429 + Retry-After + rate_limited shape as an ordinary bucket
+            // rejection: clients already back off correctly on it, and it tells
+            // an attacker nothing they cannot infer anyway.
+            writeTooManyRequests(response, blockedFor);
+            return;
+        }
+
+        if (!properties.enabled()) {
+            chain.doFilter(request, response);
+            return;
+        }
+
+        String key = "ip:" + rule.name() + ":" + clientIp;
         RateLimitDecision decision = rateLimiter.tryConsume(key, rule.limit());
         if (decision.allowed()) {
             chain.doFilter(request, response);

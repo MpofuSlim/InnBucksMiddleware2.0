@@ -193,6 +193,28 @@ innbucks:
     customer-lookup:
       capacity: ${RATE_LIMIT_CUSTOMER_LOOKUP_CAPACITY:15}
       refill-period: ${RATE_LIMIT_CUSTOMER_LOOKUP_WINDOW:1m}
+  security:
+    # Credential-spray detection: the brute-force shape the per-account lockout
+    # and the per-IP buckets both miss — one source trying a few PINs against
+    # MANY different accounts, staying under every individual limit.
+    #
+    # The thresholds count DISTINCT ACCOUNTS per source, never attempts: behind
+    # NAT (an office, a carrier CGNAT) failures from one address are normal,
+    # but failures against thirty different accounts in fifteen minutes are not.
+    anomaly:
+      enabled: ${AUTH_ANOMALY_ENABLED:true}
+      window: ${AUTH_ANOMALY_WINDOW:15m}
+      # Alert only — a log line, a metric and one audit row.
+      distinct-subjects-alert: ${AUTH_ANOMALY_ALERT_THRESHOLD:10}
+      # Block the source from the auth endpoints. Must be >= the alert level.
+      distinct-subjects-block: ${AUTH_ANOMALY_BLOCK_THRESHOLD:30}
+      block-duration: ${AUTH_ANOMALY_BLOCK_DURATION:15m}
+      # Set false to run observe-only while tuning thresholds on real traffic.
+      block-enabled: ${AUTH_ANOMALY_BLOCK_ENABLED:true}
+      # The detector must not become the memory-exhaustion vector it defends
+      # against: both maps are hard-capped.
+      max-tracked-sources: ${AUTH_ANOMALY_MAX_SOURCES:50000}
+      max-subjects-per-source: ${AUTH_ANOMALY_MAX_SUBJECTS_PER_SOURCE:1000}
 
 # Fineract cell wiring — only read when innbucks.core.provider=fineract, and
 # then every field is boot-required (fail-fast, like INNBUCKS_COUNTRY). TWO
