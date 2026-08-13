@@ -45,6 +45,8 @@ public final class TransactionMessageComposer {
             DateTimeFormatter.ofPattern("dd-MMM-yyyy 'at' HH.mm", Locale.ENGLISH);
     private static final int REF_PAD_WIDTH = 8;
     private static final int TAIL_DIGITS = 4;
+    /** Length of {@code "account ending 0000"} — the phrase a name replaces. */
+    private static final int MAX_PARTY_NAME = 19;
 
     private final ZoneId zone;
     private final int maxLength;
@@ -62,33 +64,40 @@ public final class TransactionMessageComposer {
      *        balance line. Also the source of the numeric account tail.
      * @param counterpartyAccountNumber the other account's customer-facing
      *        number when known, or null — falls back to the externalId tail.
+     * @param counterpartyName the other PARTY rendered as {@code T.Mpofu}, or
+     *        null to identify them by account instead. A name is friendlier
+     *        than four digits when the other side is a person the customer
+     *        actually transacted with, and {@link #partyName} keeps it no
+     *        longer than the account phrase it replaces, so naming can never
+     *        cost a second SMS segment.
      */
-    public String compose(SettledMovementEvent event, MovementLeg leg,
-                          AccountBalance ownBalance, String counterpartyAccountNumber) {
+    public String compose(SettledMovementEvent event, MovementLeg leg, AccountBalance ownBalance,
+                          String counterpartyAccountNumber, String counterpartyName) {
         return event.completed()
-                ? completed(event, leg, ownBalance, counterpartyAccountNumber)
+                ? completed(event, leg, ownBalance, counterpartyAccountNumber, counterpartyName)
                 : failed(event, leg, counterpartyAccountNumber);
     }
 
-    private String completed(SettledMovementEvent event, MovementLeg leg,
-                             AccountBalance ownBalance, String counterpartyAccountNumber) {
+    private String completed(SettledMovementEvent event, MovementLeg leg, AccountBalance ownBalance,
+                             String counterpartyAccountNumber, String counterpartyName) {
         String own = tail(ownBalance == null ? null : ownBalance.accountNumber(), leg.accountId());
         String amount = money(event.amountMinor(), event.currency());
         String when = WHEN.format(event.occurredAt().atZone(zone));
+        String other = counterparty(counterpartyName, counterpartyAccountNumber, leg.counterparty());
 
         String core;
         if (leg.direction() == TransactionDirection.CREDIT) {
             core = leg.counterparty() == null
                     ? "Your account ending %s has been credited with %s on %s."
                             .formatted(own, amount, when)
-                    : "Your account ending %s has been credited with %s from account ending %s on %s."
-                            .formatted(own, amount, tail(counterpartyAccountNumber, leg.counterparty()), when);
+                    : "Your account ending %s has been credited with %s from %s on %s."
+                            .formatted(own, amount, other, when);
         } else {
             core = leg.counterparty() == null
                     ? "Your account ending %s has been debited with %s on %s."
                             .formatted(own, amount, when)
-                    : "You sent %s from your account ending %s to account ending %s on %s."
-                            .formatted(amount, own, tail(counterpartyAccountNumber, leg.counterparty()), when);
+                    : "You sent %s from your account ending %s to %s on %s."
+                            .formatted(amount, own, other, when);
         }
 
         String base = core + " Ref %s.".formatted(refFor(event.customerFacingRef()));
@@ -145,6 +154,48 @@ public final class TransactionMessageComposer {
         // what Fineract offers is the transaction TYPE name ("Deposit"),
         // which just restates the verb.
         return base;
+    }
+
+    /**
+     * How the other side of a movement is identified in the sentence: their
+     * NAME when we could resolve it, otherwise the account phrase this has
+     * always used.
+     */
+    private static String counterparty(String name, String accountNumber, String externalIdFallback) {
+        return name != null && !name.isBlank()
+                ? name.trim()
+                : "account ending " + tail(accountNumber, externalIdFallback);
+    }
+
+    /**
+     * {@code ("Tariro","Mpofu")} → {@code T.Mpofu} — the sender as the
+     * recipient of their money should see them.
+     *
+     * <p>Note this is the MIRROR of the masking on {@code POST /accounts/lookup}
+     * ("Tariro M."), and deliberately so. That endpoint is an oracle anyone can
+     * query by phone number, so it discloses the minimum needed to catch a
+     * typo. This one only ever reaches someone who has actually been paid, and
+     * for them the surname is the useful half — it is how you know which Tariro
+     * sent you money.
+     *
+     * <p>Returns null when there is no usable name, which falls the sentence
+     * back to the account phrase. The result is sanitised for the SMS gateway's
+     * charset and capped at {@link #MAX_PARTY_NAME} — chosen to be no longer
+     * than {@code "account ending 0000"}, so a named message is never longer
+     * than the numbered one it replaces and the segment budget cannot regress.
+     */
+    static String partyName(String firstName, String lastName) {
+        String first = firstName == null ? "" : SmsTextSanitizer.toGsmSafe(firstName).trim();
+        String last = lastName == null ? "" : SmsTextSanitizer.toGsmSafe(lastName).trim();
+        if (last.isEmpty()) {
+            // Without a surname there is nothing to initial; a bare first name
+            // identifies nobody usefully, so let the account phrase speak.
+            return null;
+        }
+        String rendered = first.isEmpty()
+                ? last
+                : first.substring(0, 1).toUpperCase(Locale.ROOT) + "." + last;
+        return rendered.length() <= MAX_PARTY_NAME ? rendered : rendered.substring(0, MAX_PARTY_NAME);
     }
 
     /**

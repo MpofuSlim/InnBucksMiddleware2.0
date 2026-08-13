@@ -13,7 +13,9 @@ import zw.co.innbucks.middleware.corebanking.CoreBankingPort;
 import zw.co.innbucks.middleware.corebanking.value.AccountRef;
 import zw.co.innbucks.middleware.corebanking.value.AccountBalance;
 import zw.co.innbucks.middleware.corebanking.value.CoreCustomerRef;
+import zw.co.innbucks.middleware.corebanking.value.CustomerProfile;
 import zw.co.innbucks.middleware.corebanking.value.TransactionDirection;
+import zw.co.innbucks.middleware.ledger.LedgerTransactionType;
 import zw.co.innbucks.middleware.customer.Customer;
 import zw.co.innbucks.middleware.customer.CustomerRepository;
 import zw.co.innbucks.middleware.otp.SmsSender;
@@ -206,7 +208,8 @@ public class TransactionNotifier {
             // tail only — its balance is read but NEVER rendered here.
             String counterpartyNumber = event.completed() && leg.counterparty() != null
                     ? accountNumberOf(leg.counterparty()) : null;
-            String body = composer.compose(event, leg, balance, counterpartyNumber);
+            String counterpartyName = senderNameFor(event, leg);
+            String body = composer.compose(event, leg, balance, counterpartyNumber, counterpartyName);
             smsSender.send(customer.getMsisdn(), body);
             counter(event, direction, "sent").increment();
             log.info("Transaction alert sent to {} for ledger row id={} type={} leg={}",
@@ -216,6 +219,46 @@ public class TransactionNotifier {
             // Never the message body and never the MSISDN in the failure line.
             log.warn("Transaction alert delivery failed for ledger row id={} type={} leg={}: {}",
                     event.transactionId(), event.type(), direction, ex.toString());
+        }
+    }
+
+    /**
+     * The SENDER's name, for the recipient's side of a completed transfer —
+     * "credited with USD 5.00 from T.Mpofu" rather than "from account ending
+     * 0010". Four digits of an account the recipient has never seen identify
+     * nobody; the person who paid them is what they actually want to know.
+     *
+     * <p>Only this leg. The sender's own message still names the destination by
+     * account, because the sender chose that destination moments earlier and
+     * already saw the recipient's name on the confirm screen.
+     *
+     * <p>The sender is {@code event.customerId()} — the movement's initiator —
+     * so no extra lookup is needed to find WHO, only to find their name, which
+     * lives in the core (this middleware stores no names). Best-effort: any
+     * failure returns null and the sentence falls back to the account phrase.
+     */
+    private String senderNameFor(SettledMovementEvent event, MovementLeg leg) {
+        if (!event.completed()
+                || event.type() != LedgerTransactionType.TRANSFER
+                || leg.direction() != TransactionDirection.CREDIT) {
+            return null;
+        }
+        try {
+            Customer sender = customerRepository.findById(event.customerId()).orElse(null);
+            if (sender == null || sender.getCoreExternalId() == null) {
+                return null;
+            }
+            CoreBankingPort port = corePort.getIfAvailable();
+            if (port == null) {
+                return null;
+            }
+            CustomerProfile profile = port.getProfile(new CoreCustomerRef(sender.getCoreExternalId()));
+            return profile == null ? null
+                    : TransactionMessageComposer.partyName(profile.firstName(), profile.lastName());
+        } catch (RuntimeException ex) {
+            log.warn("Sender name lookup failed for ledger row id={} — naming the account instead: {}",
+                    event.transactionId(), ex.toString());
+            return null;
         }
     }
 

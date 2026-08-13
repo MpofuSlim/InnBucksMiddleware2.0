@@ -538,7 +538,16 @@ commands, with the exact bytes that were running before. Full procedure
      ``! : / ? " * ;`` — hence `Ref.` and `14.05`, never `Ref:`/`14:05`;
      `TransactionMessageComposerTest` asserts every template round-trips
      `SmsTextSanitizer` unchanged, so a colon creeping back in fails the
-     build. Messages are budgeted to ONE 160-char GSM-7 segment: a narration
+     build. **The recipient's leg of a transfer names the SENDER**
+     (`from T.Mpofu` — initial + surname, resolved from the core, best-effort
+     with the account phrase as fallback) because four digits of an account
+     they have never seen identify nobody; the sender's own leg keeps the
+     account, having just seen the recipient's name on the confirm screen.
+     Note this is the MIRROR of `/accounts/lookup`'s masking (`Tariro M.`)
+     and deliberately so — that endpoint is an oracle anyone can query by
+     number, this one only reaches someone who was actually paid. A rendered
+     name is capped at the length of `account ending 0000`, so naming can
+     never push a message into a second segment. Messages are budgeted to ONE 160-char GSM-7 segment: a narration
      that would overflow is DROPPED (the alert still sends) rather than
      silently doubling the per-transaction SMS bill. Accounts are masked to
      their last four identifying characters, matching the `accountId` tail

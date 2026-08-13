@@ -11,6 +11,7 @@ import zw.co.innbucks.middleware.corebanking.exception.CoreTransientException;
 import zw.co.innbucks.middleware.corebanking.value.AccountBalance;
 import zw.co.innbucks.middleware.corebanking.value.AccountRef;
 import zw.co.innbucks.middleware.corebanking.value.CoreCustomerRef;
+import zw.co.innbucks.middleware.corebanking.value.CustomerProfile;
 import zw.co.innbucks.middleware.corebanking.value.DepositAccountSummary;
 import zw.co.innbucks.middleware.corebanking.value.MinorUnits;
 import zw.co.innbucks.middleware.customer.Customer;
@@ -64,6 +65,10 @@ class TransactionNotifierTest {
         when(provider.getIfAvailable()).thenReturn(port);
         when(port.getBalance(any())).thenAnswer(inv ->
                 new AccountBalance(inv.getArgument(0), new MinorUnits(5000, "USD"), new MinorUnits(5000, "USD")));
+        // Production resolves the sender's name from the core, so the default
+        // here is the resolvable case; the fallback has its own test below.
+        when(port.getProfile(any())).thenReturn(new CustomerProfile(
+                new CoreCustomerRef(SENDER.toString()), "Tariro", "Mpofu", "active"));
         when(customers.findById(SENDER)).thenReturn(Optional.of(customer(SENDER, "+263782606983")));
         when(customers.findById(RECIPIENT)).thenReturn(Optional.of(customer(RECIPIENT, "+263771234567")));
         when(port.listDepositAccounts(new CoreCustomerRef(RECIPIENT.toString())))
@@ -128,8 +133,43 @@ class TransactionNotifierTest {
         assertThat(to.getAllValues()).containsExactly("+263782606983", "+263771234567");
         assertThat(body.getAllValues().get(0))
                 .contains("You sent USD 5.00 from your account ending 6e7f to account ending 6c5d");
+        // The recipient is told WHO paid them, not which account number did.
         assertThat(body.getAllValues().get(1))
-                .contains("Your account ending 6c5d has been credited with USD 5.00 from account ending 6e7f");
+                .contains("Your account ending 6c5d has been credited with USD 5.00 from T.Mpofu");
+    }
+
+    @Test
+    void whenTheSendersNameCannotBeReadTheRecipientStillGetsTheAlert() {
+        // A core hiccup costs the message a name, never the message.
+        when(port.getProfile(any())).thenThrow(new CoreTransientException(CoreProvider.FINERACT, "core down", null));
+
+        notifier.deliver(event(LedgerTransactionType.TRANSFER, LedgerStatus.COMPLETED,
+                SENDER_ACCT, RECIPIENT_ACCT));
+
+        ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
+        verify(sms, times(2)).send(anyString(), body.capture());
+        assertThat(body.getAllValues().get(1))
+                .contains("credited with USD 5.00 from account ending 6e7f");
+    }
+
+    @Test
+    void onlyTheRecipientsMessageNamesAParty() {
+        // The sender picked the destination seconds ago and saw the name on the
+        // confirm screen; naming it again costs characters and adds nothing.
+        notifier.deliver(event(LedgerTransactionType.TRANSFER, LedgerStatus.COMPLETED,
+                SENDER_ACCT, RECIPIENT_ACCT));
+
+        ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
+        verify(sms, times(2)).send(anyString(), body.capture());
+        assertThat(body.getAllValues().get(0)).contains("to account ending 6c5d");
+        assertThat(body.getAllValues().get(0)).doesNotContain("T.Mpofu");
+    }
+
+    @Test
+    void aDepositNeverTriesToNameAnybody() {
+        notifier.deliver(event(LedgerTransactionType.DEPOSIT, LedgerStatus.COMPLETED, null, SENDER_ACCT));
+
+        verify(port, never()).getProfile(any());
     }
 
     @Test
