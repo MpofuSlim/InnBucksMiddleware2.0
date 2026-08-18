@@ -8,6 +8,7 @@ import zw.co.innbucks.middleware.corebanking.value.AccountBalance;
 import zw.co.innbucks.middleware.corebanking.value.AccountRef;
 import zw.co.innbucks.middleware.corebanking.value.CoreCustomerRef;
 import zw.co.innbucks.middleware.corebanking.value.CustomerProfile;
+import zw.co.innbucks.middleware.corebanking.value.DepositAccountRef;
 import zw.co.innbucks.middleware.corebanking.value.DepositAccountSummary;
 import zw.co.innbucks.middleware.corebanking.value.IdempotencyKey;
 import zw.co.innbucks.middleware.corebanking.value.TransactionHistoryQuery;
@@ -81,7 +82,35 @@ public interface CoreBankingPort {
 
     CustomerProfile getProfile(CoreCustomerRef ref);
 
+    /**
+     * The customer's accounts WITH balances. Only for callers that actually
+     * render money — today that is {@code GET /me/accounts} alone. Everything
+     * else wants {@link #listDepositAccountRefs}, which on a per-account-priced
+     * core is dramatically cheaper.
+     */
     List<DepositAccountSummary> listDepositAccounts(CoreCustomerRef ref);
+
+    /**
+     * The customer's accounts WITHOUT balances — the question ownership checks,
+     * recipient resolution and the statement lookup are really asking.
+     *
+     * <p>The default answers it by throwing away the balances a full listing
+     * fetched, so every adapter is correct from the day it is written. An
+     * adapter whose core can answer this more cheaply — Fineract lists accounts
+     * in one call but prices balances per account — MUST override it; that
+     * override is the difference between one HTTP call and 1+N per ownership
+     * check, on the path the mobile app polls every sixty seconds.
+     *
+     * <p>Implementations must apply the same cell-currency validation the
+     * balance path applies: this method feeds pre-write ownership checks, so
+     * relaxing the check here would let a wrong-currency account through a
+     * route the balance path would have refused.
+     */
+    default List<DepositAccountRef> listDepositAccountRefs(CoreCustomerRef ref) {
+        return listDepositAccounts(ref).stream()
+                .map(a -> new DepositAccountRef(a.account(), a.name(), a.currencyCode(), null))
+                .toList();
+    }
 
     AccountBalance getBalance(AccountRef account);
 

@@ -107,7 +107,7 @@ public class CoreMovementAlertService implements CoreMovementListener {
         }
         boolean owns;
         try {
-            owns = port.listDepositAccounts(new CoreCustomerRef(customer.getCoreExternalId()))
+            owns = port.listDepositAccountRefs(new CoreCustomerRef(customer.getCoreExternalId()))
                     .stream()
                     .anyMatch(a -> a.account().externalId().equals(movement.accountExternalId()));
         } catch (RuntimeException ex) {

@@ -80,7 +80,22 @@ public final class FineractDtos {
     }
 
     @JsonIgnoreProperties(ignoreUnknown = true)
-    public record SavingsSummary(Long id, String externalId, String productName, CurrencyRef currency) {
+    /**
+     * One entry of {@code GET /v1/clients/external-id/{id}/accounts}.
+     *
+     * <p>Transcribed from the fork, not inferred: Fineract builds this from
+     * {@code SavingsAccountSummaryData}, whose fields Gson serialises directly.
+     * {@code accountNo}, {@code externalId}, {@code productName} and
+     * {@code currency} all come from plain non-null column reads, so they are
+     * safe to consume.
+     *
+     * <p>The payload ALSO carries {@code accountBalance}/{@code availableBalance}
+     * and they are deliberately not modelled here — Fineract maps them with
+     * {@code getBigDecimalDefaultToNullIfZero}, so a zero balance becomes null
+     * and Gson drops the key. Money must come from the per-account read.
+     */
+    public record SavingsSummary(Long id, String externalId, String accountNo,
+                                 String productName, CurrencyRef currency) {
     }
 
     @JsonIgnoreProperties(ignoreUnknown = true)

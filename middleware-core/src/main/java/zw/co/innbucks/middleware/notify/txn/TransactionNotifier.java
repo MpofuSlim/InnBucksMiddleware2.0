@@ -168,7 +168,7 @@ public class TransactionNotifier {
         if (port == null) {
             return Optional.empty();
         }
-        boolean owns = port.listDepositAccounts(new CoreCustomerRef(customer.getCoreExternalId()))
+        boolean owns = port.listDepositAccountRefs(new CoreCustomerRef(customer.getCoreExternalId()))
                 .stream()
                 .anyMatch(a -> a.account().externalId().equals(event.destinationAccount()));
         if (!owns) {

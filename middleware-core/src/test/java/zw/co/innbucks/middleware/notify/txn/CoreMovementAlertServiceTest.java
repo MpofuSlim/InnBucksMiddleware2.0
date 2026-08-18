@@ -8,7 +8,7 @@ import zw.co.innbucks.middleware.corebanking.CoreBankingPort;
 import zw.co.innbucks.middleware.corebanking.value.AccountRef;
 import zw.co.innbucks.middleware.corebanking.value.CoreCustomerRef;
 import zw.co.innbucks.middleware.corebanking.value.CoreMovementObserved;
-import zw.co.innbucks.middleware.corebanking.value.DepositAccountSummary;
+import zw.co.innbucks.middleware.corebanking.value.DepositAccountRef;
 import zw.co.innbucks.middleware.corebanking.value.MinorUnits;
 import zw.co.innbucks.middleware.corebanking.value.TransactionDirection;
 import zw.co.innbucks.middleware.customer.Customer;
@@ -65,9 +65,9 @@ class CoreMovementAlertServiceTest {
         customer.setCoreExternalId(CUSTOMER.toString());
         when(customers.findById(CUSTOMER)).thenReturn(Optional.of(customer));
         when(ledger.findByExternalRef(anyString())).thenReturn(Optional.empty());
-        when(port.listDepositAccounts(new CoreCustomerRef(CUSTOMER.toString())))
-                .thenReturn(List.of(new DepositAccountSummary(
-                        new AccountRef(ACCT), "Wallet", "USD", new MinorUnits(61500, "USD"))));
+        when(port.listDepositAccountRefs(new CoreCustomerRef(CUSTOMER.toString())))
+                .thenReturn(List.of(new DepositAccountRef(
+                        new AccountRef(ACCT), "Wallet", "USD", "000000010")));
         service = new CoreMovementAlertService(
                 new TransactionNotificationProperties(true, false, "Africa/Harare", 160, 24),
                 new TransactionMessageComposer(ZoneId.of("Africa/Harare"), 160, 24),
@@ -122,7 +122,7 @@ class CoreMovementAlertServiceTest {
     @Test
     void theNamingConventionAloneIsNotProofOfOwnership() {
         // Core does not list the account for that customer -> nothing is sent.
-        when(port.listDepositAccounts(any())).thenReturn(List.of());
+        when(port.listDepositAccountRefs(any())).thenReturn(List.of());
 
         assertThat(service.alert(movement(ACCT, null)))
                 .isEqualTo(CoreMovementAlertService.Outcome.OWNERSHIP_UNPROVEN);
@@ -131,7 +131,7 @@ class CoreMovementAlertServiceTest {
 
     @Test
     void anUnprovableOwnershipCheckMeansNoMessageNotAGuess() {
-        when(port.listDepositAccounts(any())).thenThrow(new RuntimeException("core down"));
+        when(port.listDepositAccountRefs(any())).thenThrow(new RuntimeException("core down"));
 
         assertThat(service.alert(movement(ACCT, null)))
                 .isEqualTo(CoreMovementAlertService.Outcome.OWNERSHIP_UNPROVEN);
