@@ -137,6 +137,24 @@ Build: `./mvnw verify` at the root. Run locally:
   `innbucks.auth.spray.detected`; rules in
   `deploy/prometheus/auth-anomaly-alerts.yml`. Pinned by
   `AuthAnomalyDetectorTest` + the block cases in `AuthRateLimitFilterTest`.
+* **The failed-PIN counter is ONE atomic statement, and `LoginService.login`
+  owns NO transaction.** `CustomerLockoutStore` increments
+  `failed_pin_attempts` and applies the lockout transition in a single
+  `UPDATE … RETURNING` (guard `failed_pin_attempts + 1 >= ?` — Postgres
+  evaluates SET-list expressions against the OLD row, so the `+ 1` is
+  load-bearing and the short spelling silently moves the lock from the 7th
+  wrong PIN to the 8th). It replaced a read-modify-write under which K racing
+  wrong PINs advanced the counter by 1, so a concurrent attacker never reached
+  the cap at all. **Never re-add `@Transactional` to `login()`** (nor to the
+  store): a transaction acquires its pooled connection EAGERLY at begin and
+  would hold it across the ~100-300ms Argon2id compare — including the
+  dummy-hash burn on the unknown-MSISDN branch, the highest-volume path under
+  a spray — draining the pool with threads doing arithmetic. The increment now
+  survives the thrown `InvalidCredentialsException` because it commits on an
+  autocommit connection before the throw, NOT because of `noRollbackFor`.
+  Pinned by `CustomerLockoutStoreIntegrationTest`,
+  `LoginLockoutConcurrencyIntegrationTest` and
+  `LoginServiceTransactionBoundaryTest`.
 * **CI supply chain**: every third-party GitHub Action is pinned to an
   immutable commit SHA with a `# vX.Y.Z` comment. Least-privilege
   `permissions:` per workflow.
@@ -632,6 +650,28 @@ commands, with the exact bytes that were running before. Full procedure
    the core accepts them, and repeated transfers just under the step-up
    threshold are unthrottled. (5) Velocity/amount limit tables (already
    deferred below) are the real fix for (4).
+
+   **Two auth-concurrency gaps deliberately deferred** (found while making the
+   lockout counter atomic; both need the SAME mechanism, so they ship together):
+   (a) **concurrent-burst gate** — the lock/backoff gate is still decided on the
+   snapshot read BEFORE the Argon2id compare, so K simultaneous requests all
+   pass it, all pay the hash and all get a definitive 401 before the counter can
+   refuse any of them. The counter is now honest (the account does lock) but the
+   ladder's RATE is not enforced *within* a burst. (b) **PIN-changed-mid-login**
+   — a login racing a PIN reset can still accept the OLD `pin_hash` it read
+   before hashing. Both close with a `SELECT … FOR NO KEY UPDATE` re-read of the
+   row inside the settling statement's transaction. It MUST be `FOR NO KEY
+   UPDATE`, not `FOR UPDATE`: `refresh_token.customer_id` and
+   `ledger_transaction.customer_id` both FK to `customer`, so their INSERTs take
+   `FOR KEY SHARE` and a plain `FOR UPDATE` would block refresh-token issuance
+   and money movements behind a login. Deferred because it changes `/auth/login`
+   from 401 to 429 under concurrency (a mobile-client contract change — confirm
+   the app honours `Retry-After` first) and because a blocking row-lock wait
+   holds a pooled connection, partly undoing the fix above on the money path.
+   Also unfixed and in the same family: `PinService.apply` still computes
+   Argon2id inside its own `@Transactional`, so `/auth/pin/{set,reset}` keep the
+   connection-hold bug (fixing it drags in the consumed-verification-token
+   INSERT, which genuinely needs its transaction).
 
 Next (in order):
 10. **Veengu adapter** behind the same port (`V-Tenant`/`V-Access-Token`
