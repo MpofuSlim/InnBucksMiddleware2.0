@@ -10,7 +10,7 @@ import zw.co.innbucks.middleware.common.msisdn.MsisdnNormalizerRegistry;
 import zw.co.innbucks.middleware.corebanking.CoreBankingPort;
 import zw.co.innbucks.middleware.corebanking.value.CoreCustomerRef;
 import zw.co.innbucks.middleware.corebanking.value.CustomerProfile;
-import zw.co.innbucks.middleware.corebanking.value.DepositAccountSummary;
+import zw.co.innbucks.middleware.corebanking.value.DepositAccountRef;
 import zw.co.innbucks.middleware.customer.Customer;
 import zw.co.innbucks.middleware.customer.CustomerRepository;
 import zw.co.innbucks.middleware.ratelimit.RateLimitDecision;
@@ -111,10 +111,10 @@ public class RecipientLookupService {
         // go — the same rule as the movement endpoints' ownership checks. The
         // <uuid>:wallet convention picks the wallet out of the list; it is
         // never trusted on its own.
-        List<DepositAccountSummary> accounts =
-                corePort.listDepositAccounts(new CoreCustomerRef(customer.getCoreExternalId()));
+        List<DepositAccountRef> accounts =
+                corePort.listDepositAccountRefs(new CoreCustomerRef(customer.getCoreExternalId()));
         String walletId = customer.getId() + ":wallet";
-        DepositAccountSummary wallet = accounts.stream()
+        DepositAccountRef wallet = accounts.stream()
                 .filter(a -> a.account().externalId().equals(walletId))
                 .findFirst()
                 .orElseGet(() -> accounts.isEmpty() ? null : accounts.get(0));

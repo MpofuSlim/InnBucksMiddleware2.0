@@ -15,6 +15,7 @@ import zw.co.innbucks.middleware.corebanking.value.AccountBalance;
 import zw.co.innbucks.middleware.corebanking.value.AccountRef;
 import zw.co.innbucks.middleware.corebanking.value.CoreCustomerRef;
 import zw.co.innbucks.middleware.corebanking.value.CustomerProfile;
+import zw.co.innbucks.middleware.corebanking.value.DepositAccountRef;
 import zw.co.innbucks.middleware.corebanking.value.DepositAccountSummary;
 import zw.co.innbucks.middleware.corebanking.value.IdempotencyKey;
 import zw.co.innbucks.middleware.corebanking.value.MinorUnits;
@@ -192,6 +193,67 @@ public class FineractAdapter implements CoreBankingPort {
         return result;
     }
 
+    /**
+     * Shared by the balance read and the refs listing so the two can never
+     * drift apart: an account this cell may touch must be denominated in the
+     * cell's currency. A mismatch is a provisioning fault, and surfacing or
+     * moving amounts under the wrong currency is a money bug — so it fails the
+     * whole call rather than quietly skipping the account.
+     */
+    private void requireCellCurrencyOn(String accountExternalId, String currency) {
+        if (currency == null || !currency.equals(properties.currency())) {
+            throw new CoreServerException(CoreProvider.FINERACT,
+                    "Savings " + accountExternalId + " currency " + currency
+                            + " does not match the cell currency " + properties.currency(), null);
+        }
+    }
+
+    /**
+     * One HTTP call, no balances — the override that makes the polled paths
+     * affordable.
+     *
+     * <p>{@link #listDepositAccounts} costs 1 + N calls: the listing, then a
+     * full savings read per account purely to fetch its balance. Every
+     * ownership check, recipient resolution and statement lookup was paying
+     * that, sixty seconds apart, for data it discarded. Fineract's listing
+     * already carries externalId, product name, account number and currency, so
+     * those callers need nothing more than this.
+     *
+     * <p><b>Balances are deliberately NOT taken from the listing, even though
+     * the payload appears to contain them.</b> Fineract maps them with
+     * {@code JdbcSupport.getBigDecimalDefaultToNullIfZero}
+     * (AccountDetailsReadPlatformServiceJpaRepositoryImpl), so a ZERO balance
+     * becomes null and Gson then drops the key entirely — an empty wallet is
+     * indistinguishable on the wire from a field that was never populated.
+     * Reading money from that would silently turn "0.00" into "unknown".
+     * {@link #getBalance} stays the only source of balances.
+     *
+     * <p>The cell-currency check runs here through the same helper
+     * {@link #getBalance} uses, and is NOT an optimisation candidate: this list
+     * feeds pre-write ownership checks, so dropping it would let a
+     * wrong-currency account pass a route the balance path refuses.
+     */
+    @Override
+    public List<DepositAccountRef> listDepositAccountRefs(CoreCustomerRef ref) {
+        var accounts = client.listClientAccounts(ref.externalId());
+        List<DepositAccountRef> result = new ArrayList<>();
+        if (accounts == null || accounts.savingsAccounts() == null) {
+            return result;
+        }
+        for (SavingsSummary summary : accounts.savingsAccounts()) {
+            if (summary.externalId() == null || summary.externalId().isBlank()) {
+                // Not middleware-managed (no stable ref) — invisible to the app,
+                // exactly as in listDepositAccounts.
+                continue;
+            }
+            String currency = summary.currency() == null ? null : summary.currency().code();
+            requireCellCurrencyOn(summary.externalId(), currency);
+            result.add(new DepositAccountRef(new AccountRef(summary.externalId()),
+                    summary.productName(), currency, summary.accountNo()));
+        }
+        return result;
+    }
+
     @Override
     public AccountBalance getBalance(AccountRef account) {
         SavingsAccountResponse response = client.findSavingsByExternalId(account.externalId());
@@ -200,13 +262,7 @@ public class FineractAdapter implements CoreBankingPort {
                     "No Fineract savings account with externalId " + account.externalId(), null);
         }
         String currency = response.currency() == null ? null : response.currency().code();
-        if (currency == null || !currency.equals(properties.currency())) {
-            // A wrong-currency account in this cell is a provisioning fault —
-            // surfacing amounts under the wrong currency is a money bug.
-            throw new CoreServerException(CoreProvider.FINERACT,
-                    "Savings " + account.externalId() + " currency " + currency
-                            + " does not match the cell currency " + properties.currency(), null);
-        }
+        requireCellCurrencyOn(account.externalId(), currency);
         BigDecimal current = response.summary() == null || response.summary().accountBalance() == null
                 ? BigDecimal.ZERO : response.summary().accountBalance();
         BigDecimal available = response.summary() == null || response.summary().availableBalance() == null

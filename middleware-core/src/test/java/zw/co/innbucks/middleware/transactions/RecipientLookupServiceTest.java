@@ -12,8 +12,7 @@ import zw.co.innbucks.middleware.corebanking.CoreBankingPort;
 import zw.co.innbucks.middleware.corebanking.value.AccountRef;
 import zw.co.innbucks.middleware.corebanking.value.CoreCustomerRef;
 import zw.co.innbucks.middleware.corebanking.value.CustomerProfile;
-import zw.co.innbucks.middleware.corebanking.value.DepositAccountSummary;
-import zw.co.innbucks.middleware.corebanking.value.MinorUnits;
+import zw.co.innbucks.middleware.corebanking.value.DepositAccountRef;
 import zw.co.innbucks.middleware.customer.Customer;
 import zw.co.innbucks.middleware.customer.CustomerRepository;
 import zw.co.innbucks.middleware.ratelimit.RateLimitExceededException;
@@ -76,9 +75,9 @@ class RecipientLookupServiceTest {
         recipient.setMsisdn(MSISDN);
         recipient.setCoreExternalId(RECIPIENT.toString());
         when(customers.findByCountryAndMsisdn("ZW", MSISDN)).thenReturn(Optional.of(recipient));
-        when(port.listDepositAccounts(new CoreCustomerRef(RECIPIENT.toString())))
-                .thenReturn(List.of(new DepositAccountSummary(
-                        new AccountRef(WALLET), "Wallet", "USD", new MinorUnits(5000, "USD"))));
+        when(port.listDepositAccountRefs(new CoreCustomerRef(RECIPIENT.toString())))
+                .thenReturn(List.of(new DepositAccountRef(
+                        new AccountRef(WALLET), "Wallet", "USD", "000000010")));
         when(port.getProfile(new CoreCustomerRef(RECIPIENT.toString())))
                 .thenReturn(new CustomerProfile(new CoreCustomerRef(RECIPIENT.toString()),
                         "Tariro", "Moyo", "ACTIVE"));
@@ -126,7 +125,7 @@ class RecipientLookupServiceTest {
         RecipientNotFoundException noMapping = catchNotFound(MSISDN);
 
         unmapped.setCoreExternalId(RECIPIENT.toString());
-        when(port.listDepositAccounts(any())).thenReturn(List.of());
+        when(port.listDepositAccountRefs(any())).thenReturn(List.of());
         RecipientNotFoundException noAccount = catchNotFound(MSISDN);
 
         assertThat(unknown.getMessage())
@@ -177,12 +176,12 @@ class RecipientLookupServiceTest {
 
     @Test
     void prefersTheWalletWhenTheRecipientHasSeveralAccounts() {
-        when(port.listDepositAccounts(new CoreCustomerRef(RECIPIENT.toString())))
+        when(port.listDepositAccountRefs(new CoreCustomerRef(RECIPIENT.toString())))
                 .thenReturn(List.of(
-                        new DepositAccountSummary(new AccountRef(RECIPIENT + ":savings"),
-                                "Savings", "USD", new MinorUnits(1, "USD")),
-                        new DepositAccountSummary(new AccountRef(WALLET),
-                                "Wallet", "USD", new MinorUnits(2, "USD"))));
+                        new DepositAccountRef(new AccountRef(RECIPIENT + ":savings"),
+                                "Savings", "USD", "000000011"),
+                        new DepositAccountRef(new AccountRef(WALLET),
+                                "Wallet", "USD", "000000010")));
 
         assertThat(service.lookup(CALLER, MSISDN).accountId()).isEqualTo(WALLET);
     }

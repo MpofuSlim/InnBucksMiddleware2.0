@@ -12,7 +12,7 @@ import zw.co.innbucks.middleware.corebanking.value.AccountBalance;
 import zw.co.innbucks.middleware.corebanking.value.AccountRef;
 import zw.co.innbucks.middleware.corebanking.value.CoreCustomerRef;
 import zw.co.innbucks.middleware.corebanking.value.CustomerProfile;
-import zw.co.innbucks.middleware.corebanking.value.DepositAccountSummary;
+import zw.co.innbucks.middleware.corebanking.value.DepositAccountRef;
 import zw.co.innbucks.middleware.corebanking.value.MinorUnits;
 import zw.co.innbucks.middleware.customer.Customer;
 import zw.co.innbucks.middleware.customer.CustomerRepository;
@@ -71,9 +71,9 @@ class TransactionNotifierTest {
                 new CoreCustomerRef(SENDER.toString()), "Tariro", "Mpofu", "active"));
         when(customers.findById(SENDER)).thenReturn(Optional.of(customer(SENDER, "+263782606983")));
         when(customers.findById(RECIPIENT)).thenReturn(Optional.of(customer(RECIPIENT, "+263771234567")));
-        when(port.listDepositAccounts(new CoreCustomerRef(RECIPIENT.toString())))
-                .thenReturn(List.of(new DepositAccountSummary(
-                        new AccountRef(RECIPIENT_ACCT), "Wallet", "USD", new MinorUnits(5000, "USD"))));
+        when(port.listDepositAccountRefs(new CoreCustomerRef(RECIPIENT.toString())))
+                .thenReturn(List.of(new DepositAccountRef(
+                        new AccountRef(RECIPIENT_ACCT), "Wallet", "USD", "000000010")));
         notifier = build(properties(true, false));
     }
 
@@ -197,7 +197,7 @@ class TransactionNotifierTest {
     void aNamingConventionMatchIsNotEnoughToSendSomeoneElsesAmounts() {
         // The UUID prefix says "recipient", but the core does not list that
         // account for them — sending anyway would leak a stranger's movement.
-        when(port.listDepositAccounts(new CoreCustomerRef(RECIPIENT.toString())))
+        when(port.listDepositAccountRefs(new CoreCustomerRef(RECIPIENT.toString())))
                 .thenReturn(List.of());
 
         notifier.deliver(event(LedgerTransactionType.TRANSFER, LedgerStatus.COMPLETED,

@@ -5,6 +5,7 @@ import org.springframework.stereotype.Service;
 import zw.co.innbucks.middleware.corebanking.CoreBankingPort;
 import zw.co.innbucks.middleware.corebanking.value.CoreCustomerRef;
 import zw.co.innbucks.middleware.corebanking.value.CustomerProfile;
+import zw.co.innbucks.middleware.corebanking.value.DepositAccountRef;
 import zw.co.innbucks.middleware.corebanking.value.DepositAccountSummary;
 import zw.co.innbucks.middleware.customer.Customer;
 import zw.co.innbucks.middleware.customer.CustomerRepository;
@@ -62,7 +63,7 @@ public class ProfileService {
     public StatementView statementFor(UUID customerId, String accountId,
                                       LocalDate from, LocalDate to, int offset, int limit) {
         Customer customer = requireMappedCustomer(customerId);
-        DepositAccountSummary account = requireOwnedAccount(customer, accountId);
+        DepositAccountRef account = requireOwnedAccount(customer, accountId);
 
         TransactionPage page = corePort.listTransactions(
                 new TransactionHistoryQuery(account.account(), from, to, offset, limit));
@@ -88,8 +89,8 @@ public class ProfileService {
      * movement endpoints use, never a local cache. Returns the account so the
      * caller gets its currency without a second round trip.
      */
-    private DepositAccountSummary requireOwnedAccount(Customer customer, String accountId) {
-        return corePort.listDepositAccounts(new CoreCustomerRef(customer.getCoreExternalId()))
+    private DepositAccountRef requireOwnedAccount(Customer customer, String accountId) {
+        return corePort.listDepositAccountRefs(new CoreCustomerRef(customer.getCoreExternalId()))
                 .stream()
                 .filter(a -> a.account().externalId().equals(accountId))
                 .findFirst()

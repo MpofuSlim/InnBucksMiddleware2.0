@@ -177,8 +177,11 @@ public class MovementService {
 
     /** Ownership by the CORE's account list — the source of truth, not a local cache. */
     private void requireOwnership(Customer customer, String accountId) {
+        // Refs, not balances: this only asks WHICH accounts are the
+        // customer's. Fetching every balance to answer that cost 1+N core
+        // calls per movement, all of it discarded.
         List<String> owned = corePort
-                .listDepositAccounts(new CoreCustomerRef(customer.getCoreExternalId()))
+                .listDepositAccountRefs(new CoreCustomerRef(customer.getCoreExternalId()))
                 .stream().map(a -> a.account().externalId()).toList();
         if (!owned.contains(accountId)) {
             log.warn("Ownership check refused account={} for customer={}", accountId, customer.getId());
