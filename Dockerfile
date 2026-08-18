@@ -75,4 +75,10 @@ EXPOSE 8090 9090
 HEALTHCHECK --interval=30s --timeout=3s --start-period=60s --retries=3 \
     CMD wget --quiet --tries=1 --spider http://localhost:9090/actuator/health || exit 1
 
-ENTRYPOINT ["java", "-Duser.timezone=UTC", "-jar", "/app/app.jar"]
+# jdk.httpclient.keepalive.timeout: the JDK HttpClient drops idle pooled
+# connections after 30s by default. Money movements arrive far less often than
+# that, so the write-credential pool is essentially always cold and nearly every
+# transfer pays a fresh TCP + TLS handshake to Fineract — repeatedly, since one
+# transfer makes several calls. 600s keeps the connection warm between
+# movements. Cheap: a handful of idle sockets on the private cell network.
+ENTRYPOINT ["java", "-Duser.timezone=UTC", "-Djdk.httpclient.keepalive.timeout=600", "-jar", "/app/app.jar"]

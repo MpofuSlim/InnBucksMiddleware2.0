@@ -236,4 +236,94 @@ class LoginFlowIntegrationTest {
                 "SELECT COUNT(*) FROM audit_event WHERE action = 'refresh_device_mismatch'", Integer.class);
         assertThat(mismatchAudits).isEqualTo(1);
     }
+
+    // ---------------------------------------------------------------------
+    // Brute-force counters. These exist because the increment is written and
+    // then thrown over: without noRollbackFor on LoginService.login the
+    // transaction is marked rollback-only by InvalidCredentialsException and
+    // failed_pin_attempts silently stays at 0 forever — so the lockout and the
+    // backoff built on it never fire for anyone. Asserting the RESPONSE alone
+    // cannot see that; every assertion below reads the row back.
+    // ---------------------------------------------------------------------
+
+    @Test
+    void aWrongPinIsCountedAgainstTheAccount() throws Exception {
+        mockMvc.perform(post("/auth/login")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"msisdn":"0712345678","pin":"9999","deviceHash":"test-device-1"}
+                                """))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.errorCode").value("invalid_credentials"));
+
+        assertThat(failedAttempts()).isEqualTo(1);
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT last_failed_pin_at IS NOT NULL FROM customer WHERE id = ?", Boolean.class, customerId))
+                .isTrue();
+    }
+
+    @Test
+    void theAttemptAtTheCapLocksTheAccount() throws Exception {
+        // Seeded one short of the cap, with the last failure far enough back
+        // that the exponential backoff has elapsed — this test is about the
+        // lock, not the backoff, and rapid-fire attempts would hit 429 first.
+        jdbcTemplate.update("UPDATE customer SET failed_pin_attempts = 6, last_failed_pin_at = ? WHERE id = ?",
+                Timestamp.from(Instant.now().minusSeconds(600)), customerId);
+
+        mockMvc.perform(post("/auth/login")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"msisdn":"0712345678","pin":"9999","deviceHash":"test-device-1"}
+                                """))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.errorCode").value("invalid_credentials"));
+
+        assertThat(failedAttempts()).isEqualTo(7);
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT status FROM customer WHERE id = ?", String.class, customerId))
+                .isEqualTo(CustomerStatus.LOCKED.dbValue());
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT locked_until IS NOT NULL FROM customer WHERE id = ?", Boolean.class, customerId))
+                .isTrue();
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM audit_event WHERE action = 'account_locked'", Integer.class))
+                .isEqualTo(1);
+    }
+
+    @Test
+    void aLockedAccountIsRefusedEvenWithTheCorrectPin() throws Exception {
+        jdbcTemplate.update("UPDATE customer SET status = ?, locked_until = ?, failed_pin_attempts = 7 WHERE id = ?",
+                CustomerStatus.LOCKED.dbValue(), Timestamp.from(Instant.now().plusSeconds(3600)), customerId);
+
+        mockMvc.perform(post("/auth/login")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"msisdn":"0712345678","pin":"1234","deviceHash":"test-device-1"}
+                                """))
+                .andExpect(status().isLocked())
+                .andExpect(jsonPath("$.errorCode").value("account_locked"));
+    }
+
+    @Test
+    void aSuccessfulLoginClearsTheCounters() throws Exception {
+        jdbcTemplate.update("UPDATE customer SET failed_pin_attempts = 3, last_failed_pin_at = ? WHERE id = ?",
+                Timestamp.from(Instant.now().minusSeconds(600)), customerId);
+
+        mockMvc.perform(post("/auth/login")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"msisdn":"0712345678","pin":"1234","deviceHash":"test-device-1"}
+                                """))
+                .andExpect(status().isOk());
+
+        assertThat(failedAttempts()).isZero();
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT last_failed_pin_at IS NULL FROM customer WHERE id = ?", Boolean.class, customerId))
+                .isTrue();
+    }
+
+    private Integer failedAttempts() {
+        return jdbcTemplate.queryForObject(
+                "SELECT failed_pin_attempts FROM customer WHERE id = ?", Integer.class, customerId);
+    }
 }
