@@ -49,7 +49,27 @@ public class LoginService {
     private final AuthAnomalyDetector anomalyDetector;
     private final Clock clock;
 
-    @Transactional
+    /**
+     * {@code noRollbackFor} is LOAD-BEARING, not a tidy-up.
+     *
+     * <p>The wrong-PIN branch increments {@code failed_pin_attempts} (and, at
+     * the cap, flips the row to LOCKED) and then throws
+     * {@link InvalidCredentialsException}. Under a bare {@code @Transactional}
+     * that throw marks the transaction rollback-only, so the increment is
+     * discarded on the way out: the counter never leaves zero, and the
+     * seven-failure lockout plus the exponential backoff built on top of it can
+     * never fire for anybody. An attacker gets unlimited PIN guesses at full
+     * speed, each one paying Argon2id on our CPU.
+     *
+     * <p>Only this exception is listed. The other exits — PIN_NOT_SET,
+     * ACCOUNT_LOCKED, BACKOFF_ACTIVE — mutate no customer state before
+     * throwing, and audit rows commit independently on their own REQUIRES_NEW
+     * transaction either way.
+     *
+     * <p>{@code RefreshTokenService.rotate} and {@code OtpService.verify} carry
+     * the same annotation for the same reason; login was the one that missed it.
+     */
+    @Transactional(noRollbackFor = InvalidCredentialsException.class)
     public LoginResult login(String rawMsisdn, String pin, String deviceHash) {
         if (!PinFormat.isValid(pin)) {
             throw new InvalidCredentialsException();

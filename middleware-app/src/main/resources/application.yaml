@@ -14,6 +14,28 @@ spring:
     url: ${DATASOURCE_URL:}
     username: ${DATASOURCE_USERNAME:}
     password: ${DATASOURCE_PASSWORD:}
+    hikari:
+      # Sized for the NESTED-CONNECTION shape this service is built on, not for
+      # its request rate. Any flow that writes an audit row holds TWO pooled
+      # connections at once: the business transaction, plus the REQUIRES_NEW
+      # transaction AuditService opens to seal the chain (and which then queues
+      # on the audit_chain_head row lock). Login additionally pins its
+      # connection across Argon2id, and OTP across the SMS gateway round trip.
+      #
+      # On Boot's default of 10 that is ~5 concurrent audited flows before the
+      # pool is gone — and because each holder is waiting for a SECOND
+      # connection from the same exhausted pool, the failure mode is a hang
+      # until timeout, not a clean rejection. A login storm or a spray then
+      # starves money movements. 30 gives real headroom against Postgres'
+      # default max_connections=100, which nothing else on the box shares.
+      maximum-pool-size: ${DB_POOL_SIZE:30}
+      # Fail fast instead of parking a request thread for the 30s default.
+      # Under saturation a prompt 5xx is honest; a 30s stall looks like a hang
+      # to the app and burns a Tomcat thread the whole time.
+      connection-timeout: ${DB_CONNECTION_TIMEOUT_MS:5000}
+      # Surfaces the pool in /actuator/prometheus (hikaricp_connections_*),
+      # which is what load testing needs to see contention rather than infer it.
+      register-mbeans: true
   flyway:
     enabled: true
     locations: classpath:db/migration

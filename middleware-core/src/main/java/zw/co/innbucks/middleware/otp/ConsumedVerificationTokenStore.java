@@ -81,7 +81,11 @@ public class ConsumedVerificationTokenStore {
      * deploys one-per-country; wrap with ShedLock if we ever scale a country
      * horizontally.
      */
-    @Scheduled(cron = "${innbucks.auth.consumed-verification-token-prune-cron:0 35 3 * * *}")
+    // 03:37, not 03:35: the idempotency prune already owns 03:35, and two
+    // DELETE sweeps firing on the same tick on a single-replica cell contend
+    // for the same pool and I/O for no reason. The nightly jobs are spaced at
+    // 03:30 / 03:35 / 03:37 / 03:40 / 03:45 so each finishes before the next.
+    @Scheduled(cron = "${innbucks.auth.consumed-verification-token-prune-cron:0 37 3 * * *}")
     public void pruneExpired() {
         Instant cutoff = clock.instant();
         int deleted = jdbcTemplate.update(PRUNE_SQL, Timestamp.from(cutoff));
