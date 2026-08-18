@@ -19,8 +19,16 @@ spring:
       # its request rate. Any flow that writes an audit row holds TWO pooled
       # connections at once: the business transaction, plus the REQUIRES_NEW
       # transaction AuditService opens to seal the chain (and which then queues
-      # on the audit_chain_head row lock). Login additionally pins its
-      # connection across Argon2id, and OTP across the SMS gateway round trip.
+      # on the audit_chain_head row lock). OTP additionally pins its connection
+      # across the SMS gateway round trip, and PinService.apply computes
+      # Argon2id INSIDE its own transaction, so /auth/pin/set and
+      # /auth/pin/reset still hold one across the hash.
+      #
+      # Login NO LONGER does: it owns no transaction at all, its counter writes
+      # are single autocommit statements, and its audit row is written after
+      # they return — so it holds at most ONE connection, for statement
+      # duration. Do NOT shrink the pool on the strength of that alone; the
+      # other two cases above are unchanged and each would re-create the hang.
       #
       # On Boot's default of 10 that is ~5 concurrent audited flows before the
       # pool is gone — and because each holder is waiting for a SECOND

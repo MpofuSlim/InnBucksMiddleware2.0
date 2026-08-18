@@ -239,11 +239,13 @@ class LoginFlowIntegrationTest {
 
     // ---------------------------------------------------------------------
     // Brute-force counters. These exist because the increment is written and
-    // then thrown over: without noRollbackFor on LoginService.login the
-    // transaction is marked rollback-only by InvalidCredentialsException and
-    // failed_pin_attempts silently stays at 0 forever — so the lockout and the
-    // backoff built on it never fire for anyone. Asserting the RESPONSE alone
-    // cannot see that; every assertion below reads the row back.
+    // then thrown over, so the lockout and the backoff built on it must
+    // survive InvalidCredentialsException. That now holds STRUCTURALLY — the
+    // increment is its own autocommit statement in CustomerLockoutStore and
+    // has committed before the exception is constructed — where it used to
+    // depend on a noRollbackFor annotation on LoginService.login. Asserting
+    // the RESPONSE alone cannot see a lost increment; every assertion below
+    // reads the row back.
     // ---------------------------------------------------------------------
 
     @Test
@@ -320,6 +322,134 @@ class LoginFlowIntegrationTest {
         assertThat(jdbcTemplate.queryForObject(
                 "SELECT last_failed_pin_at IS NULL FROM customer WHERE id = ?", Boolean.class, customerId))
                 .isTrue();
+    }
+
+    /**
+     * The audit action must come from the statement's RETURNING value, not
+     * from the in-memory entity — which is stale the moment the atomic UPDATE
+     * runs. {@code theAttemptAtTheCapLocksTheAccount} cannot see this: it
+     * seeds 6 against the test profile's cap of 5, so the stale value and the
+     * returned value happen to agree. Seeding cap-1 makes them disagree.
+     */
+    @Test
+    void theAttemptThatReachesTheCapIsAuditedAsAccountLocked() throws Exception {
+        jdbcTemplate.update("UPDATE customer SET failed_pin_attempts = 4, last_failed_pin_at = ? WHERE id = ?",
+                Timestamp.from(Instant.now().minusSeconds(600)), customerId);
+
+        mockMvc.perform(post("/auth/login")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"msisdn":"0712345678","pin":"9999","deviceHash":"test-device-1"}
+                                """))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.errorCode").value("invalid_credentials"));
+
+        assertThat(failedAttempts()).isEqualTo(5);
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT status FROM customer WHERE id = ?", String.class, customerId))
+                .isEqualTo(CustomerStatus.LOCKED.dbValue());
+        // Reading the stale 4 would give 4 >= 5 == false: a login_failure row
+        // beside a locked row.
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM audit_event WHERE action = 'account_locked'", Integer.class))
+                .isEqualTo(1);
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM audit_event WHERE action = 'login_failure'", Integer.class))
+                .isZero();
+    }
+
+    /**
+     * Monotonicity across calls — presently unpinned, because every other
+     * counter test issues exactly ONE wrong-PIN request. Catches a botched
+     * {@code + 1} or a CASE that accidentally clamps.
+     */
+    @Test
+    void theCounterClimbsAcrossSequentialAttempts() throws Exception {
+        mockMvc.perform(post("/auth/login")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"msisdn":"0712345678","pin":"9999","deviceHash":"test-device-1"}
+                                """))
+                .andExpect(status().isUnauthorized());
+        assertThat(failedAttempts()).isEqualTo(1);
+
+        // Neutralise the backoff gate by NULLing its input rather than by
+        // hoping the wall clock cooperates: computeBackoffSeconds returns 0
+        // immediately when last_failed_pin_at is null.
+        jdbcTemplate.update("UPDATE customer SET last_failed_pin_at = NULL WHERE id = ?", customerId);
+
+        mockMvc.perform(post("/auth/login")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"msisdn":"0712345678","pin":"9999","deviceHash":"test-device-1"}
+                                """))
+                .andExpect(status().isUnauthorized());
+        assertThat(failedAttempts()).isEqualTo(2);
+    }
+
+    /**
+     * The exponential backoff ladder, which had NO coverage anywhere. It
+     * matters to this change because it is the only consumer of
+     * {@code last_failed_pin_at}, and nothing else pins that column's VALUE —
+     * only its non-nullness. An implementer who writes {@code now()}
+     * server-side instead of binding the injected Clock's instant would
+     * silently kill the Clock bean and still pass the whole suite.
+     */
+    @Test
+    void theSecondRapidAttemptIsRefusedWithBackoff() throws Exception {
+        // attempts=4 -> penalty min(1 << min(4-1,6), 60) = 8s, an eight-second
+        // margin against the epoch-second truncation in computeBackoffSeconds.
+        jdbcTemplate.update("UPDATE customer SET failed_pin_attempts = 4, last_failed_pin_at = ? WHERE id = ?",
+                Timestamp.from(Instant.now()), customerId);
+
+        mockMvc.perform(post("/auth/login")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"msisdn":"0712345678","pin":"9999","deviceHash":"test-device-1"}
+                                """))
+                .andExpect(status().isTooManyRequests())
+                .andExpect(jsonPath("$.errorCode").value("backoff_active"));
+
+        // A throttled attempt does not extend the counter — today's behaviour,
+        // now pinned.
+        assertThat(failedAttempts()).isEqualTo(4);
+    }
+
+    /**
+     * The one observable change in this slice: after a successful login the row
+     * is fully consistent. Previously the success path cleared
+     * {@code locked_until} but never rewrote {@code status}, so a customer
+     * whose lock had EXPIRED kept a permanent stale {@code 'locked'} — inert
+     * for auth (the gate requires both halves) but echoed raw to a working
+     * customer by {@code GET /me/profile}. Lock expiry had no test at all.
+     */
+    @Test
+    void anExpiredLockLetsTheCustomerBackInAndFullyResetsTheRow() throws Exception {
+        jdbcTemplate.update("""
+                UPDATE customer
+                   SET status = ?, locked_until = ?, failed_pin_attempts = 7, last_failed_pin_at = ?
+                 WHERE id = ?
+                """,
+                CustomerStatus.LOCKED.dbValue(),
+                Timestamp.from(Instant.now().minusSeconds(3600)),
+                Timestamp.from(Instant.now().minusSeconds(600)),
+                customerId);
+
+        mockMvc.perform(post("/auth/login")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"msisdn":"0712345678","pin":"1234","deviceHash":"test-device-1"}
+                                """))
+                .andExpect(status().isOk());
+
+        assertThat(failedAttempts()).isZero();
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT last_failed_pin_at IS NULL AND locked_until IS NULL FROM customer WHERE id = ?",
+                Boolean.class, customerId))
+                .isTrue();
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT status FROM customer WHERE id = ?", String.class, customerId))
+                .isEqualTo(CustomerStatus.ACTIVE.dbValue());
     }
 
     private Integer failedAttempts() {
