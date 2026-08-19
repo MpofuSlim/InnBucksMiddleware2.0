@@ -1,6 +1,7 @@
 package zw.co.innbucks.middleware.transactions;
 
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import org.springframework.beans.factory.ObjectProvider;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import zw.co.innbucks.middleware.common.country.Country;
@@ -14,7 +15,9 @@ import zw.co.innbucks.middleware.corebanking.value.CoreCustomerRef;
 import zw.co.innbucks.middleware.corebanking.value.CustomerProfile;
 import zw.co.innbucks.middleware.corebanking.value.DepositAccountRef;
 import zw.co.innbucks.middleware.customer.Customer;
+import zw.co.innbucks.middleware.customer.CustomerNameResolver;
 import zw.co.innbucks.middleware.customer.CustomerRepository;
+import zw.co.innbucks.middleware.customer.ProfileCacheProperties;
 import zw.co.innbucks.middleware.ratelimit.RateLimitExceededException;
 import zw.co.innbucks.middleware.ratelimit.RateLimitProperties;
 import zw.co.innbucks.middleware.ratelimit.RateLimitProperties.Limit;
@@ -59,12 +62,19 @@ class RecipientLookupServiceTest {
                 new Limit(lookupCapacity, Duration.ofMinutes(1)));
     }
 
+    @SuppressWarnings("unchecked")
     private RecipientLookupService build(int lookupCapacity) {
         RateLimitProperties properties = limits(lookupCapacity);
         MsisdnNormalizerRegistry registry = new MsisdnNormalizerRegistry(
                 List.of(new ZimbabweMsisdnNormalizer()), new CountryProperties(Country.ZW));
+        // A REAL resolver over the mock port — the cache is part of what this
+        // endpoint now does, so the oracle's guard rails are tested through it.
+        ObjectProvider<CoreBankingPort> provider = mock(ObjectProvider.class);
+        when(provider.getIfAvailable()).thenReturn(port);
+        CustomerNameResolver nameResolver = new CustomerNameResolver(provider,
+                new ProfileCacheProperties(true, Duration.ofMinutes(5), 1000), new SimpleMeterRegistry());
         return new RecipientLookupService(customers, registry, new CountryProperties(Country.ZW),
-                port, new RateLimiterService(properties), properties, meterRegistry);
+                port, nameResolver, new RateLimiterService(properties), properties, meterRegistry);
     }
 
     @BeforeEach

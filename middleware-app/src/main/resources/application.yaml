@@ -65,6 +65,20 @@ innbucks:
   # pins exactly one (country, core) pair.
   core:
     provider: ${INNBUCKS_CORE_PROVIDER:fineract}
+    # Names only — never balances, never ownership, never status. Three paths
+    # needed a customer's name and each paid a full core profile read for it:
+    # GET /me/profile (polled ~once a minute per open screen), /accounts/lookup,
+    # and the credit leg of every transfer alert. Names are the most static
+    # thing the core holds, so re-reading them at poll frequency was waste.
+    #
+    # The TTL is a STALENESS BUDGET, not just a performance knob: it is the
+    # worst-case delay before a teller's correction in the core shows up in the
+    # app. Nothing in this middleware writes names, so there is nothing else to
+    # invalidate on. Set enabled=false for zero staleness at full core cost.
+    profile-cache:
+      enabled: ${PROFILE_CACHE_ENABLED:true}
+      ttl: ${PROFILE_CACHE_TTL:5m}
+      maximum-size: ${PROFILE_CACHE_MAX_SIZE:50000}
   auth:
     signing-key: ${JWT_SIGNING_KEY:}
     # MUST be a DIFFERENT secret from signing-key — it signs OTP verification /

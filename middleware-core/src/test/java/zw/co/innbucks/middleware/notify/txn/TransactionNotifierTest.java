@@ -15,12 +15,15 @@ import zw.co.innbucks.middleware.corebanking.value.CustomerProfile;
 import zw.co.innbucks.middleware.corebanking.value.DepositAccountRef;
 import zw.co.innbucks.middleware.corebanking.value.MinorUnits;
 import zw.co.innbucks.middleware.customer.Customer;
+import zw.co.innbucks.middleware.customer.CustomerNameResolver;
 import zw.co.innbucks.middleware.customer.CustomerRepository;
+import zw.co.innbucks.middleware.customer.ProfileCacheProperties;
 import zw.co.innbucks.middleware.ledger.LedgerStatus;
 import zw.co.innbucks.middleware.ledger.LedgerTransactionType;
 import zw.co.innbucks.middleware.notify.NotificationDeliveryException;
 import zw.co.innbucks.middleware.otp.SmsSender;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.List;
@@ -81,9 +84,17 @@ class TransactionNotifierTest {
         @SuppressWarnings("unchecked")
         ObjectProvider<CoreBankingPort> provider = mock(ObjectProvider.class);
         when(provider.getIfAvailable()).thenReturn(port);
+        // A REAL resolver over the mock port, not a mocked resolver: these
+        // tests should keep exercising the caching path production uses.
         return new TransactionNotifier(properties,
                 new TransactionMessageComposer(ZoneId.of("Africa/Harare"), 160, 24),
-                customers, provider, sms, meterRegistry);
+                customers, provider, nameResolver(provider), sms, meterRegistry);
+    }
+
+    private static CustomerNameResolver nameResolver(ObjectProvider<CoreBankingPort> provider) {
+        return new CustomerNameResolver(provider,
+                new ProfileCacheProperties(true, Duration.ofMinutes(5), 1000),
+                new SimpleMeterRegistry());
     }
 
     private static TransactionNotificationProperties properties(boolean enabled, boolean onFailure) {

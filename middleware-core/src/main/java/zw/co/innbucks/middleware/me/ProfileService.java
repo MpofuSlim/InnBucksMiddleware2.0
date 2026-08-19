@@ -4,10 +4,11 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import zw.co.innbucks.middleware.corebanking.CoreBankingPort;
 import zw.co.innbucks.middleware.corebanking.value.CoreCustomerRef;
-import zw.co.innbucks.middleware.corebanking.value.CustomerProfile;
 import zw.co.innbucks.middleware.corebanking.value.DepositAccountRef;
 import zw.co.innbucks.middleware.corebanking.value.DepositAccountSummary;
 import zw.co.innbucks.middleware.customer.Customer;
+import zw.co.innbucks.middleware.customer.CustomerName;
+import zw.co.innbucks.middleware.customer.CustomerNameResolver;
 import zw.co.innbucks.middleware.customer.CustomerRepository;
 
 import java.util.List;
@@ -27,15 +28,19 @@ public class ProfileService {
 
     private final CustomerRepository customerRepository;
     private final CoreBankingPort corePort;
+    private final CustomerNameResolver nameResolver;
 
     public ProfileResponse profileFor(UUID customerId) {
         Customer customer = requireMappedCustomer(customerId);
-        CustomerProfile core = corePort.getProfile(new CoreCustomerRef(customer.getCoreExternalId()));
+        // Names via the resolver's short-TTL cache — this endpoint is polled,
+        // and a name is the one thing here that is safe to be seconds stale
+        // about. Status still comes from the LOCAL row, as it always did.
+        CustomerName core = nameResolver.resolve(customer.getCoreExternalId());
         return new ProfileResponse(
                 customer.getId(),
                 customer.getMsisdn(),
-                core.firstName(),
-                core.lastName(),
+                core == null ? null : core.firstName(),
+                core == null ? null : core.lastName(),
                 customer.getStatus(),
                 customer.getKycTier());
     }

@@ -9,9 +9,10 @@ import zw.co.innbucks.middleware.common.msisdn.MsisdnMasking;
 import zw.co.innbucks.middleware.common.msisdn.MsisdnNormalizerRegistry;
 import zw.co.innbucks.middleware.corebanking.CoreBankingPort;
 import zw.co.innbucks.middleware.corebanking.value.CoreCustomerRef;
-import zw.co.innbucks.middleware.corebanking.value.CustomerProfile;
 import zw.co.innbucks.middleware.corebanking.value.DepositAccountRef;
 import zw.co.innbucks.middleware.customer.Customer;
+import zw.co.innbucks.middleware.customer.CustomerName;
+import zw.co.innbucks.middleware.customer.CustomerNameResolver;
 import zw.co.innbucks.middleware.customer.CustomerRepository;
 import zw.co.innbucks.middleware.ratelimit.RateLimitDecision;
 import zw.co.innbucks.middleware.ratelimit.RateLimitExceededException;
@@ -61,6 +62,7 @@ public class RecipientLookupService {
     private final MsisdnNormalizerRegistry msisdnRegistry;
     private final CountryProperties countryProperties;
     private final CoreBankingPort corePort;
+    private final CustomerNameResolver nameResolver;
     private final RateLimiterService rateLimiter;
     private final RateLimitProperties rateLimitProperties;
     private final MeterRegistry meterRegistry;
@@ -69,6 +71,7 @@ public class RecipientLookupService {
                                   MsisdnNormalizerRegistry msisdnRegistry,
                                   CountryProperties countryProperties,
                                   CoreBankingPort corePort,
+                                  CustomerNameResolver nameResolver,
                                   RateLimiterService rateLimiter,
                                   RateLimitProperties rateLimitProperties,
                                   MeterRegistry meterRegistry) {
@@ -76,6 +79,7 @@ public class RecipientLookupService {
         this.msisdnRegistry = msisdnRegistry;
         this.countryProperties = countryProperties;
         this.corePort = corePort;
+        this.nameResolver = nameResolver;
         this.rateLimiter = rateLimiter;
         this.rateLimitProperties = rateLimitProperties;
         this.meterRegistry = meterRegistry;
@@ -122,11 +126,15 @@ public class RecipientLookupService {
             throw notFound("no_account", msisdn);
         }
 
-        CustomerProfile profile = corePort.getProfile(new CoreCustomerRef(customer.getCoreExternalId()));
+        // The name comes from the resolver's short-TTL cache; ownership above
+        // did NOT. That ordering is what keeps caching safe here — a cached
+        // name can never resurrect a recipient whose wallet the core no longer
+        // lists, because the live listing has already decided that.
+        CustomerName profile = nameResolver.resolve(customer.getCoreExternalId());
         count("found");
         return new RecipientView(
                 wallet.account().externalId(),
-                maskName(profile.firstName(), profile.lastName()),
+                profile == null ? maskName(null, null) : maskName(profile.firstName(), profile.lastName()),
                 msisdn);
     }
 

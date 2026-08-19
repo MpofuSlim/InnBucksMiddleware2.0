@@ -168,6 +168,33 @@ Build: `./mvnw verify` at the root. Run locally:
   `sha-<commit>`; building on the box yields an unscanned, unattested image
   and is a debugging tool, not a deploy.
 
+## Caching policy — names only, never money
+
+`CustomerNameResolver` (middleware-core) is the ONE cache in front of the core,
+and it caches ONE thing: a customer's first/last name, keyed by
+`core_external_id`, `expireAfterWrite` (`innbucks.core.profile-cache.*`,
+default 5m). Three paths needed a name and each paid a full `getProfile`:
+`GET /me/profile` (polled), `/accounts/lookup`, and the credit leg of every
+transfer alert.
+
+**Do NOT turn this into a caching decorator around `CoreBankingPort`.** The
+safety argument is entirely about scope: nothing in this service DECIDES on a
+name. Ownership comes from the core's live account list, money from the live
+balance read, account status from the local row — a cached balance or a cached
+account list would be a correctness bug no TTL makes safe. In
+`RecipientLookupService` the ordering is load-bearing: the live ownership check
+runs BEFORE the cached name, so a cached name can never resurrect a recipient
+the core no longer lists.
+
+Other invariants: **successes only** (a thrown exception or a null profile is
+never cached, so a core blip cannot pin a miss for a whole TTL); the TTL is a
+**staleness budget** — the worst-case delay before a teller's correction in the
+core reaches the app; and because this middleware has no name-write path, TTL is
+the complete invalidation story. **If a name-write path is ever added here it
+MUST call `invalidate(coreExternalId)`.** Watch
+`innbucks.core.profile_cache{outcome=hit|miss}`. Pinned by
+`CustomerNameResolverTest`.
+
 ## Country-aware architecture (mandatory)
 
 * `INNBUCKS_COUNTRY` env var pins each deployment (startup fails without it).
