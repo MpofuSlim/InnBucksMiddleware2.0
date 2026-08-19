@@ -3,6 +3,7 @@ package zw.co.innbucks.middleware.fineract.web;
 import com.github.tomakehurst.wiremock.WireMockServer;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.ResponseEntity;
@@ -22,6 +23,8 @@ import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
 import static com.github.tomakehurst.wiremock.client.WireMock.get;
 import static com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.okJson;
+import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
+import static com.github.tomakehurst.wiremock.client.WireMock.urlMatching;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo;
 import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.options;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -45,6 +48,7 @@ class FineractCoreEventControllerTest {
 
     private final CapturingListener listener = new CapturingListener();
     private FineractCoreEventController controller;
+    private SimpleMeterRegistry meterRegistry;
 
     static class CapturingListener implements CoreMovementListener {
         final List<CoreMovementObserved> received = new CopyOnWriteArrayList<>();
@@ -70,9 +74,15 @@ class FineractCoreEventControllerTest {
     @BeforeEach
     void setUp() {
         wireMock.resetAll();
+        meterRegistry = new SimpleMeterRegistry();
+        // SAME-THREAD executor. Production hands the re-reads to a pool; these
+        // cases are about WHAT it does with them, so running inline keeps every
+        // WireMock assertion below deterministic instead of racing a pool. The
+        // hand-off itself has its own tests.
         controller = new FineractCoreEventController(
                 FineractContractTestSupport.client(properties), properties, listener,
-                java.time.Clock.fixed(java.time.Instant.parse("2026-07-31T12:20:00Z"), java.time.ZoneOffset.UTC));
+                java.time.Clock.fixed(java.time.Instant.parse("2026-07-31T12:20:00Z"), java.time.ZoneOffset.UTC),
+                Runnable::run, meterRegistry);
         stubAccount();
         stubTransaction("""
                 {"id":42,"externalId":"","entryType":"CREDIT",
@@ -98,6 +108,103 @@ class FineractCoreEventControllerTest {
         return controller.onEvent(token, entity, action,
                 new FineractCoreEventController.HookEnvelope(
                         new FineractCoreEventController.HookResponse(10L, 42L), null));
+    }
+
+    private FineractCoreEventController controllerWith(java.util.concurrent.Executor executor) {
+        return new FineractCoreEventController(
+                FineractContractTestSupport.client(properties), properties, listener,
+                java.time.Clock.fixed(java.time.Instant.parse("2026-07-31T12:20:00Z"), java.time.ZoneOffset.UTC),
+                executor, meterRegistry);
+    }
+
+    /**
+     * THE POINT OF THE HAND-OFF: the hook is answered before a single Fineract
+     * read happens. Inline, this endpoint held a Tomcat thread across two
+     * re-reads, an ownership listing, a name resolution and an SMS round trip
+     * — and a teller posting a batch held several at once, against the same
+     * core that customer traffic was queued on.
+     */
+    @Test
+    void theHookIsAnsweredWithoutWaitingForAnyCoreRead() {
+        java.util.List<Runnable> queued = new java.util.ArrayList<>();
+        FineractCoreEventController deferred = controllerWith(queued::add);
+
+        ResponseEntity<Void> response = deferred.onEvent(TOKEN, "SAVINGSACCOUNT", "DEPOSIT",
+                new FineractCoreEventController.HookEnvelope(
+                        new FineractCoreEventController.HookResponse(10L, 42L), null));
+
+        assertThat(response.getStatusCode().value()).isEqualTo(200);
+        assertThat(queued).hasSize(1);
+        // Answered with the work still queued: nothing has touched Fineract.
+        wireMock.verify(0, getRequestedFor(urlMatching("/v1/savingsaccounts/.*")));
+        assertThat(listener.received).isEmpty();
+        assertThat(counted("accepted")).isEqualTo(1.0);
+
+        // Draining the queue then does the real work.
+        queued.forEach(Runnable::run);
+        assertThat(listener.received).hasSize(1);
+    }
+
+    /**
+     * A saturated pool drops the event — the executor's rejection policy counts
+     * and shouts rather than throwing — and the hook still gets its 200. It
+     * must never look to Fineract like the POSTING failed.
+     */
+    @Test
+    void aDroppedEventStillAnswersTheHook() {
+        FineractCoreEventController saturated = controllerWith(task -> { /* dropped */ });
+
+        ResponseEntity<Void> response = saturated.onEvent(TOKEN, "SAVINGSACCOUNT", "DEPOSIT",
+                new FineractCoreEventController.HookEnvelope(
+                        new FineractCoreEventController.HookResponse(10L, 42L), null));
+
+        assertThat(response.getStatusCode().value()).isEqualTo(200);
+        assertThat(listener.received).isEmpty();
+    }
+
+    /**
+     * Nothing escapes the pool thread. By the time the work runs the hook has
+     * already been answered, so an exception has nobody to reach — it would
+     * only surface as an uncaught-handler stack trace.
+     */
+    @Test
+    void aFailureInsideThePoolNeverEscapesIt() {
+        wireMock.stubFor(get(urlEqualTo("/v1/savingsaccounts/10"))
+                .willReturn(aResponse().withStatus(500).withBody("boom")));
+        java.util.List<Runnable> queued = new java.util.ArrayList<>();
+        FineractCoreEventController deferred = controllerWith(queued::add);
+
+        deferred.onEvent(TOKEN, "SAVINGSACCOUNT", "DEPOSIT",
+                new FineractCoreEventController.HookEnvelope(
+                        new FineractCoreEventController.HookResponse(10L, 42L), null));
+
+        assertThatCode(() -> queued.forEach(Runnable::run)).doesNotThrowAnyException();
+        assertThat(counted("failed")).isEqualTo(1.0);
+        assertThat(listener.received).isEmpty();
+    }
+
+    /** An event we would discard never reaches the pool at all. */
+    @Test
+    void anIrrelevantEventIsNotEvenQueued() {
+        java.util.List<Runnable> queued = new java.util.ArrayList<>();
+        FineractCoreEventController deferred = controllerWith(queued::add);
+
+        assertThat(deferred.onEvent(TOKEN, "CLIENT", "ACTIVATE",
+                new FineractCoreEventController.HookEnvelope(
+                        new FineractCoreEventController.HookResponse(10L, 42L), null))
+                .getStatusCode().value()).isEqualTo(200);
+        assertThat(deferred.onEvent(TOKEN, "SAVINGSACCOUNT", "APPROVE",
+                new FineractCoreEventController.HookEnvelope(
+                        new FineractCoreEventController.HookResponse(10L, 42L), null))
+                .getStatusCode().value()).isEqualTo(200);
+
+        assertThat(queued).isEmpty();
+        assertThat(counted("ignored")).isEqualTo(2.0);
+        assertThat(counted("accepted")).isZero();
+    }
+
+    private double counted(String outcome) {
+        return meterRegistry.counter("innbucks.core.events", "outcome", outcome).count();
     }
 
     @Test
@@ -162,7 +269,7 @@ class FineractCoreEventControllerTest {
                 wireMock.port(), " ");
         FineractCoreEventController off = new FineractCoreEventController(
                 FineractContractTestSupport.client(disabled), disabled, listener,
-                java.time.Clock.systemUTC());
+                java.time.Clock.systemUTC(), Runnable::run, new SimpleMeterRegistry());
 
         ResponseEntity<Void> response = off.onEvent(TOKEN, "SAVINGSACCOUNT", "DEPOSIT",
                 new FineractCoreEventController.HookEnvelope(
