@@ -195,6 +195,14 @@ MUST call `invalidate(coreExternalId)`.** Watch
 `innbucks.core.profile_cache{outcome=hit|miss}`. Pinned by
 `CustomerNameResolverTest`.
 
+`TransactionNotifier.CoreReads` is NOT a second cache and is not covered by the
+rule above: it is a memo scoped to ONE `deliver()` call — sub-second, discarded
+after, never shared between deliveries or threads, no TTL. Both legs of a
+transfer describe the same instant, so fetching an account once is strictly
+more consistent than fetching it twice milliseconds apart. It memoizes
+**successes only**, so a failed read never denies the other leg its own
+best-effort attempt.
+
 ## Country-aware architecture (mandatory)
 
 * `INNBUCKS_COUNTRY` env var pins each deployment (startup fails without it).

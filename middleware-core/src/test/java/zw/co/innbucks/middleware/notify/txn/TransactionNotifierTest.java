@@ -53,6 +53,12 @@ class TransactionNotifierTest {
     private static final UUID RECIPIENT = UUID.fromString("9a8b7c6d-5e4f-4a3b-2c1d-0e9f8a7b6c5d");
     private static final String SENDER_ACCT = SENDER + ":wallet";
     private static final String RECIPIENT_ACCT = RECIPIENT + ":wallet";
+    // Fineract returns accountNo on BOTH the per-account savings read and the
+    // client accounts listing, and they are the same number. The fixture sets
+    // it on both so the message tails pin the real path rather than the
+    // externalId fallback the old mock accidentally exercised.
+    private static final String SENDER_ACCT_NO = "000000020";
+    private static final String RECIPIENT_ACCT_NO = "000000010";
 
     private final CustomerRepository customers = mock(CustomerRepository.class);
     private final CoreBankingPort port = mock(CoreBankingPort.class);
@@ -66,8 +72,15 @@ class TransactionNotifierTest {
     void setUp() {
         ObjectProvider<CoreBankingPort> provider = mock(ObjectProvider.class);
         when(provider.getIfAvailable()).thenReturn(port);
-        when(port.getBalance(any())).thenAnswer(inv ->
-                new AccountBalance(inv.getArgument(0), new MinorUnits(5000, "USD"), new MinorUnits(5000, "USD")));
+        when(port.getBalance(any())).thenAnswer(inv -> {
+            AccountRef ref = inv.getArgument(0);
+            if (ref == null) {
+                return null;   // Mockito replays the answer with a null arg while re-stubbing
+            }
+            return new AccountBalance(ref, new MinorUnits(5000, "USD"), new MinorUnits(5000, "USD"),
+                    SENDER_ACCT.equals(ref.externalId()) ? SENDER_ACCT_NO
+                            : RECIPIENT_ACCT.equals(ref.externalId()) ? RECIPIENT_ACCT_NO : null);
+        });
         // Production resolves the sender's name from the core, so the default
         // here is the resolvable case; the fallback has its own test below.
         when(port.getProfile(any())).thenReturn(new CustomerProfile(
@@ -76,7 +89,7 @@ class TransactionNotifierTest {
         when(customers.findById(RECIPIENT)).thenReturn(Optional.of(customer(RECIPIENT, "+263771234567")));
         when(port.listDepositAccountRefs(new CoreCustomerRef(RECIPIENT.toString())))
                 .thenReturn(List.of(new DepositAccountRef(
-                        new AccountRef(RECIPIENT_ACCT), "Wallet", "USD", "000000010")));
+                        new AccountRef(RECIPIENT_ACCT), "Wallet", "USD", RECIPIENT_ACCT_NO)));
         notifier = build(properties(true, false));
     }
 
@@ -143,10 +156,10 @@ class TransactionNotifierTest {
 
         assertThat(to.getAllValues()).containsExactly("+263782606983", "+263771234567");
         assertThat(body.getAllValues().get(0))
-                .contains("You sent USD 5.00 from your account ending 6e7f to account ending 6c5d");
+                .contains("You sent USD 5.00 from your account ending 0020 to account ending 0010");
         // The recipient is told WHO paid them, not which account number did.
         assertThat(body.getAllValues().get(1))
-                .contains("Your account ending 6c5d has been credited with USD 5.00 from T.Mpofu");
+                .contains("Your account ending 0010 has been credited with USD 5.00 from T.Mpofu");
     }
 
     @Test
@@ -160,7 +173,7 @@ class TransactionNotifierTest {
         ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
         verify(sms, times(2)).send(anyString(), body.capture());
         assertThat(body.getAllValues().get(1))
-                .contains("credited with USD 5.00 from account ending 6e7f");
+                .contains("credited with USD 5.00 from account ending 0020");
     }
 
     @Test
@@ -172,8 +185,104 @@ class TransactionNotifierTest {
 
         ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
         verify(sms, times(2)).send(anyString(), body.capture());
-        assertThat(body.getAllValues().get(0)).contains("to account ending 6c5d");
+        assertThat(body.getAllValues().get(0)).contains("to account ending 0010");
         assertThat(body.getAllValues().get(0)).doesNotContain("T.Mpofu");
+    }
+
+    /**
+     * The sender's tail comes from the ownership LISTING, which already carried
+     * the destination's account number, so it survives a destination balance
+     * read that fails. Without that, the sender's message would silently
+     * degrade to the internal externalId tail whenever the core hiccuped on an
+     * account whose number we were already holding.
+     */
+    @Test
+    void theSendersTailSurvivesAnUnreadableDestinationBalance() {
+        when(port.getBalance(new AccountRef(RECIPIENT_ACCT)))
+                .thenThrow(new CoreTransientException(CoreProvider.FINERACT, "core down", null));
+
+        notifier.deliver(event(LedgerTransactionType.TRANSFER, LedgerStatus.COMPLETED,
+                SENDER_ACCT, RECIPIENT_ACCT));
+
+        ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
+        verify(sms, times(2)).send(anyString(), body.capture());
+        // Real account number, not the "6c5d" externalId fallback.
+        assertThat(body.getAllValues().get(0)).contains("to account ending 0010");
+        // The recipient's own leg loses only its balance line.
+        assertThat(body.getAllValues().get(1)).doesNotContain("Available balance");
+        verify(port, times(1)).listDepositAccountRefs(new CoreCustomerRef(RECIPIENT.toString()));
+    }
+
+    /**
+     * When the counterparty resolves to a NAME the composer discards the
+     * account number entirely, so fetching it was paying for a value about to
+     * be thrown away.
+     */
+    @Test
+    void aNamedCounterpartyCostsNoAccountNumberLookup() {
+        // Recipient's own account is external to this fixture's listing, so the
+        // ONLY reason to read the sender's account on the credit leg would be
+        // the counterparty number — which the name makes unnecessary.
+        notifier.deliver(event(LedgerTransactionType.TRANSFER, LedgerStatus.COMPLETED,
+                SENDER_ACCT, RECIPIENT_ACCT));
+
+        ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
+        verify(sms, times(2)).send(anyString(), body.capture());
+        assertThat(body.getAllValues().get(1)).contains("from T.Mpofu").doesNotContain("account ending 0020");
+    }
+
+    /**
+     * A failed read is NOT memoized: the second leg still gets its own
+     * best-effort attempt rather than inheriting the first leg's bad luck.
+     */
+    @Test
+    void aFailedBalanceReadIsNotRememberedAsAnAnswer() {
+        when(port.getBalance(new AccountRef(SENDER_ACCT)))
+                .thenThrow(new CoreTransientException(CoreProvider.FINERACT, "core down", null))
+                .thenReturn(new AccountBalance(new AccountRef(SENDER_ACCT),
+                        new MinorUnits(5000, "USD"), new MinorUnits(5000, "USD"), SENDER_ACCT_NO));
+
+        // Sender's own balance fails -> their message loses its balance line,
+        // but the alert still sends and the recipient's is unaffected.
+        notifier.deliver(event(LedgerTransactionType.TRANSFER, LedgerStatus.COMPLETED,
+                SENDER_ACCT, RECIPIENT_ACCT));
+
+        ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
+        verify(sms, times(2)).send(anyString(), body.capture());
+        assertThat(body.getAllValues().get(0)).doesNotContain("Available balance");
+        assertThat(body.getAllValues().get(1)).contains("Available balance USD 50.00");
+        // And exactly ONE attempt: the failed read left nothing memoized, so
+        // the only thing stopping the recipient's leg re-reading the sender's
+        // account for a number it will discard is resolving the NAME first.
+        verify(port, times(1)).getBalance(new AccountRef(SENDER_ACCT));
+    }
+
+    /**
+     * The backstop, isolated: no name to render (core can't answer) and a core
+     * whose account listing carries no account number — the shape a future
+     * adapter may well have, since {@code DepositAccountRef.accountNumber} is
+     * nullable by design. The recipient's leg then genuinely needs the sender's
+     * account number, and the per-delivery memo is the only thing that has it
+     * without a second read of an account the sender's leg already fetched.
+     */
+    @Test
+    void theMemoAnswersACounterpartyNumberNothingElseCanSupply() {
+        when(port.getProfile(any()))
+                .thenThrow(new CoreTransientException(CoreProvider.FINERACT, "no names here", null));
+        when(port.listDepositAccountRefs(new CoreCustomerRef(RECIPIENT.toString())))
+                .thenReturn(List.of(new DepositAccountRef(
+                        new AccountRef(RECIPIENT_ACCT), "Wallet", "USD", null)));
+
+        notifier.deliver(event(LedgerTransactionType.TRANSFER, LedgerStatus.COMPLETED,
+                SENDER_ACCT, RECIPIENT_ACCT));
+
+        ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
+        verify(sms, times(2)).send(anyString(), body.capture());
+        // The recipient is told the sender's real account number...
+        assertThat(body.getAllValues().get(1)).contains("from account ending 0020");
+        // ...without either account being read twice.
+        verify(port, times(1)).getBalance(new AccountRef(SENDER_ACCT));
+        verify(port, times(1)).getBalance(new AccountRef(RECIPIENT_ACCT));
     }
 
     @Test
@@ -190,10 +299,13 @@ class TransactionNotifierTest {
         notifier.deliver(event(LedgerTransactionType.TRANSFER, LedgerStatus.COMPLETED,
                 SENDER_ACCT, RECIPIENT_ACCT));
 
-        // At least once each: the leg's own balance read plus the display-only
-        // counterparty account-number read hit the same call.
-        verify(port, org.mockito.Mockito.atLeastOnce()).getBalance(new AccountRef(SENDER_ACCT));
-        verify(port, org.mockito.Mockito.atLeastOnce()).getBalance(new AccountRef(RECIPIENT_ACCT));
+        // EXACTLY once each. Both legs need both accounts — each renders its
+        // own balance and used to fetch the counterparty's just to dig the
+        // account number out of it — so this read four times before the
+        // per-delivery memo. A transfer describes ONE instant; reading an
+        // account twice for it could only ever disagree with itself.
+        verify(port, times(1)).getBalance(new AccountRef(SENDER_ACCT));
+        verify(port, times(1)).getBalance(new AccountRef(RECIPIENT_ACCT));
     }
 
     @Test
