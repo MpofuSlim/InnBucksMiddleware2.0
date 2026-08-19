@@ -13,10 +13,11 @@ import zw.co.innbucks.middleware.corebanking.CoreBankingPort;
 import zw.co.innbucks.middleware.corebanking.value.AccountRef;
 import zw.co.innbucks.middleware.corebanking.value.AccountBalance;
 import zw.co.innbucks.middleware.corebanking.value.CoreCustomerRef;
-import zw.co.innbucks.middleware.corebanking.value.CustomerProfile;
 import zw.co.innbucks.middleware.corebanking.value.TransactionDirection;
 import zw.co.innbucks.middleware.ledger.LedgerTransactionType;
 import zw.co.innbucks.middleware.customer.Customer;
+import zw.co.innbucks.middleware.customer.CustomerName;
+import zw.co.innbucks.middleware.customer.CustomerNameResolver;
 import zw.co.innbucks.middleware.customer.CustomerRepository;
 import zw.co.innbucks.middleware.otp.SmsSender;
 
@@ -65,6 +66,7 @@ public class TransactionNotifier {
     private final TransactionMessageComposer composer;
     private final CustomerRepository customerRepository;
     private final ObjectProvider<CoreBankingPort> corePort;
+    private final CustomerNameResolver nameResolver;
     private final SmsSender smsSender;
     private final MeterRegistry meterRegistry;
 
@@ -72,12 +74,14 @@ public class TransactionNotifier {
                                TransactionMessageComposer composer,
                                CustomerRepository customerRepository,
                                ObjectProvider<CoreBankingPort> corePort,
+                               CustomerNameResolver nameResolver,
                                SmsSender smsSender,
                                MeterRegistry meterRegistry) {
         this.properties = properties;
         this.composer = composer;
         this.customerRepository = customerRepository;
         this.corePort = corePort;
+        this.nameResolver = nameResolver;
         this.smsSender = smsSender;
         this.meterRegistry = meterRegistry;
     }
@@ -248,11 +252,12 @@ public class TransactionNotifier {
             if (sender == null || sender.getCoreExternalId() == null) {
                 return null;
             }
-            CoreBankingPort port = corePort.getIfAvailable();
-            if (port == null) {
-                return null;
-            }
-            CustomerProfile profile = port.getProfile(new CoreCustomerRef(sender.getCoreExternalId()));
+            // Cached (short TTL) — the sender's name is the same string on
+            // every transfer they make, and re-reading it per alert was one
+            // core call per money movement. An absent adapter now surfaces as
+            // an IllegalStateException, which the catch below already handles
+            // exactly as the old null check did.
+            CustomerName profile = nameResolver.resolve(sender.getCoreExternalId());
             return profile == null ? null
                     : TransactionMessageComposer.partyName(profile.firstName(), profile.lastName());
         } catch (RuntimeException ex) {
