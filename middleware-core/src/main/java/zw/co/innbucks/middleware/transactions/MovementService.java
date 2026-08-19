@@ -91,6 +91,14 @@ public class MovementService {
     public IdempotencyService.Result<TransactionResponse> withdraw(UUID customerId, String rawKey,
                                                                    WithdrawRequest request, String stepUpToken) {
         Customer customer = requireMappedCustomer(customerId);
+        // Purely local, so it runs BEFORE the core round trip that ownership
+        // costs: the app's flow sends every high-value movement once WITHOUT a
+        // token to collect the fingerprint, and that attempt was always going
+        // to be refused. Presence only — the token is verified and consumed by
+        // enforce() below, after ownership.
+        stepUpService.requireApprovalToken(customerId, customer.kycTierEnum(),
+                LedgerTransactionType.WITHDRAWAL, request.accountId(), null,
+                request.amountMinor(), request.currency(), stepUpToken);
         requireOwnership(customer, request.accountId());
         stepUpService.enforce(customerId, customer.kycTierEnum(), LedgerTransactionType.WITHDRAWAL,
                 request.accountId(), null, request.amountMinor(), request.currency(), stepUpToken);
@@ -111,6 +119,10 @@ public class MovementService {
     public IdempotencyService.Result<TransactionResponse> transfer(UUID customerId, String rawKey,
                                                                    TransferRequest request, String stepUpToken) {
         Customer customer = requireMappedCustomer(customerId);
+        // Local pre-check ahead of the core call — see withdraw().
+        stepUpService.requireApprovalToken(customerId, customer.kycTierEnum(),
+                LedgerTransactionType.TRANSFER, request.fromAccountId(), request.toAccountId(),
+                request.amountMinor(), request.currency(), stepUpToken);
         // Only the SOURCE must be the caller's — the destination may be any
         // account in the cell (that's what a transfer is).
         requireOwnership(customer, request.fromAccountId());

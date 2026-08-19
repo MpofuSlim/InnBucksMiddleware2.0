@@ -77,9 +77,52 @@ public class StepUpService {
     }
 
     /**
+     * The half of the check that needs NOTHING from the core: whether this
+     * movement needs an approval at all, and whether one was supplied.
+     *
+     * <p>Callers run this FIRST, ahead of the ownership check, because the
+     * answer is computed entirely from configuration, the caller's KYC tier and
+     * the request body. The app's designed flow hits it on the first attempt of
+     * every high-value movement — send without a token, get the fingerprint
+     * back, do the OTP, retry with the token — so leaving it until after
+     * ownership meant a core round trip on a request that was always going to
+     * be refused.
+     *
+     * <p><b>Presence only.</b> A token that is present but forged, expired,
+     * replayed or bound to a different transaction is NOT rejected here — that
+     * is {@link #enforce}'s job, and it still runs after the ownership check,
+     * so nothing is ever consumed for an account the caller does not own.
+     *
+     * <p>Writes nothing: no audit row, no consumed-token row. A refusal here
+     * leaves exactly as little state as a refusal in {@code enforce}.
+     *
+     * @throws StepUpRequiredException no token supplied (403 step_up_required + the fp)
+     */
+    public void requireApprovalToken(UUID customerId, KycTier tier, LedgerTransactionType type,
+                                     String sourceAccountId, String targetAccountId,
+                                     long amountMinor, String currency, String stepUpToken) {
+        if (!stepUpApplies(tier, amountMinor)) {
+            return;
+        }
+        if (stepUpToken != null && !stepUpToken.isBlank()) {
+            return;
+        }
+        required.increment();
+        log.info("Step-up required customer={} type={} amountMinor={} tier={}",
+                customerId, type, amountMinor, tier);
+        throw new StepUpRequiredException(fingerprint(customerId, type, sourceAccountId,
+                targetAccountId, amountMinor, currency));
+    }
+
+    /**
      * Refuses the movement unless it is below the tier threshold or carries a
      * valid, unconsumed approval for exactly this fingerprint. On success the
      * token is consumed (single-use) before any money-touching state exists.
+     *
+     * <p>This remains the AUTHORITATIVE check and is correct on its own: it
+     * repeats {@link #requireApprovalToken} rather than trusting that a caller
+     * ran it. Callers that did run it simply find the absent-token branch
+     * already taken.
      *
      * @throws StepUpRequiredException           no token supplied (403 step_up_required + the fp)
      * @throws VerificationTokenInvalidException bad/expired/mismatched/replayed token (401)
@@ -87,21 +130,13 @@ public class StepUpService {
     public void enforce(UUID customerId, KycTier tier, LedgerTransactionType type,
                         String sourceAccountId, String targetAccountId,
                         long amountMinor, String currency, String stepUpToken) {
-        if (!properties.enabled()) {
+        if (!stepUpApplies(tier, amountMinor)) {
             return;
         }
-        long threshold = properties.thresholdFor(tier);
-        if (amountMinor < threshold) {
-            return;
-        }
+        requireApprovalToken(customerId, tier, type, sourceAccountId, targetAccountId,
+                amountMinor, currency, stepUpToken);
         String expectedFp = fingerprint(customerId, type, sourceAccountId, targetAccountId,
                 amountMinor, currency);
-        if (stepUpToken == null || stepUpToken.isBlank()) {
-            required.increment();
-            log.info("Step-up required customer={} type={} amountMinor={} tier={}",
-                    customerId, type, amountMinor, tier);
-            throw new StepUpRequiredException(expectedFp);
-        }
         try {
             VerifiedToken token = verifier.verify(stepUpToken, OtpPurpose.STEP_UP);
             if (token.txnFp() == null || !constantTimeEquals(token.txnFp(), expectedFp)) {
@@ -120,6 +155,16 @@ public class StepUpService {
         }
         accepted.increment();
         auditService.record(AuditAction.STEP_UP_APPROVED, AuditOutcome.SUCCESS, customerId, null);
+    }
+
+    /**
+     * Whether this movement is in scope for step-up at all. The ONE place the
+     * master switch and the tier threshold are read, so the pre-check and the
+     * authoritative check can never disagree about which movements need an
+     * approval.
+     */
+    private boolean stepUpApplies(KycTier tier, long amountMinor) {
+        return properties.enabled() && amountMinor >= properties.thresholdFor(tier);
     }
 
     private static boolean constantTimeEquals(String a, String b) {

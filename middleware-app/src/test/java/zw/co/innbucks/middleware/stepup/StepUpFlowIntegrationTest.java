@@ -79,6 +79,7 @@ class StepUpFlowIntegrationTest {
 
     final ObjectMapper objectMapper = new ObjectMapper();
     final AtomicInteger coreTransfers = new AtomicInteger();
+    final AtomicInteger coreAccountListings = new AtomicInteger();
 
     MockMvc mockMvc;
     UUID customerId;
@@ -102,8 +103,12 @@ class StepUpFlowIntegrationTest {
                 customerId.toString(), Country.KE, "basic", CustomerScopes.DEFAULT, null, null));
 
         coreTransfers.set(0);
-        stubPort.onListAccounts = ref -> List.of(new DepositAccountSummary(
-                new AccountRef(wallet), "InnBucks Wallet", "KES", new MinorUnits(500000L, "KES")));
+        coreAccountListings.set(0);
+        stubPort.onListAccounts = ref -> {
+            coreAccountListings.incrementAndGet();
+            return List.of(new DepositAccountSummary(
+                    new AccountRef(wallet), "InnBucks Wallet", "KES", new MinorUnits(500000L, "KES")));
+        };
         stubPort.onTransfer = (cmd, key) -> {
             coreTransfers.incrementAndGet();
             return new TransactionResult(new TxRef("CORE-701"), TransactionState.COMPLETED);
@@ -168,6 +173,79 @@ class StepUpFlowIntegrationTest {
         assertThat(objectMapper.readTree(approved.getResponse().getContentAsString())
                 .get("status").asText()).isEqualTo("SUCCESS");
         assertThat(coreTransfers.get()).isEqualTo(1);
+    }
+
+    /**
+     * The refused first attempt costs the core NOTHING — not even the account
+     * listing the ownership check would otherwise fetch. Whether this movement
+     * needs an approval is decided from config, the caller's KYC tier and the
+     * request body alone, and the app's designed flow sends every high-value
+     * movement once without a token to collect the fingerprint. Doing the
+     * ownership round trip first meant paying for it on a request that was
+     * always going to be refused.
+     */
+    @Test
+    void theRefusedFirstAttemptCostsNoCoreCallAtAll() throws Exception {
+        MvcResult refused = transfer(BASIC_THRESHOLD + 10000, "key-precheck", null);
+
+        assertThat(refused.getResponse().getStatus()).isEqualTo(403);
+        assertThat(objectMapper.readTree(refused.getResponse().getContentAsString())
+                .get("errorCode").asText()).isEqualTo("step_up_required");
+        assertThat(coreAccountListings.get())
+                .as("ownership listing must not be fetched for a movement refused on local data")
+                .isZero();
+        assertThat(coreTransfers.get()).isZero();
+
+        // ...and the ownership check still runs on the approved retry, so the
+        // saving is a reorder, not a removal.
+        String txnFp = objectMapper.readTree(refused.getResponse().getContentAsString())
+                .get("txnFp").asText();
+        transfer(BASIC_THRESHOLD + 10000, "key-precheck", approve(txnFp));
+        assertThat(coreAccountListings.get()).isPositive();
+    }
+
+    /**
+     * Ownership is still enforced — the pre-check must not become a way past
+     * it. A high-value movement from an account the caller does not own is
+     * refused even with a valid approval for exactly that transaction.
+     */
+    @Test
+    void anApprovedMovementFromSomeoneElsesAccountIsStillRefused() throws Exception {
+        String foreign = UUID.randomUUID() + ":wallet";
+        String body = """
+                {"fromAccountId":"%s","toAccountId":"other:wallet","amountMinor":%d,
+                 "currency":"KES","narrative":"rent"}
+                """.formatted(foreign, BASIC_THRESHOLD + 10000);
+
+        MvcResult refused = mockMvc.perform(post("/transactions/transfer")
+                        .header(HttpHeaders.AUTHORIZATION, bearer)
+                        .header("Idempotency-Key", "key-foreign")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andReturn();
+        assertThat(refused.getResponse().getStatus()).isEqualTo(403);
+        String txnFp = objectMapper.readTree(refused.getResponse().getContentAsString())
+                .get("txnFp").asText();
+
+        MvcResult approved = mockMvc.perform(post("/transactions/transfer")
+                        .header(HttpHeaders.AUTHORIZATION, bearer)
+                        .header("Idempotency-Key", "key-foreign")
+                        .header("X-Step-Up-Token", approve(txnFp))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andReturn();
+
+        assertThat(approved.getResponse().getStatus()).isNotEqualTo(200);
+        assertThat(coreTransfers.get()).as("no money moves from an account that is not the caller's").isZero();
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM ledger_transaction", Integer.class)).isZero();
+        // And the approval is NOT burned: enforce() — which consumes the jti —
+        // still sits after the ownership check, so a mistyped accountId costs
+        // the customer nothing but the request.
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM consumed_verification_token", Integer.class))
+                .as("a movement refused on ownership must not consume the approval token")
+                .isZero();
     }
 
     @Test
