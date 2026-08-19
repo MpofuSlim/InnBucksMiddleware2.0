@@ -13,6 +13,7 @@ import zw.co.innbucks.middleware.corebanking.CoreBankingPort;
 import zw.co.innbucks.middleware.corebanking.value.AccountRef;
 import zw.co.innbucks.middleware.corebanking.value.AccountBalance;
 import zw.co.innbucks.middleware.corebanking.value.CoreCustomerRef;
+import zw.co.innbucks.middleware.corebanking.value.DepositAccountRef;
 import zw.co.innbucks.middleware.corebanking.value.TransactionDirection;
 import zw.co.innbucks.middleware.ledger.LedgerTransactionType;
 import zw.co.innbucks.middleware.customer.Customer;
@@ -108,8 +109,13 @@ public class TransactionNotifier {
         if (!event.completed() && !properties.notifyOnFailure()) {
             return;
         }
-        for (MovementLeg leg : legsOf(event)) {
-            notifyLeg(event, leg);
+        // ONE memo per delivery. A customer-to-customer transfer describes two
+        // sides of a single instant, and each side used to read BOTH accounts —
+        // so the source and the destination were each fetched twice for the
+        // same moment. See CoreReads.
+        CoreReads reads = new CoreReads();
+        for (MovementLeg leg : legsOf(event, reads)) {
+            notifyLeg(event, leg, reads);
         }
     }
 
@@ -122,7 +128,7 @@ public class TransactionNotifier {
      * nothing to tell the other party, and a "your transfer failed" SMS to
      * someone who was never expecting money is pure confusion.
      */
-    private List<MovementLeg> legsOf(SettledMovementEvent event) {
+    private List<MovementLeg> legsOf(SettledMovementEvent event, CoreReads reads) {
         List<MovementLeg> legs = new ArrayList<>(2);
         switch (event.type()) {
             case DEPOSIT -> legs.add(new MovementLeg(
@@ -133,7 +139,7 @@ public class TransactionNotifier {
                 legs.add(new MovementLeg(event.customerId(), event.sourceAccount(),
                         event.destinationAccount(), TransactionDirection.DEBIT));
                 if (event.completed()) {
-                    recipientOf(event).ifPresent(recipient -> legs.add(new MovementLeg(
+                    recipientOf(event, reads).ifPresent(recipient -> legs.add(new MovementLeg(
                             recipient, event.destinationAccount(),
                             event.sourceAccount(), TransactionDirection.CREDIT)));
                 }
@@ -157,7 +163,7 @@ public class TransactionNotifier {
      * {@code CLIENT_ASSIGNED_EXTERNAL_ID}) — such a core will need a persisted
      * account→customer map here, not a convention.
      */
-    private Optional<UUID> recipientOf(SettledMovementEvent event) {
+    private Optional<UUID> recipientOf(SettledMovementEvent event, CoreReads reads) {
         UUID candidate = customerUuidPrefix(event.destinationAccount());
         if (candidate == null || candidate.equals(event.customerId())) {
             // Same customer moving between their own accounts: the debit
@@ -172,15 +178,21 @@ public class TransactionNotifier {
         if (port == null) {
             return Optional.empty();
         }
-        boolean owns = port.listDepositAccountRefs(new CoreCustomerRef(customer.getCoreExternalId()))
-                .stream()
-                .anyMatch(a -> a.account().externalId().equals(event.destinationAccount()));
-        if (!owns) {
+        Optional<DepositAccountRef> owned =
+                port.listDepositAccountRefs(new CoreCustomerRef(customer.getCoreExternalId()))
+                        .stream()
+                        .filter(a -> a.account().externalId().equals(event.destinationAccount()))
+                        .findFirst();
+        if (owned.isEmpty()) {
             log.warn("Destination account {} looks like customer {}'s by naming convention but the core "
                             + "does not list it for them — no incoming-transfer alert sent",
                     AccountMasking.maskAccount(event.destinationAccount()), candidate);
             return Optional.empty();
         }
+        // The ownership listing already carried the destination's
+        // customer-facing account number, so the sender's leg can render its
+        // tail without the full savings read it used to pay for.
+        reads.rememberAccountNumber(event.destinationAccount(), owned.get().accountNumber());
         return Optional.of(candidate);
     }
 
@@ -197,7 +209,7 @@ public class TransactionNotifier {
         }
     }
 
-    private void notifyLeg(SettledMovementEvent event, MovementLeg leg) {
+    private void notifyLeg(SettledMovementEvent event, MovementLeg leg, CoreReads reads) {
         String direction = leg.direction().name().toLowerCase(java.util.Locale.ROOT);
         try {
             Customer customer = customerRepository.findById(leg.customerId()).orElse(null);
@@ -207,12 +219,21 @@ public class TransactionNotifier {
                         leg.customerId(), event.transactionId());
                 return;
             }
-            AccountBalance balance = event.completed() ? balanceOf(leg.accountId()) : null;
-            // The other side's customer-facing account number, for the message
-            // tail only — its balance is read but NEVER rendered here.
-            String counterpartyNumber = event.completed() && leg.counterparty() != null
-                    ? accountNumberOf(leg.counterparty()) : null;
+            AccountBalance balance = event.completed() ? reads.balance(leg.accountId()) : null;
+
+            // NAME FIRST, then the number — and only if the name is missing.
+            // The composer renders the counterparty as their NAME when it has
+            // one and discards the account number entirely, so resolving the
+            // name second meant paying for a value that was about to be thrown
+            // away on every successful incoming-transfer alert.
             String counterpartyName = senderNameFor(event, leg);
+            // The predicate MUST mirror TransactionMessageComposer.counterparty()
+            // exactly: it falls back to the account phrase on a BLANK name too,
+            // so skipping the fetch on merely non-null would render the
+            // externalId tail where the account number belongs.
+            boolean namedParty = counterpartyName != null && !counterpartyName.isBlank();
+            String counterpartyNumber = !namedParty && event.completed() && leg.counterparty() != null
+                    ? reads.accountNumber(leg.counterparty()) : null;
             String body = composer.compose(event, leg, balance, counterpartyNumber, counterpartyName);
             smsSender.send(customer.getMsisdn(), body);
             counter(event, direction, "sent").increment();
@@ -267,29 +288,88 @@ public class TransactionNotifier {
         }
     }
 
-    /** Best-effort: a balance we cannot read costs the message its balance line, nothing more. */
-    private AccountBalance balanceOf(String accountId) {
-        CoreBankingPort port = corePort.getIfAvailable();
-        if (port == null || accountId == null) {
-            return null;
-        }
-        try {
-            return port.getBalance(new AccountRef(accountId));
-        } catch (RuntimeException ex) {
-            log.warn("Balance read failed for account {} — sending the alert without a balance line: {}",
-                    AccountMasking.maskAccount(accountId), ex.toString());
-            return null;
-        }
-    }
-
     /**
-     * The counterparty's customer-facing account NUMBER, for display masking
-     * only. Null (falling back to the externalId tail) when the read fails —
-     * a display nicety must never cost the alert.
+     * The core reads for ONE delivery, each account fetched at most once.
+     *
+     * <p><b>Why this is not the caching this codebase forbids.</b> It is a memo
+     * scoped to a single {@code deliver()} call — sub-second, thrown away
+     * after, never shared between deliveries or threads. Both legs of a
+     * transfer describe the same instant, so reading the destination balance
+     * twice a few milliseconds apart could only ever produce two different
+     * answers for one moment; fetching once is strictly MORE consistent, not
+     * less. There is no TTL here and no staleness budget to reason about.
+     *
+     * <p>Before this, a customer-to-customer transfer read the source account
+     * twice and the destination account twice: each leg fetched its own balance
+     * (rendered) plus the counterparty's balance (thrown away except for the
+     * account number buried in it).
+     *
+     * <p><b>Successes only.</b> A failed read is not remembered, so the second
+     * leg still gets its own independent best-effort attempt rather than
+     * inheriting the first leg's bad luck.
+     *
+     * <p>Not thread-safe, and does not need to be: one instance per
+     * {@code deliver()}, used only on that thread.
      */
-    private String accountNumberOf(String accountId) {
-        AccountBalance balance = balanceOf(accountId);
-        return balance == null ? null : balance.accountNumber();
+    private final class CoreReads {
+
+        private final java.util.Map<String, AccountBalance> balances = new java.util.HashMap<>();
+        private final java.util.Map<String, String> accountNumbers = new java.util.HashMap<>();
+
+        /** Best-effort: a balance we cannot read costs the message its balance line, nothing more. */
+        AccountBalance balance(String accountId) {
+            if (accountId == null) {
+                return null;
+            }
+            AccountBalance memoized = balances.get(accountId);
+            if (memoized != null) {
+                return memoized;
+            }
+            CoreBankingPort port = corePort.getIfAvailable();
+            if (port == null) {
+                return null;
+            }
+            try {
+                AccountBalance fetched = port.getBalance(new AccountRef(accountId));
+                if (fetched != null) {
+                    balances.put(accountId, fetched);
+                    if (fetched.accountNumber() != null) {
+                        accountNumbers.put(accountId, fetched.accountNumber());
+                    }
+                }
+                return fetched;
+            } catch (RuntimeException ex) {
+                log.warn("Balance read failed for account {} — sending the alert without a balance line: {}",
+                        AccountMasking.maskAccount(accountId), ex.toString());
+                return null;
+            }
+        }
+
+        /**
+         * The counterparty's customer-facing account NUMBER, for display
+         * masking only. Answered from whatever we already know — an ownership
+         * listing that carried it, or a balance already read — and only then
+         * from a fresh read. Null (falling back to the externalId tail) when
+         * that read fails: a display nicety must never cost the alert.
+         */
+        String accountNumber(String accountId) {
+            if (accountId == null) {
+                return null;
+            }
+            String known = accountNumbers.get(accountId);
+            if (known != null) {
+                return known;
+            }
+            AccountBalance fetched = balance(accountId);
+            return fetched == null ? null : fetched.accountNumber();
+        }
+
+        /** Record a number learned from a call made for another reason. */
+        void rememberAccountNumber(String accountId, String accountNumber) {
+            if (accountId != null && accountNumber != null && !accountNumber.isBlank()) {
+                accountNumbers.put(accountId, accountNumber);
+            }
+        }
     }
 
     private Counter counter(SettledMovementEvent event, String leg, String outcome) {
