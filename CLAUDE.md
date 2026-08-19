@@ -655,6 +655,17 @@ commands, with the exact bytes that were running before. Full procedure
      Ownership is still POSITIVELY confirmed against the core's account list
      (naming convention = candidate only), reversed transactions are silent,
      and unprovable ownership means NO message, never a guess.
+   - **The hook is answered BEFORE the work runs.** The token check and the
+     cheap envelope filter are inline; the re-reads, ownership listing, name
+     resolution and SMS ride a separate bounded pool (`coreEventExecutor`,
+     `innbucks.core.events{outcome=accepted|ignored|dropped|failed}`). Inline,
+     one hook parked a Tomcat thread across that whole chain, and a teller
+     batch held several at once against the same core serving customers.
+     Deliberately a SEPARATE pool from the ledger seam's — different latency
+     shapes, and a teller batch must not starve app-initiated alerts. The pool
+     drains on graceful shutdown; an event lost to a hard kill is never
+     retried (Fineract's hook dispatch is fire-and-forget with no retry to
+     drive), which is the accepted cost of not holding a request thread.
    - `FINERACT_CORE_EVENTS_TOKEN` blank = webhook disabled (boot warns) — a
      cell upgrades with zero config change and simply keeps the old gap
      until the operator provisions the token + re-runs provision-cell.sh.
