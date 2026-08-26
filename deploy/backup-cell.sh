@@ -151,30 +151,6 @@ if [ -d "$REPO_DIR/deploy/fineract/ssl" ]; then
 fi
 chmod -R go-rwx "$DEST/config"
 
-# --- Verify -----------------------------------------------------------------
-# An unverified backup is a hope. These checks are cheap and catch the two
-# failure modes that actually happen: a dump that is empty/truncated because
-# the container was wedged, and a dump that succeeded but of the wrong cluster.
-say "Verifying"
-verify_dump() {
-    local file="$1" must_contain="$2"
-    gzip -t "$file" || die "$file is not a valid gzip — dump truncated"
-    local bytes
-    bytes=$(gzip -dc "$file" | wc -c)
-    [ "$bytes" -gt 10000 ] || die "$file decompresses to only ${bytes}B — almost certainly empty"
-    gzip -dc "$file" | grep -q "$must_contain" \
-        || die "$file does not mention '$must_contain' — wrong cluster or incomplete dump"
-    echo "  OK $(basename "$file")  ${bytes}B raw, contains '$must_contain'"
-}
-verify_dump "$DEST/fineract-cluster.sql.gz"   "m_savings_account"
-verify_dump "$DEST/middleware-cluster.sql.gz" "ledger_transaction"
-
-for t in "$DEST"/*.tar.gz; do
-    [ -e "$t" ] || continue
-    tar tzf "$t" >/dev/null || die "$t is not a readable tarball"
-    echo "  OK $(basename "$t")  $(du -h "$t" | cut -f1)"
-done
-
 # --- Row counts, as the thing you compare against afterwards ----------------
 say "Baseline row counts (compare after the test)"
 {
@@ -190,6 +166,42 @@ say "Baseline row counts (compare after the test)"
         UNION ALL SELECT 'ledger_transaction', count(*) FROM ledger_transaction
         UNION ALL SELECT 'audit_event', count(*) FROM audit_event;" 2>/dev/null
 } | tee "$DEST/row-counts-before.txt"
+
+# --- Verify -----------------------------------------------------------------
+# An unverified backup is a hope. These checks are cheap and catch the two
+# failure modes that actually happen: a dump that is empty/truncated because
+# the container was wedged, and a dump that succeeded but of the wrong cluster.
+say "Verifying"
+# NEVER use `gzip -dc "$file" | grep -q pattern` here, however natural it reads.
+# `grep -q` exits the instant it matches, gzip takes SIGPIPE mid-write and dies
+# with 141, and `set -o pipefail` then reports the PIPELINE as failed — on a
+# dump where the pattern was FOUND. It passes on small files (gzip finishes
+# before grep exits) and fails on real ones, which is exactly how it survived
+# testing and then failed on a 14MB production dump the first time it ran.
+#
+# awk reads the stream to EOF, so gzip is never killed, and one decompression
+# pass answers both questions instead of two.
+verify_dump() {
+    local file="$1" must_contain="$2"
+    gzip -t "$file" || die "$file is not a valid gzip — dump truncated"
+    local bytes found
+    read -r bytes found < <(gzip -dc "$file" | awk -v pat="$must_contain" '
+        { bytes += length($0) + 1 }
+        index($0, pat) { found = 1 }
+        END { print bytes+0, found+0 }')
+    [ "${bytes:-0}" -gt 10000 ] || die "$file decompresses to only ${bytes:-0}B — almost certainly empty"
+    [ "${found:-0}" = 1 ] || die "$file does not mention '$must_contain' — wrong cluster or incomplete dump"
+    echo "  OK $(basename "$file")  ${bytes}B raw, contains '$must_contain'"
+}
+verify_dump "$DEST/fineract-cluster.sql.gz"   "m_savings_account"
+verify_dump "$DEST/middleware-cluster.sql.gz" "ledger_transaction"
+
+for t in "$DEST"/*.tar.gz; do
+    [ -e "$t" ] || continue
+    tar tzf "$t" >/dev/null || die "$t is not a readable tarball"
+    echo "  OK $(basename "$t")  $(du -h "$t" | cut -f1)"
+done
+
 
 say "Done — $DEST"
 du -sh "$DEST"
