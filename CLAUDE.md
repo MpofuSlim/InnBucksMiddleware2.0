@@ -728,7 +728,34 @@ Next (in order):
    pin it in THIS repo under `docs/api/` and model the adapter against
    that (same trim-aggressively rule as the Fineract DTOs).
 
+## Cell backup / restore
+
+`deploy/backup-cell.sh` takes a point-in-time snapshot of a whole cell before
+anything destructive (load test, Fineract upgrade, schema migration);
+`deploy/restore-cell.sh` rolls it back. Both kinds of backup are taken on
+purpose because they fail differently: **SQL dumps** (`pg_dumpall` per cluster)
+survive a Postgres major-version change and can be read with your eyes;
+**volume tarballs** restore as a file copy rather than a statement replay, which
+is what you want in a hurry, but only into the SAME major version (the cell runs
+PG18.3 for Fineract and PG16 for the middleware — the restore script guards the
+mismatch explicitly).
+
+The app containers are STOPPED for the dump, deliberately: `pg_dumpall` runs a
+separate dump per database and Fineract has TWO (`fineract_tenants` +
+`fineract_default`), so a live dump can capture them a second apart and restore
+a mismatched pair.
+
+Backups are VERIFIED, not assumed — gzip integrity, non-trivial size, and each
+dump must actually mention a table it should. `row-counts-before.txt` is the
+baseline the restore diffs against to prove it came back clean.
+
+**A restore trips an audit chain-break ticket, and that is expected.** The chain
+seals each row against its predecessor, so rewinding to an earlier point is
+internally consistent but will not match what `AuditIntegrityVerifier` last saw.
+
 Deferred (documented, not forgotten): KMS/Secrets Manager custody + rotation
 runbook; per-customer namespacing of inbound Idempotency-Keys
 (HMAC(customerUuid ‖ key)) before propagation; velocity/amount limit tables;
-Postgres backup/DR runbook; ShedLock; PENDING_VERIFICATION expiry job.
+**offsite/automated** backup scheduling (the scripts are manual and write to the
+box — copying them off is still an operator step); ShedLock;
+PENDING_VERIFICATION expiry job.
