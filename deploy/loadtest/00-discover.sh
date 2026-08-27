@@ -28,6 +28,8 @@ FINERACT_DB_CTR="innbucks-fineract-db"
 FINERACT_CTR="innbucks-fineract"
 MW_DB_CTR="innbucks-middleware-postgres"
 REPORT="${1:-/tmp/fineract-loadtest-discovery.txt}"
+CA="$(cd "$(dirname "${BASH_SOURCE[0]}")/../fineract" && pwd)/ssl/cell-ca.crt"
+FINERACT_BASE="${FINERACT_BASE:-https://localhost:8443/fineract-provider}"
 
 hdr() { printf '\n\033[1m--- %s\033[0m\n' "$*"; }
 kv()  { printf '  %-34s %s\n' "$1" "$2"; }
@@ -76,21 +78,44 @@ fi
 kv "tenants-store pool (env)" "${FINERACT_HIKARI_MAXIMUM_POOL_SIZE:-unset -> default 10}"
 
 hdr "Metrics availability"
+# Two checks, because the container env alone cannot prove the endpoint works:
+# the export flag AND management.endpoints.web.exposure.include must both be
+# right, and only an actual request tests the pair. An earlier version of this
+# script checked the env var only, and reported the truth ("DISABLED") next to
+# a remediation hint that could not fix it.
 PROM_ENABLED=$(docker inspect "$FINERACT_CTR" 2>/dev/null | grep -c 'FINERACT_MANAGEMENT_PROMETHEUS_ENABLED=true')
-if [ "${PROM_ENABLED:-0}" -gt 0 ]; then
-    kv "Fineract prometheus export" "ENABLED"
+kv "prometheus export (env)" "$([ "${PROM_ENABLED:-0}" -gt 0 ] && echo true || echo 'false / not set')"
+PROM_CODE=$(curl -sS ${CA:+--cacert "$CA"} -o /dev/null -w '%{http_code}' --max-time 5 \
+    "$FINERACT_BASE/actuator/prometheus" 2>/dev/null || echo unreachable)
+kv "GET /actuator/prometheus" "$PROM_CODE"
+if [ "$PROM_CODE" = 200 ]; then
+    echo
+    echo "  Working. Turn it back OFF after the test: there is no separate"
+    echo "  management port, so this sits under /fineract-provider/** — the"
+    echo "  prefix that still answers from the public internet."
 else
-    kv "Fineract prometheus export" "DISABLED (default) <-- see below"
     cat <<'EOF'
 
   Fineract's Prometheus export defaults to false (application.properties:357).
-  Without it the test can still measure TPS from the client side, but cannot
-  tell you WHY it stopped there. To turn it on, add to deploy/fineract/.env:
+  Without it the test still measures TPS from the client side, but cannot tell
+  you WHY it stopped there.
 
-      FINERACT_MANAGEMENT_PROMETHEUS_ENABLED=true
+  Setting it takes BOTH of these, and adding the key to .env alone does
+  nothing — compose's .env feeds ${...} interpolation in the compose file, it
+  is not passed into containers, and the fineract service has no env_file:
+
+      1. deploy/fineract/docker-compose.yml must DECLARE the variable under
+         the fineract service's environment: (it does, as of the commit that
+         added this note) and expose the endpoint:
+             FINERACT_MANAGEMENT_ENDPOINT_WEB_EXPOSURE_INCLUDE: health,info,prometheus
+             FINERACT_MANAGEMENT_PROMETHEUS_ENABLED: "${FINERACT_MANAGEMENT_PROMETHEUS_ENABLED:-false}"
+      2. deploy/fineract/.env:
+             FINERACT_MANAGEMENT_PROMETHEUS_ENABLED=true
 
   then: docker compose up -d --force-recreate fineract
-  This is a restart, so do it BEFORE the baseline run, not between runs.
+  This is a restart, so do it BEFORE the baseline run, not between runs — and
+  re-run this script to confirm the probe above returns 200 rather than
+  assuming it worked.
 EOF
 fi
 kv "middleware actuator" "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 http://localhost:9090/actuator/prometheus 2>/dev/null || echo unreachable)"
@@ -122,7 +147,6 @@ echo "  post more slowly than fresh ones — which is real production behaviour,
 echo "  not a test artifact. Report the per-account transaction count with the TPS."
 
 hdr "TLS material"
-CA="$(cd "$(dirname "${BASH_SOURCE[0]}")/../fineract" && pwd)/ssl/cell-ca.crt"
 if [ -f "$CA" ]; then
     kv "cell CA" "$CA"
     echo "  The load generator will verify TLS against this (SSL_CERT_FILE), not skip it."

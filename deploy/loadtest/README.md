@@ -66,6 +66,7 @@ says so and the result is a floor, not a ceiling.
 
 Fineract's Prometheus export is **off by default**
 (`application.properties:357`). Without it you get a number and no diagnosis.
+
 Before the baseline run, add to `deploy/fineract/.env`:
 
 ```
@@ -74,6 +75,26 @@ FINERACT_MANAGEMENT_PROMETHEUS_ENABLED=true
 
 then `docker compose up -d --force-recreate fineract`. It's a restart — do it
 before the run, not between runs.
+
+**This only works because `deploy/fineract/docker-compose.yml` declares the
+variable under the fineract service's `environment:`.** Compose's `.env` file
+feeds `${...}` interpolation *in the compose file*; it is not passed into
+containers, and the fineract service has no `env_file:`. Adding a key to `.env`
+that the compose file never references is silent — the container starts
+cleanly, the setting is simply absent. The same commit added `prometheus` to
+`FINERACT_MANAGEMENT_ENDPOINT_WEB_EXPOSURE_INCLUDE`, which our compose had
+narrowed to `health,info`; with the endpoint unexposed the export flag alone
+would still have returned 404.
+
+**Confirm, don't assume** — re-run `00-discover.sh` and check that
+`GET /actuator/prometheus` reports `200`. The env var being set is not the
+same fact.
+
+**Turn it off after the test.** Fineract runs actuator on the application port
+under the application context path (`application.properties:381-382`), so the
+endpoint is `/fineract-provider/actuator/prometheus` — inside the prefix that
+still answers from the public internet. Left on, it publishes heap, GC, Hikari
+pool state and a per-URI request breakdown to anyone who asks.
 
 ## Reading the result
 
