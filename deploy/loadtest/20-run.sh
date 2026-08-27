@@ -86,6 +86,16 @@ elif [ "$MODE" = full ] && [ "$MAX_VUS" -gt "$POOL" ]; then
     log "         throughput stays flat. That plateau is the POOL, not Fineract."
 fi
 
+# Hikari's minimumIdle for the tenant pool comes from pool_initial_size
+# (DataSourcePerTenantServiceFactory:92 -> TenantMapper:34), NOT pool_min_idle,
+# which is never applied. It is read separately from the guard query above so a
+# failure here can never disarm that guard. Reported so the warmup caveat in
+# RESULT.md can state the actual growth span instead of hand-waving it.
+POOL_INIT=$(docker exec "$FINERACT_DB_CTR" psql -U fineract -d fineract_tenants -At -c "
+  SELECT ts.pool_initial_size FROM tenants t
+  JOIN tenant_server_connections ts ON ts.id = t.oltp_id
+  WHERE t.identifier = '${TENANT}';" 2>/dev/null | tr -d ' ')
+
 PAYMENT_TYPE_ID="${PAYMENT_TYPE_ID:-}"
 if [ -z "$PAYMENT_TYPE_ID" ]; then
     : "${ADMIN_PASSWORD:?export ADMIN_PASSWORD (or PAYMENT_TYPE_ID) so the deposit body can be built}"
@@ -166,14 +176,15 @@ cat <<EOF | tee "$OUTDIR/RESULT.md"
 # Fineract load test — $(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 mode=$MODE  accounts=$ACCOUNT_COUNT  target_rate=${TARGET_RATE}/s  max_vus=$MAX_VUS
-tenant pool_max_active=${POOL:-unknown}  host cores=$CORES
+tenant pool: max_active=${POOL:-unknown} initial_size=${POOL_INIT:-unknown}  host cores=$CORES
 savings transactions written: $((AFTER - BEFORE))  (before=$BEFORE after=$AFTER)
 
 ## The number
 Take it from the STEADY-STATE stage in k6.log, not the whole run: the first
-minute is warmup (JIT, pool fill, page cache) and including it understates
-throughput. The figure to quote is \`http_reqs\` rate during the final
-sustained stage, with everything on the line above stated alongside it.
+minute is warmup (JIT, page cache, and the connection pool growing from
+${POOL_INIT:-?} to ${POOL:-?} on demand as VUs arrive) and including it
+understates throughput. The figure to quote is \`http_reqs\` rate during the
+final sustained stage, with everything on the line above stated alongside it.
 
 ## What limited it — read in this order
 | Symptom | Verdict |
