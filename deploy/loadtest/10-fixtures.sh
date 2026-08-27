@@ -100,6 +100,12 @@ PAYMENT_TYPE_ID=$(api GET "/v1/paymenttypes" \
         '[.. | objects | select(.name? == $n)] | .[0].id // empty')
 [ -n "$PAYMENT_TYPE_ID" ] || fail "payment type not found — run provision-cell.sh first (Fineract requires paymentTypeId on every deposit)"
 log "product=$PRODUCT_ID paymentType=$PAYMENT_TYPE_ID runId=$RUN_ID"
+# RUN_ID is baked into every externalId, and it defaults to the current MINUTE.
+# So resuming needs the ORIGINAL id passed back in — without it a re-run mints a
+# fresh namespace, the resume check correctly finds nothing, and you end up with
+# the interrupted run's partial accounts PLUS a complete second set.
+log "TO RESUME THIS RUN after an interruption, re-run with:"
+log "    RUN_ID=$RUN_ID I_KNOW_THIS_IS_STAGING=yes $0 $COUNT"
 
 TODAY=$(date -u +%Y-%m-%d)
 
@@ -110,8 +116,16 @@ make_one() {
     local wallet="${ext}:wallet"
 
     # Resume: already there?
-    if api GET "/v1/savingsaccounts/external-id/${wallet//:/%3A}" "" \
-            innbucks-mw-write "$MW_WRITE_PASSWORD" >/dev/null 2>&1; then
+    #
+    # This GET runs as ADMIN, deliberately, and must NOT be switched to the
+    # write credential to "match production". innbucks-mw-write holds no
+    # READ_SAVINGSACCOUNT (provision-cell.sh WRITE_PERMS — reads ride
+    # innbucks-mw-read), so as the write user this call 403s on every account,
+    # including ones that exist. api() treats >=400 as failure, so the check
+    # answered "not there" every time and the resumability this script claims
+    # did not exist: a re-run after an interruption re-attempted every account
+    # and failed each one on the duplicate client externalId.
+    if api GET "/v1/savingsaccounts/external-id/${wallet//:/%3A}" >/dev/null 2>&1; then
         printf '%s\n' "$wallet"
         return 0
     fi
