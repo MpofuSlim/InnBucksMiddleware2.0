@@ -122,7 +122,26 @@ nproc > "$OUTDIR/nproc.txt" 2>/dev/null || true
     sleep 5
   done ) > "$OUTDIR/docker-stats.log" 2>&1 &
 STATS_PID=$!
-trap 'kill "$STATS_PID" 2>/dev/null || true' EXIT
+
+# Fineract's own internals, sampled on the same cadence. CPU alone cannot tell
+# GC pauses from lock waits from real work, and the pool gauges are INSTANTANEOUS
+# — scraping them after the run only ever reports an idle cell. The first full
+# run was diagnosed from a post-hoc scrape showing pending=0, which proved
+# nothing about the ten minutes that mattered.
+# Needs FINERACT_MANAGEMENT_PROMETHEUS_ENABLED=true (00-discover.sh probes it);
+# with the export off this file is empty and the derived rows read "?".
+FINERACT_LOCAL="${FINERACT_LOCAL_URL:-https://localhost:8443/fineract-provider}"
+( while :; do
+    printf '%s ' "$(date -u +%H:%M:%S)"
+    { curl -sS --cacert "$CA" --max-time 4 "$FINERACT_LOCAL/actuator/prometheus" 2>/dev/null \
+        | grep -E '^(jvm_gc_pause_seconds_(count|sum)|hikaricp_connections_(active|pending)|fineract_tenants_[a-z0-9_]+_hikaricp_connections_(active|pending))\{' \
+        | tr '\n' ' '; } || true
+    printf '\n'
+    sleep 5
+  done ) > "$OUTDIR/fineract-metrics.log" 2>&1 &
+METRICS_PID=$!
+
+trap 'kill "$STATS_PID" "$METRICS_PID" 2>/dev/null || true' EXIT
 
 # --- Run k6 -----------------------------------------------------------------
 # Pin k6 to the last two cores so it is not fighting Fineract for core 0.
@@ -169,7 +188,7 @@ docker run --rm -i \
     2>&1 | tee "$OUTDIR/k6.log"
 K6_RC=${PIPESTATUS[0]}
 set -e
-kill "$STATS_PID" 2>/dev/null || true
+kill "$STATS_PID" "$METRICS_PID" 2>/dev/null || true
 
 # --- After ------------------------------------------------------------------
 docker exec "$FINERACT_DB_CTR" psql -U fineract -d "${TENANT_DB:-fineract_default}" -At -c \
@@ -193,6 +212,55 @@ PEAK_K6=$(peak_cpu 'k6-loadtest')
 PEAK_FIN=$(peak_cpu 'innbucks-fineract')      # the '=' anchor excludes -db
 PEAK_PG=$(peak_cpu 'innbucks-fineract-db')
 
+# docker stats reports 100% == ONE core, so the whole box is CORES*100.
+CPU_FULL=$(( CORES * 100 ))
+# Mark the row the samples actually support. The first version of this table
+# printed all six rows unconditionally with the peaks interpolated into the
+# prose, so a row reading "k6 CPU pegged (peak 8.55%)" sat there looking like a
+# verdict while k6 was in fact idle. A table of possibilities is not a
+# diagnosis; the reader should not have to do the comparison the script can do.
+verdict() {
+    awk -v k6="${PEAK_K6:-}" -v fin="${PEAK_FIN:-}" -v pg="${PEAK_PG:-}" \
+        -v full="$CPU_FULL" -v which="$1" 'BEGIN{
+        if (k6 == "" && fin == "" && pg == "") { print "no sample"; exit }
+        half = full / 2
+        if      (which == "gen")  print (k6+0  >= half && k6+0  >  fin+0) ? "**YES**" : "no"
+        else if (which == "pg")   print (pg+0  >  fin+0)                  ? "**YES**" : "no"
+        else if (which == "fin")  print (fin+0 >= half && fin+0 >= pg+0)  ? "**YES**" : "no"
+        else if (which == "idle") print (fin+0 < half && pg+0 < half && k6+0 < half) ? "**YES**" : "no"
+    }'
+}
+V_GEN=$(verdict gen); V_PG=$(verdict pg); V_FIN=$(verdict fin); V_IDLE=$(verdict idle)
+
+# From the Prometheus samples taken DURING the run. These answer the two
+# verdicts CPU cannot: peak pending threads settles POOL-BOUND outright, and GC
+# seconds settles "something is serialising" — the first full run spent 6.4s of
+# 632s in GC (1%), which ruled out the heap that everyone reaches for first.
+M_LOG="$OUTDIR/fineract-metrics.log"
+peak_pool() {   # peak_pool active|pending — max across all tenant pools
+    grep -oE "hikaricp_connections_$1\{[^}]*\} [0-9.eE+]+" "$M_LOG" 2>/dev/null \
+        | awk '{print $NF}' | sort -g -r | head -1 || true
+}
+PEAK_ACTIVE=$(peak_pool active)
+PEAK_PENDING=$(peak_pool pending)
+# Cumulative counter: last sample minus first is the GC actually spent in the run.
+# Sum every cause on each sample line, because Prometheus emits one series per
+# GC cause and only their total is meaningful.
+#
+# Walk the line by REGEX, never by splitting on whitespace: Prometheus label
+# VALUES contain spaces (cause="G1 Evacuation Pause"), so a field split lands
+# the metric name and its number in non-adjacent fields and every sample reads
+# as zero. Tested — the field-split version silently reported 0.00s of GC.
+GC_SECS=$(awk '
+    { line = $0; t = ""
+      while (match(line, /jvm_gc_pause_seconds_sum\{[^}]*\} [0-9.eE+-]+/)) {
+          m = substr(line, RSTART, RLENGTH); sub(/.*\} /, "", m); t += m + 0
+          line = substr(line, RSTART + RLENGTH)
+      }
+      if (t != "") { if (first == "") first = t; last = t } }
+    END { if (first != "") printf "%.2f", last - first }
+  ' "$M_LOG" 2>/dev/null || true)
+
 cat <<EOF | tee "$OUTDIR/RESULT.md"
 
 # Fineract load test — $(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -208,15 +276,39 @@ ${POOL_INIT:-?} to ${POOL:-?} on demand as VUs arrive) and including it
 understates throughput. The figure to quote is \`http_reqs\` rate during the
 final sustained stage, with everything on the line above stated alongside it.
 
-## What limited it — read in this order
-| Symptom | Verdict |
+## What limited it
+Peak CPU, out of ${CPU_FULL}% for the whole box (docker stats: 100% = one core):
+k6 ${PEAK_K6:-?}%  ·  Fineract ${PEAK_FIN:-?}%  ·  Postgres ${PEAK_PG:-?}%
+
+| Fired | Verdict |
 |---|---|
-| k6 CPU pegged (peak ${PEAK_K6:-?}%), Fineract not | GENERATOR-BOUND. Not a Fineract number. Move the generator off this box. |
-| \`fineract_conflict_suspected\` a large share of requests | LOCK-BOUND. VUs are colliding on accounts; add accounts, lower VUs. |
-| Latency climbs, throughput flat, VUs > pool_max_active (${POOL:-?}) | POOL-BOUND. Raise tenant_server_connections.pool_max_active, or stay under it. |
-| Postgres CPU pegged (peak ${PEAK_PG:-?}%), Fineract lower | POSTGRES-BOUND. Co-located DB; separate it or tune it. |
-| Fineract CPU pegged (peak ${PEAK_FIN:-?}%), Postgres lower | FINERACT-BOUND. This is the real core ceiling on this hardware. |
-| Nothing pegged, throughput flat | Something is serialising. Check GC in the JVM metrics, and heap (-Xmx). |
+| $V_GEN | GENERATOR-BOUND — k6 outran the cell. Not a Fineract number; move the generator off this box. |
+| $V_PG | POSTGRES-BOUND — the co-located DB outran Fineract. Separate it, or tune shared_buffers/work_mem. |
+| $V_FIN | FINERACT-BOUND — the real core ceiling on this hardware. See the note on account history below before calling it a hardware limit. |
+| $V_IDLE | Nothing was pegged and throughput was flat, so something is SERIALISING. Check GC pause time and heap (-Xmx) in the JVM metrics. |
+
+From Fineract's own metrics, sampled every 5s DURING the run
+(\`fineract-metrics.log\`; "?" means the Prometheus export was off):
+
+peak pool connections active ${PEAK_ACTIVE:-?} of ${POOL:-?}  ·  peak pending threads ${PEAK_PENDING:-?}  ·  GC during run ${GC_SECS:-?}s
+
+- **Peak pending is the POOL-BOUND verdict.** Above zero for any sustained
+  period means requests queued for a connection and the plateau is the pool,
+  not Fineract — raise \`tenant_server_connections.pool_max_active\` or keep
+  max_vus (${MAX_VUS}) under it. At zero, the pool is exonerated.
+- **GC seconds against the run's wall-clock is the serialising verdict.** A few
+  percent is noise and rules the heap out; a large fraction means raise -Xmx
+  before believing any other number here.
+
+One more that CPU samples cannot decide for you:
+
+- **LOCK-BOUND** if \`fineract_conflict_suspected\` is a large share of requests
+  **AND median latency stayed well under 1s**. That second half is not optional.
+  The counter is just "response took longer than the 1s retry backoff", so once
+  the median itself exceeds 1s it counts nearly every request and means nothing.
+  Note also that each VU owns a DISTINCT account, so same-account collisions are
+  structurally impossible in this test — a high count here with a slow median is
+  a false positive, not evidence of contention.
 
 ## Caveats that belong in any report of this number
 - Generator ran on the same box as the system under test.
