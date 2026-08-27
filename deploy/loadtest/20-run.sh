@@ -193,6 +193,26 @@ PEAK_K6=$(peak_cpu 'k6-loadtest')
 PEAK_FIN=$(peak_cpu 'innbucks-fineract')      # the '=' anchor excludes -db
 PEAK_PG=$(peak_cpu 'innbucks-fineract-db')
 
+# docker stats reports 100% == ONE core, so the whole box is CORES*100.
+CPU_FULL=$(( CORES * 100 ))
+# Mark the row the samples actually support. The first version of this table
+# printed all six rows unconditionally with the peaks interpolated into the
+# prose, so a row reading "k6 CPU pegged (peak 8.55%)" sat there looking like a
+# verdict while k6 was in fact idle. A table of possibilities is not a
+# diagnosis; the reader should not have to do the comparison the script can do.
+verdict() {
+    awk -v k6="${PEAK_K6:-}" -v fin="${PEAK_FIN:-}" -v pg="${PEAK_PG:-}" \
+        -v full="$CPU_FULL" -v which="$1" 'BEGIN{
+        if (k6 == "" && fin == "" && pg == "") { print "no sample"; exit }
+        half = full / 2
+        if      (which == "gen")  print (k6+0  >= half && k6+0  >  fin+0) ? "**YES**" : "no"
+        else if (which == "pg")   print (pg+0  >  fin+0)                  ? "**YES**" : "no"
+        else if (which == "fin")  print (fin+0 >= half && fin+0 >= pg+0)  ? "**YES**" : "no"
+        else if (which == "idle") print (fin+0 < half && pg+0 < half && k6+0 < half) ? "**YES**" : "no"
+    }'
+}
+V_GEN=$(verdict gen); V_PG=$(verdict pg); V_FIN=$(verdict fin); V_IDLE=$(verdict idle)
+
 cat <<EOF | tee "$OUTDIR/RESULT.md"
 
 # Fineract load test — $(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -208,15 +228,29 @@ ${POOL_INIT:-?} to ${POOL:-?} on demand as VUs arrive) and including it
 understates throughput. The figure to quote is \`http_reqs\` rate during the
 final sustained stage, with everything on the line above stated alongside it.
 
-## What limited it — read in this order
-| Symptom | Verdict |
+## What limited it
+Peak CPU, out of ${CPU_FULL}% for the whole box (docker stats: 100% = one core):
+k6 ${PEAK_K6:-?}%  ·  Fineract ${PEAK_FIN:-?}%  ·  Postgres ${PEAK_PG:-?}%
+
+| Fired | Verdict |
 |---|---|
-| k6 CPU pegged (peak ${PEAK_K6:-?}%), Fineract not | GENERATOR-BOUND. Not a Fineract number. Move the generator off this box. |
-| \`fineract_conflict_suspected\` a large share of requests | LOCK-BOUND. VUs are colliding on accounts; add accounts, lower VUs. |
-| Latency climbs, throughput flat, VUs > pool_max_active (${POOL:-?}) | POOL-BOUND. Raise tenant_server_connections.pool_max_active, or stay under it. |
-| Postgres CPU pegged (peak ${PEAK_PG:-?}%), Fineract lower | POSTGRES-BOUND. Co-located DB; separate it or tune it. |
-| Fineract CPU pegged (peak ${PEAK_FIN:-?}%), Postgres lower | FINERACT-BOUND. This is the real core ceiling on this hardware. |
-| Nothing pegged, throughput flat | Something is serialising. Check GC in the JVM metrics, and heap (-Xmx). |
+| $V_GEN | GENERATOR-BOUND — k6 outran the cell. Not a Fineract number; move the generator off this box. |
+| $V_PG | POSTGRES-BOUND — the co-located DB outran Fineract. Separate it, or tune shared_buffers/work_mem. |
+| $V_FIN | FINERACT-BOUND — the real core ceiling on this hardware. See the note on account history below before calling it a hardware limit. |
+| $V_IDLE | Nothing was pegged and throughput was flat, so something is SERIALISING. Check GC pause time and heap (-Xmx) in the JVM metrics. |
+
+Two more that CPU samples cannot decide for you:
+
+- **POOL-BOUND** if latency climbed while throughput stayed flat and max_vus
+  (${MAX_VUS}) was at or above pool_max_active (${POOL:-?}). Past the pool,
+  extra VUs queue for a connection — that plateau is the pool, not Fineract.
+- **LOCK-BOUND** if \`fineract_conflict_suspected\` is a large share of requests
+  **AND median latency stayed well under 1s**. That second half is not optional.
+  The counter is just "response took longer than the 1s retry backoff", so once
+  the median itself exceeds 1s it counts nearly every request and means nothing.
+  Note also that each VU owns a DISTINCT account, so same-account collisions are
+  structurally impossible in this test — a high count here with a slow median is
+  a false positive, not evidence of contention.
 
 ## Caveats that belong in any report of this number
 - Generator ran on the same box as the system under test.

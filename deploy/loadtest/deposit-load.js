@@ -39,7 +39,18 @@ const MAX_VUS = parseInt(__ENV.MAX_VUS || '50', 10);
 
 // Conflicts are invisible in a plain success/failure count: Fineract retries
 // them internally and eventually returns 200, so they show up only as latency.
-// Tracking them separately is how "we are lock-bound" becomes visible.
+//
+// READ THIS BEFORE INTERPRETING THE COUNTER. It is a proxy — literally
+// "took longer than the 1s retry backoff" — and it is ONLY meaningful while
+// MEDIAN latency stays well under 1s. Once the cell saturates and the median
+// itself passes 1s, this counts nearly every request and says nothing: a run
+// with a 2.1s median reported 90% "conflicts" and there were none.
+//
+// And in this test there cannot be any: rule 1 above gives every VU a DISTINCT
+// account and a VU runs its iterations sequentially, so two concurrent requests
+// against one account are structurally impossible. A high count here is
+// evidence of a slow cell, not a contended one. RESULT.md states the same
+// precondition.
 const conflicts = new Counter('fineract_conflict_suspected');
 const postLatency = new Trend('deposit_latency', true);
 
