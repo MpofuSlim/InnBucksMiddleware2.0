@@ -102,6 +102,20 @@ Build: `./mvnw verify` at the root. Run locally:
 * **Low-entropy secrets are HMAC-keyed, never bare-hashed**: OTP codes
   (`OtpHasher`), national IDs (`NationalIdHasher`). PINs: Argon2id
   (`PinHasher`). Refresh tokens: SHA-256 of a high-entropy opaque secret.
+* **The two Fineract AppUsers are stored at bcrypt cost 6, `mifos` at 10** —
+  the same entropy argument, run the other way. Fineract's
+  `DaoAuthenticationProvider` has NO verification cache, so `matches()` runs on
+  EVERY request and every money movement pays the hash; cost 10 measured 187ms
+  vs cost 6 at 98ms (staging, 2026-08-27) — ~85ms of pure CPU per call. It is
+  safe ONLY because `provision-cell.sh --gen-password` mints ~122 bits (20
+  chars × 68-char alphabet): at that size the search space is the defence and
+  the KDF cost is irrelevant. **Check the plaintext is still generated before
+  ever writing a cost-6 hash** — a memorable password there makes cost 6
+  indefensible. `mifos` keeps 10 (interactive, low-volume). **Not durable:**
+  the cost lives in the hash, not in config, so ANY password change through
+  Fineract's API silently re-hashes at 10 and reverts it, with no error —
+  re-apply and verify `{bcrypt}$2b$06$` after every rotation. Full reasoning,
+  measurement and procedure in `docs/fineract-cell-runbook.md`.
 * **Tamper-evident audit chain**: every `audit_event` row carries `row_hmac`
   (content seal) + `chain_hmac = HMAC(key, prev ‖ row_hmac)` (deletion/reorder
   evidence), serialised via `audit_chain_head` `SELECT … FOR UPDATE` in a

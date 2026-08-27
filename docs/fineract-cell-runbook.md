@@ -175,7 +175,11 @@ Fineract has no way to read a password back, and `provision-cell.sh`
 deliberately will not change an existing user's password — so a lost
 `MW_WRITE_PASSWORD` means the middleware `.env` cannot be completed. Rather
 than hunt for the old values, mint all three fresh. Spring's delegating
-encoder stores `{bcrypt}$2b$...`, so the hashes can be written directly:
+encoder stores `{bcrypt}$2b$...`, so the hashes can be written directly.
+
+**Note the two different bcrypt costs below — that split is deliberate**, and
+the reasoning is in [AppUser bcrypt cost](#appuser-bcrypt-cost-6-on-the-money-path)
+directly after this section. Do not "tidy" them into one value.
 
 ```sh
 cd deploy/fineract
@@ -188,8 +192,11 @@ printf '\nSAVE THESE\n  mifos             : %s\n  innbucks-mw-read  : %s\n  innb
 
 cat > /tmp/hash.py <<'PYEOF'
 import os, bcrypt
-for k in ("A", "R", "W"):
-    h = bcrypt.hashpw(os.environ[k].encode(), bcrypt.gensalt(10)).decode()
+# admin is interactive and low-volume -> keep the strong default cost.
+# The two middleware users are verified on EVERY money movement -> cost 6.
+# See "AppUser bcrypt cost" below before changing either number.
+for k, cost in (("A", 10), ("R", 6), ("W", 6)):
+    h = bcrypt.hashpw(os.environ[k].encode(), bcrypt.gensalt(cost)).decode()
     print(k + "_HASH='{bcrypt}" + h + "'")
 PYEOF
 
@@ -213,6 +220,71 @@ middleware users correctly return `403` on `/v1/offices` because they hold no
 The same UPDATE clears `nonlocked`, which matters because Fineract locks an
 account after repeated failed logins — retrying a stale password is enough to
 lock yourself out, and the symptom looks identical to a wrong password.
+
+### AppUser bcrypt cost (6 on the money path)
+
+**`innbucks-mw-read` and `innbucks-mw-write` are stored at bcrypt cost 6, not
+the default 10. `mifos` stays at 10.** This is a deliberate, measured
+trade-off; the reasoning matters more than the number.
+
+**Why it is safe here.** bcrypt's work factor exists to make *guessing* a
+password expensive — it buys time against an offline attack on a stolen hash of
+a LOW-entropy, human-chosen secret. These two are service accounts whose
+passwords come from `provision-cell.sh --gen-password`: 20 characters from a
+68-character alphabet, about **122 bits of entropy**. At that size the search
+space is the defence and the KDF cost is irrelevant — cost 6 and cost 10 are
+both "will never be brute-forced." `mifos` keeps cost 10 because it is
+interactive, low-volume, and more likely to be given a human-chosen password one
+day.
+
+**This argument is conditional, and the condition must be checked.** It holds
+only while those passwords really are generated. Before writing a cost-6 hash,
+confirm the plaintext is long and varied (prints no secret):
+
+```sh
+p=$(grep -E '^FINERACT_WRITE_PASSWORD=' ~/InnBucksMiddleware2.0/.env | cut -d= -f2-)
+echo "length=${#p} distinct=$(printf '%s' "$p" | fold -w1 | sort -u | wc -l)"
+```
+
+Want length ≥ 16 and distinct ≥ 15. **If someone has set a memorable password,
+cost 6 is not acceptable** — regenerate before lowering the cost.
+
+**Why it is worth doing.** `SecurityConfig` (fork) wires a
+`DaoAuthenticationProvider` with `PasswordEncoderFactories
+.createDelegatingPasswordEncoder()`, and there is **no password-verification
+cache on that path** — `matches()` runs on every single request. Every deposit,
+every balance read and every ownership check pays the full hash. Measured on the
+staging cell (2026-08-27), same endpoint, single-threaded, five samples each:
+
+| | median | mean |
+|---|---|---|
+| cost 10 | 187ms | 189ms |
+| cost 6 | 98ms | 107ms |
+
+**~85ms per authenticated request**, on a box where Fineract was spending ~425ms
+of CPU per deposit — so roughly a 25% throughput gain, all of it CPU handed back.
+
+**The trap: this is not durable.** `BCryptPasswordEncoder.matches()` reads the
+cost out of the stored hash, so nothing in config pins it. **Any password change
+through Fineract's API re-hashes at the delegating encoder's default cost 10 and
+silently reverts this** — no error, no log, throughput just quietly drops back.
+That includes a `provision-cell.sh` run that rotates these users, and the admin
+UI. After any credential rotation, re-apply cost 6 and re-check:
+
+```sh
+docker exec innbucks-fineract-db psql -U fineract -d fineract_default -At -c \
+  "SELECT username, substring(password from 1 for 15) FROM m_appuser
+    WHERE username LIKE 'innbucks-mw-%';"
+```
+
+Both rows must read `{bcrypt}$2b$06$`. A `$10$` there means the change was lost.
+
+Apply it the same way the break-glass section does — generate the hash at cost 6
+and `UPDATE m_appuser` directly. **Verify with an authenticated call before
+walking away: `401` is the only failure**; `403` on `/v1/offices` is
+least-privilege working correctly and proves the password verified. Keep the old
+hash to hand until you have seen that, because a bad hash locks the middleware
+out of the core entirely.
 
 ### Maker-checker must not gate the middleware's commands
 
