@@ -86,7 +86,26 @@ services:
       FINERACT_SERVER_SSL_KEY_STORE: /ssl/fineract-keystore.p12
       FINERACT_SERVER_SSL_KEY_STORE_PASSWORD: ${FINERACT_KEYSTORE_PASSWORD:?set FINERACT_KEYSTORE_PASSWORD in .env}
 
-      FINERACT_MANAGEMENT_ENDPOINT_WEB_EXPOSURE_INCLUDE: health,info
+      # Actuator. `prometheus` is listed here so that the export flag below is
+      # the ONLY switch: with the export off, Boot never registers a prometheus
+      # endpoint at all, so naming it in the exposure list exposes nothing.
+      # (Fineract's own default for this key is health,info,prometheus —
+      # application.properties:346 — so this line is not what was blocking it.)
+      FINERACT_MANAGEMENT_ENDPOINT_WEB_EXPOSURE_INCLUDE: health,info,prometheus
+      # Fineract defaults this to false (application.properties:357). It MUST
+      # be declared here to be settable at all: compose's .env file only feeds
+      # ${...} interpolation in this file — it is NOT passed into containers,
+      # and this service has no env_file:. Appending the key to .env without
+      # this line silently changes nothing.
+      #
+      # Turn it on for a load test (FINERACT_MANAGEMENT_PROMETHEUS_ENABLED=true
+      # in deploy/fineract/.env) and turn it OFF afterwards: there is no
+      # separate management port and no base-path override
+      # (application.properties:381-382), so the endpoint lands at
+      # /fineract-provider/actuator/prometheus — inside the path prefix that is
+      # still reachable from the public internet, where it would publish JVM,
+      # Hikari-pool and per-URI request internals.
+      FINERACT_MANAGEMENT_PROMETHEUS_ENABLED: "${FINERACT_MANAGEMENT_PROMETHEUS_ENABLED:-false}"
       FINERACT_INSECURE_HTTP_CLIENT: "false"
       FINERACT_CONTENT_FILESYSTEM_ROOT_FOLDER: /fineract-content
 
