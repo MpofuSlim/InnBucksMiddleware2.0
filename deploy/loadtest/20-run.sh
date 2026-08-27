@@ -137,8 +137,19 @@ else
 fi
 
 log "starting k6 ($MODE) ..."
+# The k6 image runs as its own uid (12345), so it cannot write into a directory
+# the host user just created with default 0755 — --summary-export then fails
+# with "permission denied" AFTER the run, when the data is already gone.
+# World-writable is fine for a per-run artifact directory under /tmp, and it is
+# the option that cannot break k6's startup the way --user might.
+chmod a+rwx "$OUTDIR"
+# --name is load-bearing: `docker stats` reports containers BY NAME, and the
+# diagnosis below greps for the generator's CPU by that name. Without it Docker
+# assigns a random name and the generator-bound row could never be filled in.
+docker rm -f k6-loadtest >/dev/null 2>&1 || true
 set +e
 docker run --rm -i \
+    --name k6-loadtest \
     --network "$NET" \
     $CPUSET \
     -v "$ACCOUNTS":/accounts.txt:ro \
@@ -167,9 +178,20 @@ BEFORE=$(cat "$OUTDIR/txn-count-before.txt" 2>/dev/null || echo 0)
 AFTER=$(cat "$OUTDIR/txn-count-after.txt" 2>/dev/null || echo 0)
 
 # --- Diagnosis --------------------------------------------------------------
-PEAK_K6=$(grep -oE 'k6[^ ]*=[0-9.]+%' "$OUTDIR/docker-stats.log" 2>/dev/null | grep -oE '[0-9.]+' | sort -rn | head -1)
-PEAK_FIN=$(grep -oE 'innbucks-fineract=[0-9.]+%' "$OUTDIR/docker-stats.log" 2>/dev/null | grep -oE '[0-9.]+' | sort -rn | head -1)
-PEAK_PG=$(grep -oE 'innbucks-fineract-db=[0-9.]+%' "$OUTDIR/docker-stats.log" 2>/dev/null | grep -oE '[0-9.]+' | sort -rn | head -1)
+# Every one of these can legitimately find nothing: docker stats samples every
+# 5s, so a run shorter than that captures no line at all. Under the `set -euo
+# pipefail` restored above, a grep that matches nothing fails the pipeline and
+# `set -e` kills the script HERE — after the entire run, before RESULT.md is
+# written. That is exactly what happened on the first smoke run: 10/10 requests
+# succeeded and the report was never produced. The `|| true` is what makes a
+# missing sample degrade to "?" in one table cell instead of losing the report.
+peak_cpu() {
+    grep -oE "$1=[0-9.]+%" "$OUTDIR/docker-stats.log" 2>/dev/null \
+        | grep -oE '[0-9.]+' | sort -rn | head -1 || true
+}
+PEAK_K6=$(peak_cpu 'k6-loadtest')
+PEAK_FIN=$(peak_cpu 'innbucks-fineract')      # the '=' anchor excludes -db
+PEAK_PG=$(peak_cpu 'innbucks-fineract-db')
 
 cat <<EOF | tee "$OUTDIR/RESULT.md"
 
