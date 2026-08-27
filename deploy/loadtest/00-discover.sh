@@ -11,7 +11,10 @@
 #     fineract.tenant.config.max-pool-size override when it is not -1, and -1 is
 #     the default (application.properties:64). So the effective value comes from
 #     tenant_server_connections.pool_max_active (TenantMapper.java:37).
-#     Ramp past it and you measure the pool's queue, not Fineract.
+#     Ramp past it and you measure the pool's queue, not Fineract. Its partner
+#     pool_initial_size is Hikari's minimumIdle, so the pool GROWS during the
+#     ramp — the shape of the warmup, and the reason a whole-run average is the
+#     wrong figure to quote.
 #   * Fineract's Prometheus export is DISABLED by default
 #     (application.properties:357) — without it you get a TPS number and no
 #     idea what limited it.
@@ -59,19 +62,35 @@ kv "container cpus"   "$(docker inspect -f '{{.HostConfig.NanoCpus}}' "$FINERACT
 kv "container memory" "$(docker inspect -f '{{.HostConfig.Memory}}' "$FINERACT_CTR" 2>/dev/null | awk '{print ($1==0)?"unlimited":$1/1048576" MiB"}')"
 
 hdr "Connection pools — THE concurrency ceiling"
+# Only TWO of the tenant_server_connections pool columns reach HikariConfig
+# (DataSourcePerTenantServiceFactory:92-93):
+#     maximumPoolSize <- pool_max_active
+#     minimumIdle     <- getInitialSize() <- pool_initial_size  (TenantMapper:34)
+# pool_min_idle and pool_max_idle are read into the tenant object and never
+# applied — DBCP-era leftovers; Hikari has no maxIdle concept at all. An
+# earlier version of this script printed those two as if they configured the
+# pool, and omitted pool_initial_size, which is the one that shapes warmup.
 POOL=$(docker exec "$FINERACT_DB_CTR" psql -U fineract -d fineract_tenants -At -F' ' -c "
-  SELECT ts.pool_max_active, ts.pool_min_idle, ts.pool_max_idle
+  SELECT ts.pool_max_active, ts.pool_initial_size
   FROM tenants t JOIN tenant_server_connections ts ON ts.id = t.oltp_id
   WHERE t.identifier = '${TENANT}';" 2>/dev/null)
 if [ -n "$POOL" ]; then
     set -- $POOL
-    kv "per-tenant pool_max_active" "${1:-?}   <-- do not exceed this with concurrent writers"
-    kv "per-tenant pool_min_idle"   "${2:-?}"
-    kv "per-tenant pool_max_idle"   "${3:-?}"
+    kv "pool_max_active (Hikari max)"   "${1:-?}   <-- do not exceed this with concurrent writers"
+    kv "pool_initial_size (Hikari min)" "${2:-?}   <-- the pool STARTS here and grows"
     echo
     echo "  Concurrency ladder should stop at or below pool_max_active. Past it,"
     echo "  extra virtual users queue for a connection and latency climbs while"
     echo "  throughput stays flat — which reads like a Fineract limit but is not."
+    echo
+    echo "  The pool opens with pool_initial_size connections and grows toward"
+    echo "  pool_max_active on demand, DURING the ramp. So the early part of a run"
+    echo "  measures pool growth, not steady state — quote the final sustained"
+    echo "  stage, never the whole-run average. Pre-warming (setting"
+    echo "  pool_initial_size = pool_max_active, which is Hikari's own advice for"
+    echo "  steady-state workloads) is a TUNING change: make it for the tuned"
+    echo "  number, not for the baseline, or the baseline stops describing the"
+    echo "  cell as it runs today."
 else
     kv "per-tenant pool" "COULD NOT READ — check the container name / tenant identifier"
 fi
