@@ -106,6 +106,50 @@ services:
       # still reachable from the public internet, where it would publish JVM,
       # Hikari-pool and per-URI request internals.
       FINERACT_MANAGEMENT_PROMETHEUS_ENABLED: "${FINERACT_MANAGEMENT_PROMETHEUS_ENABLED:-false}"
+
+      # --- Diagnostics. All default to Fineract's OWN default, so this block
+      # is a pure no-op until an operator sets one in .env ------------------
+      #
+      # These are here for the SAME reason as the prometheus flag above: this
+      # service has no env_file:, so a key that is not DECLARED here cannot be
+      # set at all. Putting it in .env alone changes nothing, silently and with
+      # no error — which is exactly how FINERACT_CORE_EVENTS_TOKEN once shipped
+      # dead (token present in .env, webhook disabled, nothing in the logs).
+      # Property names verified against the fork's application.properties at the
+      # line numbers given; do not add a key here without doing the same.
+      #
+      # Per-URI latency histograms. Without this the prometheus endpoint gives
+      # you counts but no server-side latency distribution, so you cannot
+      # separate Fineract's own time from network + generator time. (:351)
+      FINERACT_MANAGEMENT_METRICS_DISTRIBUTION_HTTP_SERVER_REQUESTS: "${FINERACT_MANAGEMENT_METRICS_DISTRIBUTION_HTTP_SERVER_REQUESTS:-false}"
+      # Tomcat thread-pool + connector MBeans (thread counts, queue depth). (:403)
+      FINERACT_SERVER_TOMCAT_MBEANREGISTRY_ENABLED: "${FINERACT_SERVER_TOMCAT_MBEANREGISTRY_ENABLED:-false}"
+      #
+      # Method-level sampling profiler. Adds CGLIB proxies to whatever classes
+      # you name, INCLUDING money-path beans — turn it off after reading, and
+      # read the SPLIT between methods rather than the absolute numbers.
+      # A mistyped FQCN fails SILENTLY: check the log for one
+      # "Sampling is enabled for <class>" line per class you listed. (:211-214)
+      FINERACT_SAMPLING_ENABLED: "${FINERACT_SAMPLING_ENABLED:-false}"
+      FINERACT_SAMPLING_RATE: "${FINERACT_SAMPLING_RATE:-1000}"
+      FINERACT_SAMPLED_CLASSES: "${FINERACT_SAMPLED_CLASSES:-}"
+      FINERACT_SAMPLING_RESET_PERIOD_IN_SEC: "${FINERACT_SAMPLING_RESET_PERIOD_IN_SEC:-60}"
+      #
+      # JPA statement logging — counts SQL per request. STAGING ONLY: it logs
+      # BIND PARAMETERS, so customer account ids and amounts land in the
+      # container logs in plaintext. Clear the logs after. Note a flat
+      # statement count rules nothing out — it is equally consistent with
+      # EclipseLink materialising N entities, which is Java CPU, not SQL. (:205)
+      FINERACT_STATEMENT_LOGGING_ENABLED: "${FINERACT_STATEMENT_LOGGING_ENABLED:-false}"
+      #
+      # Loan close-of-business. This cell is savings-only, so the COB filter and
+      # its batch pools are dead weight — but setting this false is NOT free:
+      # SecurityConfig takes a different branch and re-anchors
+      # idempotencyStoreFilter on the money path. If you turn it off, smoke a
+      # deposit AND a replayed Idempotency-Key before trusting the cell, and
+      # turn it back on the day a loan product is added. (:81)
+      FINERACT_JOB_LOAN_COB_ENABLED: "${FINERACT_JOB_LOAN_COB_ENABLED:-true}"
+
       FINERACT_INSECURE_HTTP_CLIENT: "false"
       FINERACT_CONTENT_FILESYSTEM_ROOT_FOLDER: /fineract-content
 

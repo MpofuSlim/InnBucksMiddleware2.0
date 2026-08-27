@@ -83,17 +83,38 @@ export const options =
         },
       };
 
+// Each VU owns a DISJOINT SLICE of the accounts file and rotates within it.
+//
+// This used to be `ACCOUNTS[(__VU - 1) % ACCOUNTS.length]`, which with __VU
+// capped at maxVUs meant a 200-account file was worked by the first 40 accounts
+// and the other 160 were created, never touched, and left at one transaction.
+// The test manufactured ~250 transactions of history per account in a single
+// ten-minute run — and per-deposit cost grows with that history, so the harness
+// was aging its own subject roughly 5x faster than it needed to, mid-measurement.
+//
+// Slices are disjoint, so rule 1 above still holds exactly: no two VUs ever
+// address the same account, and same-account optimistic-lock collisions remain
+// structurally impossible. Only the SPREAD changes.
+const VUS = Math.min(MAX_VUS, ACCOUNTS.length);
+const SLICE = Math.floor(ACCOUNTS.length / VUS);
+
 export function setup() {
   if (!BASE || !PASS) throw new Error('FINERACT_URL and MW_WRITE_PASSWORD are required');
   if (!ACCOUNTS.length) throw new Error('no accounts loaded — run 10-fixtures.sh first');
   if (Number.isNaN(PAYMENT_TYPE_ID)) throw new Error('PAYMENT_TYPE_ID is required (Fineract validates it notNull on every deposit)');
-  console.log(`mode=${MODE} accounts=${ACCOUNTS.length} targetRate=${TARGET_RATE}/s maxVUs=${Math.min(MAX_VUS, ACCOUNTS.length)}`);
+  // A slice of zero would index past the array, every request would 404, and
+  // the run would quietly measure Fineract's error path at a flattering rate.
+  // VUS <= ACCOUNTS.length makes this unreachable — assert it anyway, because
+  // the failure is silent and the assertion is free.
+  if (SLICE < 1) throw new Error(`slice underrun: ${ACCOUNTS.length} accounts across ${VUS} VUs`);
+  console.log(`mode=${MODE} accounts=${ACCOUNTS.length} targetRate=${TARGET_RATE}/s maxVUs=${VUS} slicePerVU=${SLICE} accountsTouched=${VUS * SLICE}`);
   return { today: new Date().toISOString().slice(0, 10) };
 }
 
 export default function (data) {
-  // Distinct account per VU. __VU is 1-based and stable for the VU's lifetime.
-  const account = ACCOUNTS[(__VU - 1) % ACCOUNTS.length];
+  // __VU is 1-based and stable for the VU's lifetime; __ITER rotates within
+  // this VU's own slice, so history accrues across SLICE accounts, not one.
+  const account = ACCOUNTS[(__VU - 1) * SLICE + (__ITER % SLICE)];
   const ref = `lt-${__VU}-${__ITER}-${Date.now()}`;
 
   const url = `${BASE}/v1/savingsaccounts/external-id/${encodeURIComponent(account)}/transactions?command=deposit`;
