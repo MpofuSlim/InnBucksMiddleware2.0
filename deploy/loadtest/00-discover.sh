@@ -59,7 +59,7 @@ kv "container memory" "$(docker inspect -f '{{.HostConfig.Memory}}' "$FINERACT_C
 hdr "Connection pools — THE concurrency ceiling"
 POOL=$(docker exec "$FINERACT_DB_CTR" psql -U fineract -d fineract_tenants -At -F' ' -c "
   SELECT ts.pool_max_active, ts.pool_min_idle, ts.pool_max_idle
-  FROM tenants t JOIN tenant_server_connections ts ON ts.id = t.schema_id
+  FROM tenants t JOIN tenant_server_connections ts ON ts.id = t.oltp_id
   WHERE t.identifier = '${TENANT}';" 2>/dev/null)
 if [ -n "$POOL" ]; then
     set -- $POOL

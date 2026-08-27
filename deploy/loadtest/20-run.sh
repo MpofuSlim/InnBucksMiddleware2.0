@@ -69,9 +69,18 @@ fi
 
 POOL=$(docker exec "$FINERACT_DB_CTR" psql -U fineract -d fineract_tenants -At -c "
   SELECT ts.pool_max_active FROM tenants t
-  JOIN tenant_server_connections ts ON ts.id = t.schema_id
+  JOIN tenant_server_connections ts ON ts.id = t.oltp_id
   WHERE t.identifier = '${TENANT}';" 2>/dev/null | tr -d ' ')
-if [ -n "$POOL" ] && [ "$MODE" = full ] && [ "$MAX_VUS" -gt "$POOL" ]; then
+if [ -z "$POOL" ]; then
+    # Say so rather than skip quietly: a guard whose input could not be read
+    # fails OPEN, and the run would then happily ramp past the pool and report
+    # its queue as Fineract's ceiling.
+    log "WARNING: could not read tenant pool_max_active — the pool guard below is NOT active."
+    log "         Check it by hand before trusting a plateau:"
+    log "           docker exec $FINERACT_DB_CTR psql -U fineract -d fineract_tenants -c \\"
+    log "             'SELECT t.identifier, ts.pool_max_active FROM tenants t"
+    log "              JOIN tenant_server_connections ts ON ts.id = t.oltp_id;'"
+elif [ "$MODE" = full ] && [ "$MAX_VUS" -gt "$POOL" ]; then
     log "WARNING: max-vus ($MAX_VUS) exceeds the tenant pool_max_active ($POOL)."
     log "         Past the pool, extra VUs queue for a connection: latency climbs,"
     log "         throughput stays flat. That plateau is the POOL, not Fineract."
