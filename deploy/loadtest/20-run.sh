@@ -45,8 +45,26 @@ FINERACT_IN_NET="${FINERACT_INTERNAL_URL:-https://fineract:8443/fineract-provide
 OUTDIR="${OUTDIR:-/tmp/fineract-loadtest-$(date -u +%Y%m%dT%H%M%SZ)}"
 FINERACT_DB_CTR="innbucks-fineract-db"
 
+# Pinned by DIGEST, like every other image in this cell — the compose header
+# says "never :latest" and the measurement tool had been the one exception. A
+# floating tag means a re-run months later silently compares two k6 versions
+# and calls the difference a Fineract change.
+#
+# This is the digest that produced the 2026-08-27 baseline runs. To move it:
+#   docker pull grafana/k6:latest && docker inspect --format='{{index .RepoDigests 0}}' grafana/k6:latest
+# and say in the commit message which runs the old digest backs.
+K6_IMAGE="${K6_IMAGE:-grafana/k6@sha256:5221b620a4f874faff6e32ba597aa667c058391fe4898b1c6f6377f062c6cdec}"
+
 log()  { printf '>> %s\n' "$*" >&2; }
 fail() { printf 'FATAL: %s\n' "$*" >&2; exit 1; }
+
+# Log parsers live in their own file so selftest.sh can exercise the REAL
+# functions against synthetic logs with known answers, rather than a copy that
+# drifts. Two of them shipped broken before that existed.
+LT_LIB="$(dirname "${BASH_SOURCE[0]}")/lib-parse.sh"
+[ -f "$LT_LIB" ] || fail "missing $LT_LIB — run the script from its own checkout"
+# shellcheck source=lib-parse.sh
+. "$LT_LIB"
 
 : "${MW_WRITE_PASSWORD:?export MW_WRITE_PASSWORD}"
 [ -f "$ACCOUNTS" ] || fail "no accounts file at $ACCOUNTS — run 10-fixtures.sh first"
@@ -55,6 +73,12 @@ docker network inspect "$NET" >/dev/null 2>&1 || fail "docker network '$NET' not
 
 ACCOUNT_COUNT=$(wc -l < "$ACCOUNTS" | tr -d ' ')
 mkdir -p "$OUTDIR"
+
+# Mirrors the slice arithmetic in deposit-load.js so RESULT.md can state how
+# many accounts the run actually touched. Keep lt_slice and the JS in step: if
+# one changes, the report describes a run that did not happen.
+VUS_EFF=$(( MAX_VUS < ACCOUNT_COUNT ? MAX_VUS : ACCOUNT_COUNT ))
+read -r SLICE ACCOUNTS_TOUCHED <<<"$(lt_slice "$ACCOUNT_COUNT" "$MAX_VUS")" || true
 
 # --- Guard rails ------------------------------------------------------------
 # Concurrency above the number of accounts means VUs start sharing accounts,
@@ -183,7 +207,7 @@ docker run --rm -i \
     -e MODE="$MODE" \
     -e TARGET_RATE="$TARGET_RATE" \
     -e MAX_VUS="$MAX_VUS" \
-    grafana/k6:latest run --summary-export=/out/k6-summary.json - \
+    "$K6_IMAGE" run --summary-export=/out/k6-summary.json - \
     < "$(dirname "${BASH_SOURCE[0]}")/deposit-load.js" \
     2>&1 | tee "$OUTDIR/k6.log"
 K6_RC=${PIPESTATUS[0]}
@@ -204,13 +228,10 @@ AFTER=$(cat "$OUTDIR/txn-count-after.txt" 2>/dev/null || echo 0)
 # written. That is exactly what happened on the first smoke run: 10/10 requests
 # succeeded and the report was never produced. The `|| true` is what makes a
 # missing sample degrade to "?" in one table cell instead of losing the report.
-peak_cpu() {
-    grep -oE "$1=[0-9.]+%" "$OUTDIR/docker-stats.log" 2>/dev/null \
-        | grep -oE '[0-9.]+' | sort -rn | head -1 || true
-}
-PEAK_K6=$(peak_cpu 'k6-loadtest')
-PEAK_FIN=$(peak_cpu 'innbucks-fineract')      # the '=' anchor excludes -db
-PEAK_PG=$(peak_cpu 'innbucks-fineract-db')
+S_LOG="$OUTDIR/docker-stats.log"
+PEAK_K6=$(lt_peak_cpu "$S_LOG" 'k6-loadtest')
+PEAK_FIN=$(lt_peak_cpu "$S_LOG" 'innbucks-fineract')   # the '=' anchor excludes -db
+PEAK_PG=$(lt_peak_cpu "$S_LOG" 'innbucks-fineract-db')
 
 # docker stats reports 100% == ONE core, so the whole box is CORES*100.
 CPU_FULL=$(( CORES * 100 ))
@@ -237,44 +258,84 @@ V_GEN=$(verdict gen); V_PG=$(verdict pg); V_FIN=$(verdict fin); V_IDLE=$(verdict
 # seconds settles "something is serialising" — the first full run spent 6.4s of
 # 632s in GC (1%), which ruled out the heap that everyone reaches for first.
 M_LOG="$OUTDIR/fineract-metrics.log"
-peak_pool() {   # peak_pool active|pending — max across all tenant pools
-    grep -oE "hikaricp_connections_$1\{[^}]*\} [0-9.eE+]+" "$M_LOG" 2>/dev/null \
-        | awk '{print $NF}' | sort -g -r | head -1 || true
-}
-PEAK_ACTIVE=$(peak_pool active)
-PEAK_PENDING=$(peak_pool pending)
-# Cumulative counter: last sample minus first is the GC actually spent in the run.
-# Sum every cause on each sample line, because Prometheus emits one series per
-# GC cause and only their total is meaningful.
+OLTP_POOL=$(lt_pool_label "$M_LOG")
+read -r PEAK_ACTIVE PEAK_PENDING PENDING_SAMPLES TOTAL_SAMPLES <<<"$(lt_pool_scan "$M_LOG")" || true
+GC_SECS=$(lt_gc_secs "$M_LOG")
+
+# --- k6's own summary -------------------------------------------------------
+# --summary-export has been written since the first run and never read. Three
+# of its numbers change how the result is read and all three were missing:
 #
-# Walk the line by REGEX, never by splitting on whitespace: Prometheus label
-# VALUES contain spaces (cause="G1 Evacuation Pause"), so a field split lands
-# the metric name and its number in non-adjacent fields and every sample reads
-# as zero. Tested — the field-split version silently reported 0.00s of GC.
-GC_SECS=$(awk '
-    { line = $0; t = ""
-      while (match(line, /jvm_gc_pause_seconds_sum\{[^}]*\} [0-9.eE+-]+/)) {
-          m = substr(line, RSTART, RLENGTH); sub(/.*\} /, "", m); t += m + 0
-          line = substr(line, RSTART + RLENGTH)
-      }
-      if (t != "") { if (first == "") first = t; last = t } }
-    END { if (first != "") printf "%.2f", last - first }
-  ' "$M_LOG" 2>/dev/null || true)
+#   dropped_iterations  the open model DROPS iterations it cannot start rather
+#                       than queueing them. Large here means the offered rate
+#                       was never actually offered, so the run measured
+#                       throughput AT THE VU CAP, not a ceiling.
+#   http_reqs.rate      the achieved rate, so RESULT.md stops telling the
+#                       reader to go dig it out of k6.log by hand.
+#   tls handshaking     closes the "is TLS in the median?" question with a
+#                       number instead of an argument (it is not: handshakes
+#                       are counted under http_req_blocked, not req_duration).
+SUMMARY="$OUTDIR/k6-summary.json"
+REQS_RATE=$(lt_k6_metric "$SUMMARY" http_reqs rate)
+REQS_COUNT=$(lt_k6_metric "$SUMMARY" http_reqs count)
+DROPPED=$(lt_k6_metric "$SUMMARY" dropped_iterations count)
+TLS_AVG=$(lt_k6_metric "$SUMMARY" http_req_tls_handshaking avg)
+BLOCKED_AVG=$(lt_k6_metric "$SUMMARY" http_req_blocked avg)
+
+# Offered vs achieved, so "the cell did 16.6/s against a 400/s target" reads as
+# the 4% completion rate it is rather than as a throughput result.
+OFFERED_PCT=$(awk -v r="${REQS_COUNT:-}" -v d="${DROPPED:-}" \
+    'BEGIN { if (r == "" || d == "") { print "?" } else if (r + d == 0) { print "?" }
+             else printf "%.1f%%", 100 * r / (r + d) }')
+
+# Only meaningful when the file is bigger than the VU count — at slice 1 there
+# is nothing to spread and "aged ~1x faster" reads as noise.
+if [ "${SLICE:-1}" -gt 1 ]; then
+    SLICE_NOTE="- Runs from before the VU-slice change used only the FIRST max_vus accounts,
+  so they aged each one ~${SLICE}x faster per run. Do not compare across that
+  change without checking the per-account history on both sides."
+else
+    SLICE_NOTE="- accounts == max_vus, so each VU has exactly one account and this run ages
+  history at the maximum rate. Create more accounts to spread it."
+fi
+
+REQS_RATE_D=$(lt_num2u "${REQS_RATE:-}" "/s")
+TLS_AVG_D=$(lt_num2u "${TLS_AVG:-}" "ms")
+BLOCKED_AVG_D=$(lt_num2u "${BLOCKED_AVG:-}" "ms")
 
 cat <<EOF | tee "$OUTDIR/RESULT.md"
 
 # Fineract load test — $(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 mode=$MODE  accounts=$ACCOUNT_COUNT  target_rate=${TARGET_RATE}/s  max_vus=$MAX_VUS
+accounts touched: $ACCOUNTS_TOUCHED of $ACCOUNT_COUNT ($SLICE per VU across $VUS_EFF VUs)
 tenant pool: max_active=${POOL:-unknown} initial_size=${POOL_INIT:-unknown}  host cores=$CORES
+k6 image: $K6_IMAGE
 savings transactions written: $((AFTER - BEFORE))  (before=$BEFORE after=$AFTER)
 
 ## The number
-Take it from the STEADY-STATE stage in k6.log, not the whole run: the first
-minute is warmup (JIT, page cache, and the connection pool growing from
-${POOL_INIT:-?} to ${POOL:-?} on demand as VUs arrive) and including it
-understates throughput. The figure to quote is \`http_reqs\` rate during the
-final sustained stage, with everything on the line above stated alongside it.
+whole-run achieved rate: ${REQS_RATE_D}
+requests completed: ${REQS_COUNT:-?}  ·  iterations DROPPED: ${DROPPED:-?}  ·  offered load actually served: ${OFFERED_PCT}
+
+**Read \`dropped_iterations\` before quoting anything above.** This is an OPEN
+model: when k6 cannot start a scheduled iteration it DROPS it rather than
+queueing, and it can only start one per free VU. So once every VU is busy, the
+achieved rate is pinned at \`max_vus ÷ mean iteration time\` — an identity, not
+a discovery — and the latency distribution is a closed-loop-at-${MAX_VUS} sample.
+A large drop count means the target rate was never actually offered, and the run
+measured **throughput at concurrency ${MAX_VUS}**, not a ceiling. To find the
+ceiling, ladder max_vus (10/20/40/60/80) and watch where throughput stops
+rising; the knee is usually well below the pool size.
+
+Take the steady-state figure from k6.log rather than the whole-run rate above:
+the first minute is warmup (JIT, page cache, and the connection pool growing
+from ${POOL_INIT:-?} to ${POOL:-?} on demand as VUs arrive) and including it
+understates throughput. Quote it with everything on the header lines above.
+
+TLS is NOT in the latency number: handshaking averaged ${TLS_AVG_D} and
+connect+handshake are reported under http_req_blocked (avg ${BLOCKED_AVG_D}),
+which \`http_req_duration\` excludes. Connections are reused across iterations,
+so this is a few dozen handshakes across the whole run — not a per-request cost.
 
 ## What limited it
 Peak CPU, out of ${CPU_FULL}% for the whole box (docker stats: 100% = one core):
@@ -290,12 +351,23 @@ k6 ${PEAK_K6:-?}%  ·  Fineract ${PEAK_FIN:-?}%  ·  Postgres ${PEAK_PG:-?}%
 From Fineract's own metrics, sampled every 5s DURING the run
 (\`fineract-metrics.log\`; "?" means the Prometheus export was off):
 
-peak pool connections active ${PEAK_ACTIVE:-?} of ${POOL:-?}  ·  peak pending threads ${PEAK_PENDING:-?}  ·  GC during run ${GC_SECS:-?}s
+pool: ${OLTP_POOL:-?} (the tenant OLTP pool — the money path, NOT the
+tenants-store pool, which is a separate 10-connection pool serving one
+cached SELECT and is never the constraint)
 
-- **Peak pending is the POOL-BOUND verdict.** Above zero for any sustained
-  period means requests queued for a connection and the plateau is the pool,
-  not Fineract — raise \`tenant_server_connections.pool_max_active\` or keep
-  max_vus (${MAX_VUS}) under it. At zero, the pool is exonerated.
+peak active ${PEAK_ACTIVE:-?} of ${POOL:-?}  ·  peak pending ${PEAK_PENDING:-?}  ·  samples with any thread waiting: ${PENDING_SAMPLES:-?} of ${TOTAL_SAMPLES:-?}  ·  GC during run ${GC_SECS:-?}s
+
+- **Judge POOL-BOUND on the pending-sample COUNT, not the peak.** Peak active
+  and peak pending are independent maxima taken over the whole run — they need
+  never have co-occurred, so "40 active, 14 pending" from bare maxima is not
+  evidence of anything. A handful of samples out of a hundred is a blip; most
+  of them is a queue.
+- **A saturated pool is not automatically the cause.** If Fineract's CPU is
+  also pegged, connections are being HELD while Java burns CPU, and the pool is
+  a symptom — raising \`pool_max_active\` then just adds more threads waiting on
+  the same cores, and costs Postgres backends. Three runs on this cell showed
+  exactly that: 40/40 with threads pending at BOTH 16.6/s and 12.7/s, with
+  Fineract CPU identical. Raise the pool only when Fineract CPU has headroom.
 - **GC seconds against the run's wall-clock is the serialising verdict.** A few
   percent is noise and rules the heap out; a large fraction means raise -Xmx
   before believing any other number here.
@@ -306,16 +378,22 @@ One more that CPU samples cannot decide for you:
   **AND median latency stayed well under 1s**. That second half is not optional.
   The counter is just "response took longer than the 1s retry backoff", so once
   the median itself exceeds 1s it counts nearly every request and means nothing.
-  Note also that each VU owns a DISTINCT account, so same-account collisions are
-  structurally impossible in this test — a high count here with a slow median is
-  a false positive, not evidence of contention.
+  Note also that each VU owns a DISJOINT SLICE of accounts, so two concurrent
+  requests against one account are structurally impossible in this test — a high
+  count here with a slow median is a false positive, not evidence of contention.
 
 ## Caveats that belong in any report of this number
-- Generator ran on the same box as the system under test.
+- Generator ran on the same box as the system under test. Check its CPU above:
+  if k6 is low single digits, it is measurably NOT distorting the result.
 - Per-deposit cost grows with account history (SavingsAccount.java:1008 walks
-  every transaction on the account). This run added $((AFTER - BEFORE)) rows —
-  a repeat on the same accounts will be slower, and that is real.
+  every transaction on the account, on every posting). This run added
+  $((AFTER - BEFORE)) rows across $ACCOUNTS_TOUCHED accounts — about
+  $(( ACCOUNTS_TOUCHED > 0 ? (AFTER - BEFORE) / ACCOUNTS_TOUCHED : 0 )) each — so a
+  repeat on the same accounts WILL be slower, and that is real production
+  behaviour, not a test artifact. Quote the per-account transaction count
+  alongside the TPS or the number is not reproducible.
 - Fineract heap here is whatever 00-discover.sh reported, not a tuned value.
+$SLICE_NOTE
 
 Artifacts: $OUTDIR
 EOF
