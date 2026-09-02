@@ -7,6 +7,9 @@
 #   3. allow the cell currency
 #   4. create the wallet savings product                -> FINERACT_SAVINGS_PRODUCT_ID
 #   4b. create the payment type for wallet movements    -> FINERACT_PAYMENT_TYPE_ID
+#   4c. (optional) register the core-event web hook      CORE_EVENTS_TOKEN
+#   4d. seed the client Constitution / Main Business Line code values (the CBS
+#       console's Entity-client dropdowns)              CLIENT_CONSTITUTIONS etc
 #   5. create TWO least-privilege roles (read / write) after verifying every
 #      permission code exists on this build — never ALL_FUNCTIONS
 #   6. create the two AppUsers the middleware rides     innbucks-mw-read / -write
@@ -27,6 +30,9 @@
 #                         (on a re-run, also accepted as the CURRENT password)
 #   PRODUCT_NAME          default: InnBucks Wallet   PRODUCT_SHORT: IBWL
 #   PAYMENT_TYPE_NAME     default: InnBucks Wallet
+#   CLIENT_CONSTITUTIONS  '|'-separated Constitution values (default: ZW set)
+#   CLIENT_BUSINESS_LINES '|'-separated Main Business Line values (default set)
+#                         Set either to '' to skip seeding that code.
 #   CURL_OPTS             e.g. --cacert cell-ca.crt  (avoid -k outside first-boot checks)
 #   RUN_SMOKE             1 to run the probe sequence (leaves a SMOKE-Probe client behind)
 #
@@ -351,6 +357,67 @@ if [[ -n "${CORE_EVENTS_TOKEN:-}" ]]; then
 else
   log "4c/7 CORE_EVENTS_TOKEN not set — skipping the core-event web hook (teller/admin postings will not SMS customers)"
 fi
+
+# 4d. Client Constitution / Main Business Line code values — the dropdowns the
+# CBS console's Entity ("company") client form needs. Fineract ships both CODES
+# but ZERO values, and it requires constitutionId whenever a client's
+# clientNonPersonDetails block is present (ClientNonPerson's constructor always
+# runs validate()), so on an unseeded cell there is no id the console can
+# legally submit and company details cannot be recorded AT ALL. Verified on the
+# ZW cell 2026-09-02; full contract in docs/client-legal-form-api.md.
+#
+# Deliberately NON-FATAL, unlike the steps above. The middleware creates only
+# PERSON clients, so nothing it does depends on this, and a back-office form
+# section must not be able to fail a cell stand-up. It is loud rather than
+# fatal — the console renders that section disabled with the fix named, and
+# re-running this script IS the fix.
+#
+# The DEFAULT list is ZIMBABWE-shaped ("Private Business Corporation" is a COBE
+# Act entity type). Override it per market: these become
+# m_client_non_person.constitution_cv_id foreign keys, so renaming or dropping
+# one once real companies reference it is a migration, not an edit. Seeding is
+# additive — values already on the cell are left exactly as they are.
+CLIENT_CONSTITUTIONS="${CLIENT_CONSTITUTIONS-Sole Trader|Partnership|Private Business Corporation|Private Limited Company|Public Limited Company|Co-operative Society|Trust|Non-Governmental Organisation}"
+CLIENT_BUSINESS_LINES="${CLIENT_BUSINESS_LINES-Agriculture|Mining|Manufacturing|Construction|Retail Trade|Wholesale Trade|Transport and Logistics|Hospitality and Tourism|Financial Services|Professional Services|Education|Health|Information and Communication Technology|Other}"
+
+seed_code_values() { # CODE_NAME PIPE_SEPARATED_VALUES
+  local code_name="$1" values="$2"
+  local code_id existing resp v created=0 present=0 pos=0
+  [[ -n "$values" ]] || { log "  ${code_name}: no values configured — skipped"; return 0; }
+  code_id=$(api GET "/v1/codes" | jq -r --arg n "$code_name" \
+    '[.[]? | select(.name? == $n)] | .[0].id // empty') || return 1
+  if [[ -z "$code_id" ]]; then
+    log "  WARN: no code named '${code_name}' on this build — skipped"
+    return 0
+  fi
+  existing=$(api GET "/v1/codes/${code_id}/codevalues" | jq -r '.[]?.name // empty') || return 1
+  while IFS= read -r v; do
+    [[ -n "$v" ]] || continue
+    pos=$((pos + 1))
+    if grep -qxF -- "$v" <<<"$existing"; then present=$((present + 1)); continue; fi
+    resp=$(api POST "/v1/codes/${code_id}/codevalues" \
+      "$(jq -n --arg n "$v" --argjson p "$pos" '{name:$n, position:$p, isActive:true}')") || {
+        log "  WARN: '${code_name}' value '${v}' was rejected — check the CREATE_CODEVALUE permission"
+        continue
+      }
+    # A 2xx with no resourceId is maker-checker parking the command and rolling
+    # it back — success-SHAPED, but nothing was written. Same trap as the smoke
+    # step's client create.
+    if [[ -z "$(jq -r '.resourceId // empty' <<<"$resp")" ]]; then
+      log "  WARN: '${v}' returned 2xx with no resourceId — maker-checker parked it, nothing written"
+      continue
+    fi
+    created=$((created + 1))
+  done < <(tr '|' '\n' <<<"$values")
+  log "  ${code_name} (code id=${code_id}): ${created} created, ${present} already present"
+}
+
+log "4d/7 seeding client Constitution / Main Business Line code values ..."
+log "  (defaults are ZIMBABWE-shaped — override per market with CLIENT_CONSTITUTIONS / CLIENT_BUSINESS_LINES)"
+seed_code_values "Constitution" "$CLIENT_CONSTITUTIONS" \
+  || log "  WARN: Constitution seeding failed — the console's Entity company-details section stays unavailable"
+seed_code_values "Main Business Line" "$CLIENT_BUSINESS_LINES" \
+  || log "  WARN: Main Business Line seeding failed (that field is optional — Entity clients still work)"
 
 log "5/7 ensuring least-privilege roles ..."
 AVAILABLE=$(api GET "/v1/permissions" | jq -r '.[].code')

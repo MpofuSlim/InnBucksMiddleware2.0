@@ -148,8 +148,10 @@ populated under Admin → System → Manage Codes.
 > otherwise the first person to open the console on a new environment gets a
 > form that 400s.
 >
-> To populate a cell: `GET /v1/codes` to find the id of the code named
-> `Constitution` (24 on ZW) or `Main Business Line` (25), then
+> Populating a cell is a BE/ops task, not yours: `provision-cell.sh` step 4d
+> seeds both codes, so a cell provisioned from now on arrives with the
+> dropdowns filled. By hand it is `GET /v1/codes` to find the id of the code
+> named `Constitution` (24 on ZW) or `Main Business Line` (25), then
 > `POST /v1/codes/{codeId}/codevalues` per value with `{"name", "position",
 > "isActive"}` — that body's whitelist is strict (`name`, `position`,
 > `description`, `isActive`, `isMandatory`). Note the **code** ids and the
