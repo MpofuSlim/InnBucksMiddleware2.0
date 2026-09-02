@@ -130,9 +130,14 @@ fi
 
 cat <<'EOF'
 
-NOTE: the middleware's audit chain seals each row against its predecessor. A
-restore rewinds that chain to a consistent earlier point, which is fine — but
-the nightly AuditIntegrityVerifier compares against what it last saw, so expect
-one chain-break ticket after a restore. That alert is EXPECTED here and is not
-evidence of tampering.
+NOTE: the middleware's audit chain seals each row against its predecessor, and a
+restore rewinds the rows AND the audit_chain_head pointer together. The nightly
+AuditIntegrityVerifier recomputes the whole chain from the database with no
+external checkpoint, so it will report "verified clean" as normal.
+
+So do NOT expect, or dismiss, a chain-break ticket after this restore. If one
+fires, it is a REAL finding: the likeliest cause is a backup whose audit_event
+and audit_chain_head were captured at different moments (backup-cell.sh stops
+the app containers to prevent exactly that), or an AUDIT_HMAC_SECRET that no
+longer matches the one the rows were sealed with.
 EOF

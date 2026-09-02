@@ -711,13 +711,18 @@ commands, with the exact bytes that were running before. Full procedure
    and replay already triggers whole-family revocation).
 
    **Still open from the same audit, in priority order** — the first three are
-   deployment settings, not code, and every one of them is exploitable today:
-   (1) `RATE_LIMIT_TRUST_FORWARDED_FOR` / `RATE_LIMIT_TRUSTED_PROXY_COUNT` are
-   still at their defaults (`false` / `0`) on the cell, so per-IP limits either
-   collapse every user into one bucket or key on a client-spoofable header;
-   correct values behind Cloudflare + nginx are `true` / `2`. (2) The origin's
+   deployment settings, not code:
+   (1) **DONE on the ZW cell** — `RATE_LIMIT_TRUST_FORWARDED_FOR` /
+   `RATE_LIMIT_TRUSTED_PROXY_COUNT` are now `true` / `2`, confirmed by the boot
+   line `Rate limiting resolves the client IP from X-Forwarded-For counting 2
+   trusted proxy hop(s) from the right` (2026-09-02). **This is configured, not
+   yet sound** — that same log line ends "sound ONLY while the origin refuses
+   direct traffic", and (2) below is still open, so a spoofed XFF chain still
+   defeats it. Re-verify the boot line after any cell that has not been rolled
+   since; the ZW value does not travel to other cells. (2) The origin's
    443 is open to the world, so an attacker who finds it skips Cloudflare and
-   forges the whole XFF chain — which makes (1) decorative until fixed. (3)
+   forges the whole XFF chain — which is what still makes (1) decorative, and
+   is now the top item rather than the second. (3)
    `/fineract-provider/**` answers from the public internet. (4) **No rate
    limit on `/transactions/*`** — a stolen token can fire movements as fast as
    the core accepts them, and repeated transfers just under the step-up
@@ -776,9 +781,25 @@ Backups are VERIFIED, not assumed — gzip integrity, non-trivial size, and each
 dump must actually mention a table it should. `row-counts-before.txt` is the
 baseline the restore diffs against to prove it came back clean.
 
-**A restore trips an audit chain-break ticket, and that is expected.** The chain
-seals each row against its predecessor, so rewinding to an earlier point is
-internally consistent but will not match what `AuditIntegrityVerifier` last saw.
+**A clean restore does NOT trip an audit chain-break, and a break after one is a
+REAL finding — investigate it.** (This paragraph previously said the opposite.
+It was wrong, and a doc that says "this alert is expected" is worse than no doc:
+it trains an operator to dismiss the one signal the chain exists to raise.)
+
+`AuditIntegrityVerifier` holds **no external checkpoint**. It walks `audit_event`
+oldest-first straight out of the database, recomputes every `row_hmac` and
+`chain_hmac`, and compares the final link against `audit_chain_head` — which
+lives in that same database. A restore rewinds the rows and the head pointer
+together, so the recomputation still joins up and the verifier reports clean.
+Confirmed on the ZW cell: a restore on 2026-08-27 was followed by seven
+consecutive nightly runs of `Audit chain verified clean: 186 row(s)`.
+
+The one restore-shaped way to break it is a backup whose `audit_event` and
+`audit_chain_head` were captured at different moments — which is exactly why
+`backup-cell.sh` stops the app containers before dumping. A break after a
+restore therefore points at the backup being torn, not at the restore being
+normal. Rotating `AUDIT_HMAC_SECRET` is the other benign cause, and it is
+benign only if you actually rotated it.
 
 Deferred (documented, not forgotten): KMS/Secrets Manager custody + rotation
 runbook; per-customer namespacing of inbound Idempotency-Keys
