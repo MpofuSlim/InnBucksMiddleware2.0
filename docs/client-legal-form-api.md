@@ -143,7 +143,7 @@ populated under Admin → System → Manage Codes.
 >
 > **This was the live case on the ZW cell, and is the default on any fresh
 > one.** Both lists came back `[]` there until 2026-09-02, when the codes were
-> populated with 8 and 14 values (listed below). A newly provisioned cell ships
+> populated with the 8 and 14 values tabled above. A newly provisioned cell ships
 > with the two codes present but **empty**, so still build the disabled state —
 > otherwise the first person to open the console on a new environment gets a
 > form that 400s.
