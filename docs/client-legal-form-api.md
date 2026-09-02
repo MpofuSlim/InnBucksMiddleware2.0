@@ -119,6 +119,12 @@ populated under Admin → System → Manage Codes.
 >
 > `mainBusinessLineId` is genuinely optional and can stay hidden when its list
 > is empty.
+>
+> **On the ZW cell this is the live case, not a hypothetical**: as of
+> 2026-09-02 both `clientNonPersonConstitutionOptions` and
+> `clientNonPersonMainBusinessLineOptions` come back `[]`. Build the disabled
+> state first — it is what the environment will actually render until an
+> admin populates the codes.
 
 ---
 
