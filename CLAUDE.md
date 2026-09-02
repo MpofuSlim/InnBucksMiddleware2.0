@@ -308,6 +308,20 @@ no `m_client_non_person` row. Entity needs `fullname` INSTEAD of the name parts
 block, and `legalFormId` is asymmetric: sent as an integer, read back as a
 `legalForm` OBJECT.
 
+**`docs/running-reports-api.md`** covers `GET /v1/runreports/{name}` for the same
+console, and carries a finding that applies FAR beyond reports: **a 403 from
+Fineract does NOT mean "not authorised."** `PlatformDataIntegrityExceptionMapper:52`
+and `PlatformDomainRuleExceptionMapper:53` both map to `Status.FORBIDDEN`, so a
+SQL failure and a business-rule veto are indistinguishable from a real permission
+denial by status alone — read `errors[].userMessageGlobalisationCode` from the
+body instead. (This is why `FineractErrorMapper` already splits Fineract's 403
+into `CoreClientException` for domain vetoes vs auth; the same care is owed
+anywhere else a 403 is interpreted.) Report parameters ride a `R_<variable>`
+prefix that `AbstractReportingProcessService:36-47` strips — anything unprefixed
+is silently ignored — and `ReportParameterData` does NOT expose
+`parameter_variable`, so the name→variable map has to come from
+`stretchy_parameter`.
+
 ## Tests
 
 * Unit tests live beside their classes in `middleware-core` /
