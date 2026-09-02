@@ -296,6 +296,18 @@ written as strings but read back as `[y, m, d]` arrays, "future" is measured
 against Fineract's BUSINESS date, and a maker-checker-parked command returns a
 success-shaped 200 with `rollbackTransaction: true` and no `resourceId`.
 
+**`docs/client-legal-form-api.md`** does the same for `POST /v1/clients` and the
+Person/Entity split, for the same console and under the same
+don't-route-it-through-here rule (the middleware only ever creates PERSON
+clients, for individual mobile customers). The finding worth knowing even if you
+never touch that screen: Fineract's name validation is **NOT keyed on
+`legalFormId`**, so `firstname`+`lastname` with `legalFormId: 2` is **accepted**
+— 200, no error, a company silently written into the person-shaped columns with
+no `m_client_non_person` row. Entity needs `fullname` INSTEAD of the name parts
+(the two are mutually exclusive) plus the optional `clientNonPersonDetails`
+block, and `legalFormId` is asymmetric: sent as an integer, read back as a
+`legalForm` OBJECT.
+
 ## Tests
 
 * Unit tests live beside their classes in `middleware-core` /
