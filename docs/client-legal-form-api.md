@@ -89,11 +89,32 @@ except by editing the record — and that repair has its own trap, below.
     { "id": 1, "code": "legalFormType.person", "value": "Person" },
     { "id": 2, "code": "legalFormType.entity", "value": "Entity" }
   ],
-  "clientNonPersonConstitutionOptions":     [ { "id": 12, "name": "Private Company" } ],
-  "clientNonPersonMainBusinessLineOptions": [ { "id": 21, "name": "Retail Trade" } ],
+  "clientNonPersonConstitutionOptions":     [ { "id": 28, "name": "Private Limited Company" } ],
+  "clientNonPersonMainBusinessLineOptions": [ { "id": 37, "name": "Retail Trade" } ],
   "officeOptions": [ … ], "staffOptions": [ … ]
 }
 ```
+
+The ZW cell's actual values, as provisioned 2026-09-02 — use these for fixtures,
+but **read them from the template at runtime**, never hard-code them: they are
+per-cell and a different environment will assign different ids.
+
+| Constitution | | Main Business Line | |
+|---|---|---|---|
+| 25 | Sole Trader | 33 | Agriculture |
+| 26 | Partnership | 34 | Mining |
+| 27 | Private Business Corporation | 35 | Manufacturing |
+| 28 | Private Limited Company | 36 | Construction |
+| 29 | Public Limited Company | 37 | Retail Trade |
+| 30 | Co-operative Society | 38 | Wholesale Trade |
+| 31 | Trust | 39 | Transport and Logistics |
+| 32 | Non-Governmental Organisation | 40 | Hospitality and Tourism |
+| | | 41 | Financial Services |
+| | | 42 | Professional Services |
+| | | 43 | Education |
+| | | 44 | Health |
+| | | 45 | Information and Communication Technology |
+| | | 46 | Other |
 
 Drive the Legal Form dropdown from `clientLegalFormOptions` rather than
 hard-coding "Person"/"Entity" — the ids are what the API wants and they come
@@ -122,10 +143,18 @@ populated under Admin → System → Manage Codes.
 >
 > **This was the live case on the ZW cell, and is the default on any fresh
 > one.** Both lists came back `[]` there until 2026-09-02, when the codes were
-> populated (`Constitution` = code id 24, `Main Business Line` = 25; 8 and 14
-> values respectively). A newly provisioned cell ships with the two codes
-> present but **empty**, so still build the disabled state — otherwise the
-> first person to open the console on a new environment gets a form that 400s.
+> populated with 8 and 14 values (listed below). A newly provisioned cell ships
+> with the two codes present but **empty**, so still build the disabled state —
+> otherwise the first person to open the console on a new environment gets a
+> form that 400s.
+>
+> To populate a cell: `GET /v1/codes` to find the id of the code named
+> `Constitution` (24 on ZW) or `Main Business Line` (25), then
+> `POST /v1/codes/{codeId}/codevalues` per value with `{"name", "position",
+> "isActive"}` — that body's whitelist is strict (`name`, `position`,
+> `description`, `isActive`, `isMandatory`). Note the **code** ids and the
+> **code-value** ids are separate sequences and happen to overlap here: code 25
+> is `Main Business Line`, code *value* 25 is `Sole Trader`.
 
 ---
 
@@ -162,10 +191,10 @@ Both are `POST /v1/clients` with `Fineract-Platform-TenantId: default`.
   "active": true,
   "activationDate": "2026-09-02",
   "clientNonPersonDetails": {
-    "constitutionId": 12,
+    "constitutionId": 28,
     "incorpNumber": "12345/2024",
     "incorpValidityTillDate": "2030-12-31",
-    "mainBusinessLineId": 21,
+    "mainBusinessLineId": 37,
     "remarks": "Registered with the Companies Office",
     "locale": "en",
     "dateFormat": "yyyy-MM-dd"
