@@ -11,16 +11,27 @@
 # blocks publication rather than reporting after the fact.
 
 # ---------------------------------------------------------------------------
-# Alpine 3.23 — NO FIX AVAILABLE IN THE PINNED BRANCH.
+# STALE-BRANCH WARNING (2026-09-02): the entries below were written against
+# Alpine 3.23 with libexpat 2.8.1-r0 / p11-kit 0.25.5-r2. The base image has
+# since moved — eclipse-temurin:21-jre-alpine now ships **Alpine 3.24.1 with
+# libexpat 2.8.3-r0** — which is exactly the base-image bump the original note
+# named as the exit condition for deleting these.
 #
-# Trivy reports a "fixed version" for these, which is why --ignore-unfixed does
-# not drop them, but that fix lands in a LATER Alpine branch. Verified against
-# the base image:
-#     apk policy libexpat p11-kit
-#     libexpat: 2.8.1-r0 (only)     p11-kit: 0.25.5-r2 (only)
-# There is nothing to upgrade to; the exit is a base-image bump when
-# eclipse-temurin ships a 3.24-based 21-jre-alpine, which is also when these
-# waivers should be deleted rather than renewed.
+# They are RENEWED rather than deleted only because deletion is unverified from
+# here: a waiver for an already-fixed CVE is inert, but deleting one that is
+# still live turns the Release gate red on the next merge. Settle it with one
+# command against the CURRENT base and delete whatever no longer applies:
+#
+#     docker run --rm eclipse-temurin:21-jre-alpine \
+#       sh -c 'apk update >/dev/null 2>&1; apk policy libexpat p11-kit'
+#
+# Expectation: the two libexpat entries are superseded by 2.8.3-r0 and should
+# go; p11-kit is unknown and needs the output above before anyone touches it.
+#
+# NOTE these are NOT the CVEs that failed the gate on 2026-09-02 — those were
+# CVE-2026-66046 / CVE-2026-76641 against 2.8.3-r0, which have a fix IN branch
+# (2.8.4-r0) and were therefore fixed by bumping ALPINE_SECURITY_REFRESH in the
+# Dockerfile, not waived. Waiving a fixable CVE is what the rules above forbid.
 #
 # owner: mpofuslim
 # review by: 2026-10-31
