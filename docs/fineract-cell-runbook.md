@@ -144,6 +144,10 @@ export CURL_OPTS="--cacert ssl/cell-ca.crt"
 # value in the middleware .env as FINERACT_CORE_EVENTS_TOKEN (it is the
 # webhook's auth, carried in the URL over the private cell network).
 export CORE_EVENTS_TOKEN="$(openssl rand -hex 32)"
+# Optional: the CBS console's Entity ("company") client dropdowns. The defaults
+# are ZIMBABWE-shaped — set these per market, or to '' to skip. See below.
+# export CLIENT_CONSTITUTIONS="Sole Trader|Partnership|…"
+# export CLIENT_BUSINESS_LINES="Agriculture|Mining|…"
 RUN_SMOKE=1 ./provision-cell.sh
 ```
 
@@ -163,6 +167,29 @@ sequence (client → wallet create/approve/activate → deposit → read-back by
 external id) using the new middleware credentials. It prints the values the
 middleware's `.env` needs. **Store the rotated admin password in your
 password manager** — it is the break-glass credential for this cell.
+
+### Client Constitution / Main Business Line code values (step 4d)
+
+Fineract ships the two **codes** the Entity-client form reads but **zero
+values**, and it rejects any `clientNonPersonDetails` block with no
+`constitutionId` — so on an unseeded cell the CBS console's Company Details
+section cannot be used at all (contract in
+[`client-legal-form-api.md`](client-legal-form-api.md)). Step 4d seeds them.
+
+- **The defaults are Zimbabwe-shaped** — `Private Business Corporation` is a
+  COBE Act entity type. Set `CLIENT_CONSTITUTIONS` / `CLIENT_BUSINESS_LINES`
+  (`|`-separated) for any other market, or `''` to skip and let an admin add
+  them under Admin → System → Manage Codes.
+- **Get the constitution list signed off before a cell serves real companies.**
+  Each value becomes a `m_client_non_person.constitution_cv_id` foreign key, so
+  renaming or dropping one afterwards is a migration, not an edit. Seeding is
+  additive and never touches values already on the cell.
+- **This step is deliberately non-fatal.** The middleware creates only PERSON
+  clients, so nothing it does depends on these; a back-office form section must
+  not be able to fail a cell stand-up. Failures print `WARN` lines naming the
+  cause (missing `CREATE_CODEVALUE`, or maker-checker parking the writes — a
+  success-shaped 2xx with no `resourceId`), and re-running the script is the
+  fix.
 
 If step 1 reports that Fineract rejected the credentials, that is a password
 problem and waiting will not fix it — on a re-run, `ADMIN_PASSWORD` must be

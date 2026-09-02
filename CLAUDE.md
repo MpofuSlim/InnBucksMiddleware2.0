@@ -539,8 +539,13 @@ commands, with the exact bytes that were running before. Full procedure
    root compose's middleware service also joins), `provision-cell.sh`
    (idempotent: admin rotation, cell currency, zero-interest wallet savings
    product, TWO least-privilege roles/AppUsers with permission codes
-   verified against the build, optional smoke driving the adapter's exact
-   call sequence), and **`docs/fineract-cell-runbook.md`** — THE procedure
+   verified against the build, client Constitution / Main Business Line code
+   values for the CBS console's Entity form — step 4d, NON-fatal because the
+   middleware creates only PERSON clients and a back-office dropdown must not
+   fail a cell stand-up, and its defaults are ZW-shaped so set
+   `CLIENT_CONSTITUTIONS`/`CLIENT_BUSINESS_LINES` per market — optional smoke
+   driving the adapter's exact call sequence), and
+   **`docs/fineract-cell-runbook.md`** — THE procedure
    for standing up/upgrading a cell (incl. the internal-CA TLS recipe and
    the middleware truststore wiring; `deploy/fineract/ssl/` is gitignored).
    Remaining is purely operator work on the box: run the runbook.
