@@ -48,11 +48,20 @@ FROM eclipse-temurin:21-jre-alpine AS runtime
 #      invariant belongs at the boundary that can't be skipped.
 #
 # Asserted floors — only for CVEs whose fix EXISTS in the pinned branch. An
-# assertion for a version Alpine 3.23 does not carry would fail every build
+# assertion for a version the branch does not carry would fail every build
 # forever; see .trivyignore for the ones that need a base-image move instead.
+# Verify with `apk policy <pkg>` against the CURRENT base before adding one.
 #   CVE-2026-45447 (HIGH) — libssl3/libcrypto3/openssl PKCS#7 / S/MIME
 #     signed-message handling; fixed in 3.5.7-r0.
-ARG ALPINE_SECURITY_REFRESH=2026-07-31-blanket-upgrade
+#
+# BUMP THE DATE BELOW WHENEVER TRIVY REPORTS A FIXED-IN-BRANCH CVE. That is not
+# bookkeeping — it is the fix. 2026-09-02: the Release gate failed on libexpat
+# CVE-2026-66046 + CVE-2026-76641 (installed 2.8.3-r0, fixed 2.8.4-r0) while
+# this RUN layer was cache-served from a build that predated the advisory, so
+# the blanket upgrade never re-ran against the refreshed index. The base image
+# had not changed, so nothing else busted the cache. Same shape as the failure
+# this ARG was introduced for.
+ARG ALPINE_SECURITY_REFRESH=2026-09-02-libexpat-cve-2026-66046
 RUN echo "Security refresh: $ALPINE_SECURITY_REFRESH" \
  && apk update \
  && apk --no-cache upgrade \
