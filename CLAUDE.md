@@ -283,6 +283,19 @@ the upstream service** — it stays green while production 500s. Every stub
 either transcribes a real response or matches a serializer read out of the
 fork; say which, in the test.
 
+**`docs/savings-account-approval-api.md`** applies all of the above to the
+savings lifecycle (`?command=approve|activate|reject|withdrawnByApplicant|
+undoapproval`) for the **CBS back-office console**, which talks to Fineract
+DIRECTLY and must keep doing so — this middleware has no admin surface, and
+routing an operator action through it would put a customer-scoped JWT in front
+of a back-office decision. Do not add approval endpoints here to serve that
+screen. The doc is field-verified: per-command parameter whitelists are STRICT
+(`checkForUnsupportedParameters` 400s on any extra key, and `activate` uniquely
+rejects `note` while `undoapproval` rejects `locale`/`dateFormat`), dates are
+written as strings but read back as `[y, m, d]` arrays, "future" is measured
+against Fineract's BUSINESS date, and a maker-checker-parked command returns a
+success-shaped 200 with `rollbackTransaction: true` and no `resourceId`.
+
 ## Tests
 
 * Unit tests live beside their classes in `middleware-core` /
