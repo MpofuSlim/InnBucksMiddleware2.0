@@ -306,7 +306,16 @@ never touch that screen: Fineract's name validation is **NOT keyed on
 no `m_client_non_person` row. Entity needs `fullname` INSTEAD of the name parts
 (the two are mutually exclusive) plus the optional `clientNonPersonDetails`
 block, and `legalFormId` is asymmetric: sent as an integer, read back as a
-`legalForm` OBJECT.
+`legalForm` OBJECT. Two more, measured on the cell 2026-09-02 (an earlier
+revision of the doc said `clientNonPersonDetails` was all-optional — it is not):
+the block is optional but **`constitutionId` is required whenever it is sent**
+(the `ClientNonPerson` constructor always validates), so a cell with no
+`Constitution` code values cannot record company details at all; and **on
+UPDATE the block is silently discarded unless the body also carries
+`legalFormId: 2`** — a clean 200 whose `changes` names only the other fields —
+because the create-when-absent branch reads the legal form from the request,
+not from the stored row. Same silent-write family as the finding above, one
+verb along.
 
 **`docs/running-reports-api.md`** covers `GET /v1/runreports/{name}` for the same
 console, and carries a finding that applies FAR beyond reports: **a 403 from
