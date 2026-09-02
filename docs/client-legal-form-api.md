@@ -120,11 +120,12 @@ populated under Admin → System → Manage Codes.
 > `mainBusinessLineId` is genuinely optional and can stay hidden when its list
 > is empty.
 >
-> **On the ZW cell this is the live case, not a hypothetical**: as of
-> 2026-09-02 both `clientNonPersonConstitutionOptions` and
-> `clientNonPersonMainBusinessLineOptions` come back `[]`. Build the disabled
-> state first — it is what the environment will actually render until an
-> admin populates the codes.
+> **This was the live case on the ZW cell, and is the default on any fresh
+> one.** Both lists came back `[]` there until 2026-09-02, when the codes were
+> populated (`Constitution` = code id 24, `Main Business Line` = 25; 8 and 14
+> values respectively). A newly provisioned cell ships with the two codes
+> present but **empty**, so still build the disabled state — otherwise the
+> first person to open the console on a new environment gets a form that 400s.
 
 ---
 
