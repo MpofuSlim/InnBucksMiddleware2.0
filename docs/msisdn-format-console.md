@@ -56,9 +56,11 @@ A number with a letter in it is user error or something worse, and quietly
 deleting characters turns a typo into a plausible-looking wrong number.
 
 **Only mobile prefixes are valid** — `71` NetOne, `73` Telecel, `77` and `78`
-Econet. Landlines and short codes are rejected, because these numbers exist to
-receive OTPs and step-up approvals; a landline is a customer record that can
-never complete an app registration.
+Econet. That list is exhaustive and confirmed (2026-09-03); anything else,
+including `72`, is not an allocated ZW mobile range. Landlines and short codes
+are rejected too, because these numbers exist to receive OTPs and step-up
+approvals; a landline is a customer record that can never complete an app
+registration.
 
 ### Reference implementation
 
@@ -139,12 +141,15 @@ Deliberately narrow: it only touches numbers that are unambiguously a local-form
 valid mobile. Anything else stays untouched for a human to look at.
 
 > [!NOTE]
-> **`0723739370` (client "Test Tadiwa rade Paka") does not convert** — prefix
-> `72` is not in the backend's allowed set, so the middleware would reject that
-> number outright. The client name suggests test data, in which case it is
-> noise. But if `072` is genuinely allocated to a Zimbabwean mobile operator,
-> then `ZimbabweMsisdnNormalizer` has a gap and that is a backend fix, not a
-> console one. Worth settling either way before the backfill.
+> **`0723739370` (client "Test Tadiwa rade Paka") is deliberately left behind**
+> by that `UPDATE` — prefix `72` is not allocated to a Zimbabwean mobile
+> operator (confirmed 2026-09-03), so there is no correct `+263` form to
+> convert it to. The row is test data; delete it or leave it, but do not
+> "repair" it into a number that was never real.
+>
+> This was checked as a possible backend gap and is not one:
+> `ZimbabweMsisdnNormalizer`'s prefix set is right, and the middleware is
+> correct to reject that number on registration and login.
 
 ---
 
