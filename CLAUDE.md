@@ -284,12 +284,16 @@ either transcribes a real response or matches a serializer read out of the
 fork; say which, in the test.
 
 > [!IMPORTANT]
-> **Every FE-facing doc under `docs/` is ALSO pasted in full into the chat, not
-> just committed and linked from a PR.** The operator forwards these to the
-> frontend dev directly; a PR link is an extra hop they have to open, copy out
-> of, and reformat. Commit it for the repo record AND paste the whole markdown
-> in the reply. Same for a doc you have only revised — paste the new version,
-> not a diff summary.
+> **An FE-facing doc is delivered IN THE CHAT — not committed, and never as a
+> PR** (operator's decision, 2026-09-03). They forward these to the frontend
+> dev directly, so a PR is pure ceremony: a link to open, copy out of and
+> reformat. Write the markdown and paste it whole in the reply. Same for a
+> revision — paste the new version in full, not a diff summary.
+>
+> The four console docs listed below predate that decision and stay as
+> reference — their findings are worth keeping and are cited from here. Do not
+> add to the set, and do not open a PR to revise one: put the revised markdown
+> in the chat.
 
 **`docs/savings-account-approval-api.md`** applies all of the above to the
 savings lifecycle (`?command=approve|activate|reject|withdrawnByApplicant|
