@@ -2,12 +2,47 @@
 
 **The client list currently mixes `0777112356` and `+263777777777`.** Fineract's
 `mobileNo` is a free-text `VARCHAR` with no validation and no normalisation, so
-whatever the console sends is exactly what is stored and shown. Nothing
-server-side will tidy this up for you.
+whatever the console sends is exactly what is stored and shown.
 
 The rule you should apply already exists in the backend — mirror it rather than
 inventing one. Source:
 `middleware-core/.../common/msisdn/ZimbabweMsisdnNormalizer.java`.
+
+---
+
+## Why this lands on the console and not on a server
+
+The obvious question first, because it changes how carefully you need to build
+this: **nothing server-side will refuse a badly formatted number.** That is not
+an oversight to route around — it is the actual state of the two backends in
+play, and it makes the console the only guard.
+
+**Fineract does not validate `mobileNo`.** Its entire rule is
+`notExceedingLengthOf(50)` (`ClientDataValidator.java:164-168`). No format
+check, no per-tenant toggle, nothing configurable. `0723739370` is ten
+characters, so it is accepted, stored and displayed exactly as typed.
+
+**The middleware has the rule but is not in this call.** `ZimbabweMsisdnNormalizer`
+guards registration, login, OTP and recipient lookup — every path the *mobile
+app* takes. The console posts straight to Fineract, so none of that code runs.
+"The backend" for this screen is Fineract, and Fineract has no opinion on phone
+numbers.
+
+**Nothing reads the value back, either.** The middleware writes `mobileNo` once
+when it creates a client and never reads it again — `CustomerProfile` does not
+even carry a phone field, and recipient lookup keys on the middleware's own
+`customer` table. So a wrong number here is back-office metadata that reads and
+searches badly; it is not something the system makes decisions on.
+
+That last point is why front-end validation is an acceptable answer here rather
+than a compromise. Be clear-eyed that it **is** bypassable — anyone with the
+admin credential and `curl`, or the bulk-import spreadsheet, writes whatever
+they like. We are accepting that because the field is not load-bearing.
+
+> [!IMPORTANT]
+> **If `mobileNo` ever becomes something the system reads rather than displays,
+> this answer stops holding** and the rule has to move server-side. Flag it
+> rather than assuming the console can keep carrying it alone.
 
 ---
 
@@ -18,12 +53,9 @@ row stored as `0777112356`, and vice-versa. Same human, same number, two
 spellings, and the console has no way to know they are the same. That is the
 concrete operational cost — not the ragged column.
 
-**It is NOT breaking money movement.** Recipient lookup resolves against the
-middleware's own `customer` table using an already-normalised MSISDN
-(`RecipientLookupService:103-107`), never against Fineract's `mobileNo`. So a
-badly formatted number in Fineract is back-office metadata that reads wrong and
-searches wrong — transfers are unaffected. Fix it for hygiene and search, not
-because anything is currently failing.
+**Nothing is currently failing**, per the section above — transfers don't touch
+this field. So this is worth doing for search and hygiene, not as an incident
+fix. Size the work accordingly.
 
 ---
 
@@ -175,3 +207,5 @@ records the app can never match. Copy the rule; don't fork it.
 | Registration normalises before writing to the core | `RegisterService.java:77` |
 | Recipient lookup keys on our `customer` table, not Fineract's `mobileNo` | `RecipientLookupService.java:103-107` |
 | `mobileNo` sent to Fineract verbatim | `FineractClient.java:164-170` |
+| Fineract's only `mobileNo` rule is a 50-char length cap | `ClientDataValidator.java:164-168` |
+| The middleware writes `mobileNo` and never reads it back | `FineractClient.java:164-170`, `CustomerProfile.java` |
