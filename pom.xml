@@ -29,16 +29,27 @@
              Needed at runtime by Spring Security's Argon2PasswordEncoder (PinHasher). -->
         <bouncycastle.version>1.85.2</bouncycastle.version>
         <testcontainers.version>1.20.4</testcontainers.version>
-        <!-- Spring Boot 4.0.6 bundles Tomcat 11.0.21 which carries 6 outstanding
-             CVEs (3 CRITICAL, 3 HIGH); 11.0.22 is the fix-line. We override
-             rather than bumping Spring Boot to avoid pulling in the rest of a
-             managed-version bump as a side effect. Re-test on the next Spring
-             Boot upgrade — if the BOM's Tomcat catches up, this override can go. -->
-        <tomcat.version>11.0.22</tomcat.version>
-        <!-- Postgres JDBC: 42.7.10 had CVE-2026-42198 (HIGH) — client-side DoS via
-             malicious SCRAM-SHA-256 response. 42.7.11 fixes it. Same rationale as
-             the Tomcat override: pin here, drop when the Boot BOM catches up. -->
-        <postgresql.version>42.7.12</postgresql.version>
+        <!-- Tomcat: Spring Boot 4.1.1's BOM manages 11.0.24, which carries three
+             CRITICAL auth/access-control bypasses — CVE-2026-65182 (security
+             constraint bypass), CVE-2026-65905 (DIGEST replay) and CVE-2026-68525
+             (FORM authentication bypass). 11.0.25 is the fix line.
+
+             THIS OVERRIDE MUST BE >= THE BOM'S VALUE, and nothing enforces that.
+             It sat at 11.0.22 while the BOM moved 11.0.21 to 11.0.24 underneath
+             it, so a pin written to RAISE the version was silently LOWERING it —
+             the Release Trivy gate is what caught it, three CRITICALs later.
+
+             On every Spring Boot bump, read the BOM's own value and either raise
+             this to match or delete the override outright once the BOM is at or
+             past the fix line. Note help:evaluate is NO USE here — it reports the
+             effective value, i.e. this override. Read the parent directly:
+               V=4.1.1; curl -s "https://repo1.maven.org/maven2/org/springframework/boot/spring-boot-dependencies/$V/spring-boot-dependencies-$V.pom" | grep tomcat.version -->
+        <tomcat.version>11.0.25</tomcat.version>
+        <!-- Postgres JDBC override REMOVED (was 42.7.12). It existed for
+             CVE-2026-42198 (HIGH, client-side DoS via a malicious SCRAM-SHA-256
+             response), fixed in 42.7.11; Spring Boot 4.1.1's BOM now manages
+             42.7.13, so the pin had become the same silent downgrade as the Tomcat
+             one above. Its own comment named this as the exit condition. -->
         <!-- Bucket4j: token-bucket rate limiting on the public auth surface.
              Not managed by the Spring Boot BOM, so pin explicitly. -->
         <bucket4j.version>8.10.1</bucket4j.version>
