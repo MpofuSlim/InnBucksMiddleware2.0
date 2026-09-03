@@ -283,6 +283,14 @@ the upstream service** — it stays green while production 500s. Every stub
 either transcribes a real response or matches a serializer read out of the
 fork; say which, in the test.
 
+> [!IMPORTANT]
+> **Every FE-facing doc under `docs/` is ALSO pasted in full into the chat, not
+> just committed and linked from a PR.** The operator forwards these to the
+> frontend dev directly; a PR link is an extra hop they have to open, copy out
+> of, and reformat. Commit it for the repo record AND paste the whole markdown
+> in the reply. Same for a doc you have only revised — paste the new version,
+> not a diff summary.
+
 **`docs/savings-account-approval-api.md`** applies all of the above to the
 savings lifecycle (`?command=approve|activate|reject|withdrawnByApplicant|
 undoapproval`) for the **CBS back-office console**, which talks to Fineract
