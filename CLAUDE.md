@@ -283,6 +283,14 @@ the upstream service** — it stays green while production 500s. Every stub
 either transcribes a real response or matches a serializer read out of the
 fork; say which, in the test.
 
+> [!IMPORTANT]
+> **Every FE-facing doc under `docs/` is ALSO pasted in full into the chat, not
+> just committed and linked from a PR.** The operator forwards these to the
+> frontend dev directly; a PR link is an extra hop they have to open, copy out
+> of, and reformat. Commit it for the repo record AND paste the whole markdown
+> in the reply. Same for a doc you have only revised — paste the new version,
+> not a diff summary.
+
 **`docs/savings-account-approval-api.md`** applies all of the above to the
 savings lifecycle (`?command=approve|activate|reject|withdrawnByApplicant|
 undoapproval`) for the **CBS back-office console**, which talks to Fineract
@@ -330,6 +338,22 @@ prefix that `AbstractReportingProcessService:36-47` strips — anything unprefix
 is silently ignored — and `ReportParameterData` does NOT expose
 `parameter_variable`, so the name→variable map has to come from
 `stretchy_parameter`.
+
+**`docs/msisdn-format-console.md`** is the console's phone-number contract, and
+differs from the three above in one way: the RULE is ours, not Fineract's.
+Fineract's `mobileNo` is an unvalidated free-text column, so the console had
+been storing whatever was typed (`0777112356` next to `+263777777777`), while
+every customer-facing path here normalises through `ZimbabweMsisdnNormalizer`
+first (`RegisterService:77`, `LoginService:91`, `OtpService`,
+`RecipientLookupService:103`). The doc tells the console to mirror that
+normalizer branch for branch — including its two fail-closed rules: letters or
+stray symbols reject rather than get stripped, and only mobile prefixes (71
+NetOne, 73 Telecel, 77/78 Econet) are valid, because these numbers exist to
+receive OTPs. **The mixed formatting breaks search, not money** — recipient
+lookup keys on our own `customer` table, never on Fineract's `mobileNo` — so
+it is hygiene, not an incident. A console that accepts what the middleware
+would reject creates records the app can never match, which is the actual
+reason to copy the rule rather than fork it.
 
 ## Tests
 
