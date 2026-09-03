@@ -34,10 +34,12 @@
              constraint bypass), CVE-2026-65905 (DIGEST replay) and CVE-2026-68525
              (FORM authentication bypass). 11.0.25 is the fix line.
 
-             THIS OVERRIDE MUST BE >= THE BOM'S VALUE, and nothing enforces that.
-             It sat at 11.0.22 while the BOM moved 11.0.21 to 11.0.24 underneath
-             it, so a pin written to RAISE the version was silently LOWERING it —
-             the Release Trivy gate is what caught it, three CRITICALs later.
+             THIS OVERRIDE MUST BE >= THE BOM'S VALUE. It sat at 11.0.22 while
+             the BOM moved 11.0.21 to 11.0.24 underneath it, so a pin written to
+             RAISE the version was silently LOWERING it — the Release Trivy gate
+             is what caught it, three CRITICALs later. The enforcer rule in
+             <build> now fails the build on exactly that (measured against this
+             property), so a repeat is a red `validate`, not a shipped CVE.
 
              On every Spring Boot bump, read the BOM's own value and either raise
              this to match or delete the override outright once the BOM is at or
@@ -62,6 +64,8 @@
              self-contained classifier keeps its Jetty/Jackson from fighting the
              project's versions. -->
         <wiremock.version>3.13.2</wiremock.version>
+        <!-- Enforcer: guards the version-override invariant described above. -->
+        <maven-enforcer-plugin.version>3.6.3</maven-enforcer-plugin.version>
     </properties>
 
     <dependencyManagement>
@@ -122,6 +126,90 @@
     </dependencyManagement>
 
     <build>
+        <plugins>
+            <!-- Fails the build when a dependency RESOLVES LOWER than a version
+                 something in the tree actually asks for — the shape of the bug
+                 that shipped three CRITICAL Tomcat CVEs (#80).
+
+                 The trap it closes: a <foo.version> property written to RAISE a
+                 managed version keeps winning after the Spring Boot BOM moves
+                 past it, at which point the same line silently LOWERS the
+                 version instead. Nothing in Maven complains — the override is
+                 applied consistently, so the build stays green while shipping
+                 the older artifact. Here the override sat at Tomcat 11.0.22
+                 while the BOM went 11.0.21 -> 11.0.24, and only Trivy noticed,
+                 three published CVEs later.
+
+                 This rule sees it because Boot's spring-boot-tomcat POM names
+                 tomcat-embed-core at a CONCRETE 11.0.24 (not a property), so a
+                 downgrade is a real upper-bound violation in the resolved tree.
+                 Verified by re-pinning 11.0.22 and watching validate fail.
+
+                 KNOWN GAP — MEASURED, not assumed, so you do not over-trust
+                 this rule. A downgrade is caught only when SOMETHING ELSE in
+                 the tree requires the higher version. A direct dependency whose
+                 only version source is the BOM has no such second opinion:
+                 re-pinning postgresql to 42.7.12 against the BOM's 42.7.13
+                 still gives BUILD SUCCESS. Tomcat is caught, postgresql is not.
+
+                 So this rule is a safety net for the CVE-shaped case, not a
+                 licence to keep overrides around. Deleting an override once the
+                 BOM passes it remains the actual fix. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <version>${maven-enforcer-plugin.version}</version>
+                <executions>
+                    <execution>
+                        <id>enforce-dependency-upper-bounds</id>
+                        <phase>validate</phase>
+                        <goals>
+                            <goal>enforce</goal>
+                        </goals>
+                        <configuration>
+                            <rules>
+                                <requireUpperBoundDeps>
+                                    <!-- GOVERNED EXCLUSIONS — same bar as .trivyignore:
+                                         every entry names the conflict, why resolving
+                                         it would be WORSE, and what retires it.
+
+                                         springdoc 3.1.0 -> swagger-core-jakarta 2.2.52
+                                         asks for jackson-datatype-jsr310 and
+                                         jackson-dataformat-yaml at 2.22.0; the Boot BOM
+                                         manages the com.fasterxml Jackson 2.x line at
+                                         2.21.5, so both resolve DOWN.
+
+                                         Satisfying the rule here would be the worse
+                                         outcome. Boot 4.1.1 has moved to Jackson 3
+                                         (tools.jackson.core:jackson-databind:3.1.5);
+                                         com.fasterxml Jackson 2.x now survives ONLY as
+                                         this swagger transitive, with jackson-core and
+                                         jackson-databind at 2.21.5. Forcing these two
+                                         artifacts to 2.22.0 would leave a SPLIT Jackson 2
+                                         family — 2.22.0 datatype/dataformat against
+                                         2.21.5 core/databind — which Jackson does not
+                                         support. A documentation/OpenAPI dependency is
+                                         not worth that risk, and Boot's aligned set is
+                                         the combination that is actually tested.
+
+                                         RETIRES WHEN: springdoc/swagger catch up to the
+                                         BOM's Jackson 2.x line, or springdoc drops
+                                         com.fasterxml Jackson entirely for Jackson 3.
+                                         Re-check on any springdoc or Boot bump by
+                                         deleting these two lines and running
+                                         `./mvnw validate`. REVIEW: 2026-12-01. -->
+                                    <excludes>
+                                        <exclude>com.fasterxml.jackson.datatype:jackson-datatype-jsr310</exclude>
+                                        <exclude>com.fasterxml.jackson.dataformat:jackson-dataformat-yaml</exclude>
+                                    </excludes>
+                                </requireUpperBoundDeps>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+
         <pluginManagement>
             <plugins>
                 <plugin>
