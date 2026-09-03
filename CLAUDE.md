@@ -331,6 +331,22 @@ is silently ignored — and `ReportParameterData` does NOT expose
 `parameter_variable`, so the name→variable map has to come from
 `stretchy_parameter`.
 
+**`docs/msisdn-format-console.md`** is the console's phone-number contract, and
+differs from the three above in one way: the RULE is ours, not Fineract's.
+Fineract's `mobileNo` is an unvalidated free-text column, so the console had
+been storing whatever was typed (`0777112356` next to `+263777777777`), while
+every customer-facing path here normalises through `ZimbabweMsisdnNormalizer`
+first (`RegisterService:77`, `LoginService:91`, `OtpService`,
+`RecipientLookupService:103`). The doc tells the console to mirror that
+normalizer branch for branch — including its two fail-closed rules: letters or
+stray symbols reject rather than get stripped, and only mobile prefixes (71
+NetOne, 73 Telecel, 77/78 Econet) are valid, because these numbers exist to
+receive OTPs. **The mixed formatting breaks search, not money** — recipient
+lookup keys on our own `customer` table, never on Fineract's `mobileNo` — so
+it is hygiene, not an incident. A console that accepts what the middleware
+would reject creates records the app can never match, which is the actual
+reason to copy the rule rather than fork it.
+
 ## Tests
 
 * Unit tests live beside their classes in `middleware-core` /
