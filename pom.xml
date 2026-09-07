@@ -64,6 +64,11 @@
              self-contained classifier keeps its Jetty/Jackson from fighting the
              project's versions. -->
         <wiremock.version>3.13.2</wiremock.version>
+        <!-- OpenPDF: statement PDF rendering (middleware-core statement/render).
+             Not managed by the Spring Boot BOM, so pin explicitly — and being
+             unmanaged means the enforcer's known gap applies: nothing else in
+             the tree asks for it, so keep this current via Dependabot. -->
+        <openpdf.version>2.4.0</openpdf.version>
         <!-- Enforcer: guards the version-override invariant described above. -->
         <maven-enforcer-plugin.version>3.6.3</maven-enforcer-plugin.version>
     </properties>
@@ -121,6 +126,11 @@
                 <groupId>org.wiremock</groupId>
                 <artifactId>wiremock-standalone</artifactId>
                 <version>${wiremock.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.github.librepdf</groupId>
+                <artifactId>openpdf</artifactId>
+                <version>${openpdf.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>

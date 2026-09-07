@@ -819,8 +819,54 @@ commands, with the exact bytes that were running before. Full procedure
    connection-hold bug (fixing it drags in the consumed-verification-token
    INSERT, which genuinely needs its transaction).
 
+10. **Customer statement document — DONE.** `statement/` in middleware-core:
+   `GET /me/accounts/{id}/statement?from&to&format=json|pdf|csv` — the fixed-
+   period DOCUMENT a customer keeps (downloads, emails, hands to a bank),
+   complementing the paged `/transactions` feed. Statement generation lives
+   ABOVE the port on purpose: it survives the Fineract→Veengu swap, and the
+   ingredients (branding, `Country.zoneId()` civil time, resolved names,
+   MSISDN) are all middleware-side. Fineract-side generation was measured and
+   rejected — the fork has no statement module, no Pentaho, and a PDF export
+   that renders a B0 grid and throws on space-bearing report names.
+   - **One model, three renderings.** `StatementAssembler` (pure) builds
+     `StatementDocument`; JSON/PDF/CSV renderers only FORMAT it, so the three
+     can never disagree about a number. OpenPDF (A4) for the PDF; renderers
+     compute nothing.
+   - **Balance policy — core anchors, arithmetic fills, refusal over
+     invention.** Opening balance = the core's own `runningBalance` on the
+     latest pre-period entry (a newest-first probe, limit 5, walking past
+     reversed/balance-less entries by adding their amounts back); no history
+     = a REAL zero; anchor silent = back-derive from the first in-period
+     balance; nothing reachable = 503 `statement_unavailable` — never
+     summed-up balances, never invented ones. Per line the core's balance
+     wins over arithmetic; disagreements increment
+     `innbucks.statement.balance_mismatch` (operator signal that amounts and
+     balances are drifting). Reversed entries are shown, flagged, balance-
+     neutral, excluded from totals. Leans on the adapter's newest-first
+     deterministic ordering (`transactionDate,id DESC`) — the Veengu adapter
+     owes the same.
+   - **Renders inline, so ceilings protect the money path**
+     (`innbucks.statement.*`: 92 days / 1000 entries / page 100): single
+     replica, request-thread render — a multi-year statement must not cost a
+     customer their transfer. Over the cap = 400/422 with stable errorCodes,
+     telling the app to narrow the period. The async render-and-notify-and-
+     fetch design (plus persisted statement rows + content hash for
+     reproducibility — a statement is a document with legal weight) is the
+     deliberate NEXT slice, not something to fake by raising the ceilings.
+   - Same sourcing rule as the feed: the CORE, never our ledger; UNKNOWN
+     movements appear only once reconciled. Ownership against the core's
+     account list BEFORE any read. Name is best-effort (core profile blip
+     costs the name, not the statement). A back-office/console statement
+     surface would need an operator identity this middleware deliberately
+     lacks — decide that separately, don't bolt it onto the customer JWT.
+   Contract pinned by `StatementAssemblerTest` (balance policy),
+   `PdfStatementRendererTest` (asserts EXTRACTED text, not magic bytes),
+   `CsvStatementRendererTest` (RFC-4180, grouped money must arrive quoted),
+   `StatementServiceTest` (probe shape, paging, ceilings) and
+   `StatementFlowIntegrationTest` (HTTP wiring, security, renderings).
+
 Next (in order):
-10. **Veengu adapter** behind the same port (`V-Tenant`/`V-Access-Token`
+11. **Veengu adapter** behind the same port (`V-Tenant`/`V-Access-Token`
    headers, consent-then-execute saga, REVERSAL capability).
    **ON HOLD until the full Veengu API spec is in hand (owner's call,
    2026-07-30)** — do NOT start it from the older specs pinned in
