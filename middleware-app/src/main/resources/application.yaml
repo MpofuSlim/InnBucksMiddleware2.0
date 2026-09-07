@@ -113,6 +113,15 @@ innbucks:
     allowed-origins: ${CORS_ALLOWED_ORIGINS:}
   idempotency:
     ttl: ${IDEMPOTENCY_TTL:24h}
+  statement:
+    # Ceilings for GET /me/accounts/{id}/statement, which renders ON the
+    # request thread of the single-replica money path. Both protect transfers,
+    # not the product: a refused period gets a clear error telling the app to
+    # narrow the range. Raising these is NOT how long statements ship — the
+    # async render-and-fetch design is the deliberate next slice.
+    max-period-days: ${STATEMENT_MAX_PERIOD_DAYS:92}
+    max-entries: ${STATEMENT_MAX_ENTRIES:1000}
+    page-size: ${STATEMENT_PAGE_SIZE:100}
   ledger:
     # How often the reconciler sweeps (fixed-delay). Stale PENDING rows are
     # parked as UNKNOWN after stale-pending-threshold; parked/in-flight rows
