@@ -45,6 +45,24 @@ public final class FineractContractTestSupport {
                         Duration.ofSeconds(30), 3, Duration.ofSeconds(8), 3, Duration.ofMillis(50)));
     }
 
+    /** The operator gateway exactly as {@link FineractAdapterConfig} builds it: NO default auth. */
+    public static FineractOperatorGateway operatorGateway(FineractProperties properties) {
+        HttpClient httpClient = HttpClient.newBuilder()
+                .connectTimeout(properties.connectTimeout())
+                .followRedirects(HttpClient.Redirect.NEVER)
+                .build();
+        JdkClientHttpRequestFactory requestFactory = new JdkClientHttpRequestFactory(httpClient);
+        requestFactory.setReadTimeout(properties.readTimeout());
+        RestClient operatorClient = RestClient.builder()
+                .baseUrl(properties.baseUrl())
+                .requestFactory(requestFactory)
+                .defaultHeader("Fineract-Platform-TenantId", properties.tenantId())
+                .defaultHeader(HttpHeaders.ACCEPT, "application/json")
+                .requestInterceptor(new FineractCorrelationInterceptor())
+                .build();
+        return new FineractOperatorGateway(operatorClient);
+    }
+
     public static FineractClient client(FineractProperties properties) {
         return new FineractClient(
                 restClient(properties, READ_USER, READ_PASS),

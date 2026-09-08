@@ -9,12 +9,12 @@ package zw.co.innbucks.middleware.statement;
 public class StatementRequestException extends RuntimeException {
 
     private final String errorCode;
-    private final boolean tooLarge;
+    private final boolean unprocessable;
 
-    private StatementRequestException(String errorCode, String message, boolean tooLarge) {
+    private StatementRequestException(String errorCode, String message, boolean unprocessable) {
         super(message);
         this.errorCode = errorCode;
-        this.tooLarge = tooLarge;
+        this.unprocessable = unprocessable;
     }
 
     static StatementRequestException invalidPeriod(String message) {
@@ -38,12 +38,20 @@ public class StatementRequestException extends RuntimeException {
                 true);
     }
 
+    static StatementRequestException unsupportedAccount() {
+        return new StatementRequestException("statement_unsupported_account",
+                "This account carries no external reference, so its transactions cannot be read "
+                        + "through this middleware yet. Statements for branch-created accounts are a "
+                        + "planned extension.",
+                true);
+    }
+
     public String errorCode() {
         return errorCode;
     }
 
-    /** True for the entry-count cap — a 422 (the period was valid, the result is not renderable inline). */
-    public boolean tooLarge() {
-        return tooLarge;
+    /** True when the request was well-formed but the result cannot be produced — a 422, not a 400. */
+    public boolean unprocessable() {
+        return unprocessable;
     }
 }

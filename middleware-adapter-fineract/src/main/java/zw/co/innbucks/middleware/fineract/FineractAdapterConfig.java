@@ -48,6 +48,31 @@ public class FineractAdapterConfig {
         return new FineractAdapter(fineractClient, properties);
     }
 
+    /**
+     * Back-office reads with the OPERATOR'S credential ({@code CoreOperatorPort}).
+     * Built without any default Authorization header on purpose: this
+     * middleware's AppUser credentials must never back an operator call, or
+     * the console statement endpoint would let anyone who can reach it read
+     * any account. The operator's presented header is set per request.
+     */
+    @Bean
+    public FineractOperatorGateway fineractOperatorGateway(FineractProperties properties) {
+        HttpClient httpClient = HttpClient.newBuilder()
+                .connectTimeout(properties.connectTimeout())
+                .followRedirects(HttpClient.Redirect.NEVER)
+                .build();
+        JdkClientHttpRequestFactory requestFactory = new JdkClientHttpRequestFactory(httpClient);
+        requestFactory.setReadTimeout(properties.readTimeout());
+        RestClient operatorClient = RestClient.builder()
+                .baseUrl(properties.baseUrl().trim())
+                .requestFactory(requestFactory)
+                .defaultHeader("Fineract-Platform-TenantId", properties.tenantId().trim())
+                .defaultHeader(HttpHeaders.ACCEPT, "application/json")
+                .requestInterceptor(new FineractCorrelationInterceptor())
+                .build();
+        return new FineractOperatorGateway(operatorClient);
+    }
+
     private RestClient buildClient(FineractProperties properties, String username, String password) {
         HttpClient httpClient = HttpClient.newBuilder()
                 .connectTimeout(properties.connectTimeout())

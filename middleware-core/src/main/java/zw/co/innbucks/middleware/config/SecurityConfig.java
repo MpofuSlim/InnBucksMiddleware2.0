@@ -69,6 +69,16 @@ public class SecurityConfig {
                         // core reaches it over the private cell network only
                         // (nginx deny pinned in the runbook).
                         .requestMatchers(org.springframework.http.HttpMethod.POST, "/internal/core-events/**").permitAll()
+                        // Console (back-office) statement: authenticated by the
+                        // OPERATOR'S Fineract Basic credential, which the
+                        // controller forwards to Fineract for verification —
+                        // the customer-JWT filter has nothing to say about an
+                        // operator. Without this permitAll the resource server
+                        // 401s the console before the Fineract check runs.
+                        // Read-only by construction (GET + CoreOperatorPort's
+                        // read-only contract); per-IP throttled in the
+                        // controller because it forwards credentials upstream.
+                        .requestMatchers(org.springframework.http.HttpMethod.GET, "/console/**").permitAll()
                         .anyRequest().authenticated()
                 )
                 .oauth2ResourceServer(oauth2 -> oauth2

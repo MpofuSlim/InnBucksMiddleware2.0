@@ -90,7 +90,7 @@ public final class PdfStatementRenderer {
         meta.setWidthPercentage(100);
         meta.setSpacingAfter(8);
         addMeta(meta, "Customer", s.customerName() == null ? "—" : s.customerName());
-        addMeta(meta, "Mobile", s.msisdn());
+        addMeta(meta, "Mobile", s.msisdn() == null ? "—" : s.msisdn());
         addMeta(meta, "Account", s.accountId());
         addMeta(meta, "Currency", s.currencyCode());
         addMeta(meta, "Period", DATE.format(s.from()) + " to " + DATE.format(s.to()));
