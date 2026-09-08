@@ -163,6 +163,30 @@ class LoanStatementAssemblerTest {
         assertThat(result.balanceMismatches()).isZero();
     }
 
+    /**
+     * The live shape, from the ZW cell (2026-09-08, loan 7): a write-off's
+     * AMOUNT is principal + interest + fees (3 666.09) while only its
+     * principal PORTION (3 000.00) leaves the balance. So
+     * {@code writtenOffMinor} legitimately EXCEEDS what was ever disbursed,
+     * and the balance still lands exactly on zero. Pinned because the
+     * mismatch looks like a bug and must never be "fixed" into agreement —
+     * totalling the portion instead would understate the loss.
+     */
+    @Test
+    void aWriteOffTotalsItsFullAmountButOnlyItsPrincipalLeavesTheBalance() {
+        LoanStatementAssembler.Result result = LoanStatementAssembler.assemble(LOAN, null, TO,
+                Instant.parse("2026-09-07T10:00:00Z"), HARARE, null, false, List.of(
+                        disbursement(300_000, 300_000L),
+                        entry(WRITE_OFF, 366_609, 300_000L, -300_000, 0L, false)));
+
+        LoanStatementDocument doc = result.document();
+        assertThat(doc.totals().disbursedMinor()).isEqualTo(300_000);
+        assertThat(doc.totals().writtenOffMinor()).isEqualTo(366_609)
+                .isGreaterThan(doc.totals().disbursedMinor());
+        assertThat(doc.closingPrincipalMinor()).isZero();
+        assertThat(result.balanceMismatches()).isZero();
+    }
+
     @Test
     void aNoneRowThatDisagreesWithTheWalkIsCountedNotHidden() {
         LoanStatementAssembler.Result result = assemble(500_000L, true, List.of(

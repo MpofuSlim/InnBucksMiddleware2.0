@@ -53,7 +53,20 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * </ul>
  * Read out of the fork ({@code JerseyJacksonConverterConfig},
  * {@code JerseyJacksonObjectArgumentHandler}, {@code LoanTransactionMapper},
- * {@code LoanTransactionsApiResource}), not observed on a cell — say so.
+ * {@code LoanTransactionsApiResource}) — say so, per the house rule — and
+ * since <b>CORROBORATED end-to-end against the ZW cell (2026-09-08)</b>:
+ * seven live loans statemented, and every shape above parsed. The Gson loan
+ * read's {@code [y,m,d]} dates produced populated
+ * {@code disbursedOn}/{@code maturityDate}/{@code term}; the Jackson
+ * transactions page produced dated lines with a non-null principal balance,
+ * and its {@code NON_NULL} inclusion really does DROP an unallocated
+ * portion (a live repayment came back with fee/penalty ABSENT, not zero).
+ *
+ * <p>To be precise about provenance: these stub bodies are still WRITTEN from
+ * the serializers, not captured off the wire — what the cell verified is that
+ * the resulting mapping is correct, not that these exact bytes were seen. A
+ * capture would be strictly better; the balance invariants in the deploy
+ * notes are the evidence in the meantime.
  */
 class FineractOperatorGatewayContractTest {
 
