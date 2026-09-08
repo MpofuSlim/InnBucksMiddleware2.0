@@ -78,7 +78,7 @@ public final class PdfStatementRenderer {
         heading.setWidthPercentage(100);
         heading.setSpacingAfter(10);
         PdfPCell brand = borderless(new Phrase("InnBucks", BRAND));
-        PdfPCell title = borderless(new Phrase("Account Statement", TITLE));
+        PdfPCell title = borderless(new Phrase(statement.title(), TITLE));
         title.setHorizontalAlignment(Element.ALIGN_RIGHT);
         heading.addCell(brand);
         heading.addCell(title);
@@ -92,9 +92,13 @@ public final class PdfStatementRenderer {
         addMeta(meta, "Customer", s.customerName() == null ? "—" : s.customerName());
         addMeta(meta, "Mobile", s.msisdn() == null ? "—" : s.msisdn());
         addMeta(meta, "Account", s.accountId());
+        addMeta(meta, "Account type", s.accountKind().displayName());
         addMeta(meta, "Currency", s.currencyCode());
         addMeta(meta, "Period", DATE.format(s.from()) + " to " + DATE.format(s.to()));
         addMeta(meta, "Generated", GENERATED.format(s.generatedAt().atZone(s.displayZone())));
+        // Seven pairs in a four-column grid: without this OpenPDF silently
+        // drops the half-filled last row — and "Generated" with it.
+        meta.completeRow();
         return meta;
     }
 

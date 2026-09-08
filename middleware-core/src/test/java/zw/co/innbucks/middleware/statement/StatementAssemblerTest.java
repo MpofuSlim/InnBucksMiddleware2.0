@@ -1,6 +1,7 @@
 package zw.co.innbucks.middleware.statement;
 
 import org.junit.jupiter.api.Test;
+import zw.co.innbucks.middleware.corebanking.value.DepositAccountKind;
 import zw.co.innbucks.middleware.corebanking.value.MinorUnits;
 import zw.co.innbucks.middleware.corebanking.value.TransactionDirection;
 import zw.co.innbucks.middleware.corebanking.value.TransactionEntry;
@@ -46,7 +47,8 @@ class StatementAssemblerTest {
 
     private static StatementAssembler.Result assemble(Long anchor, boolean historyBefore,
                                                       List<TransactionEntry> chronological) {
-        return StatementAssembler.assemble("acct:wallet", "USD", "Tariro Moyo", "+263771234567",
+        return StatementAssembler.assemble("acct:wallet", DepositAccountKind.SAVINGS, "USD",
+                "Tariro Moyo", "+263771234567",
                 FROM, TO, Instant.parse("2026-09-07T10:00:00Z"), HARARE,
                 anchor, historyBefore, chronological);
     }

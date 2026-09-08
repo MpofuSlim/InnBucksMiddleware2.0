@@ -13,6 +13,9 @@ import java.util.Objects;
  *                          NULLABLE: a branch-created account may have none,
  *                          and callers must refuse work that needs it rather
  *                          than guess
+ * @param kind              savings, fixed or recurring deposit — decides the
+ *                          document's title only; every kind statements the
+ *                          same way
  * @param holderName        display name of the account holder; nullable
  * @param holderMobile      the holder's mobile as the CORE stores it —
  *                          display-only, may be unnormalised or null; never
@@ -20,6 +23,7 @@ import java.util.Objects;
  */
 public record OperatorAccountView(
         String accountExternalId,
+        DepositAccountKind kind,
         String currencyCode,
         String accountNumber,
         String holderName,
@@ -27,6 +31,7 @@ public record OperatorAccountView(
 ) {
 
     public OperatorAccountView {
+        Objects.requireNonNull(kind, "kind");
         Objects.requireNonNull(currencyCode, "currencyCode");
         Objects.requireNonNull(accountNumber, "accountNumber");
     }

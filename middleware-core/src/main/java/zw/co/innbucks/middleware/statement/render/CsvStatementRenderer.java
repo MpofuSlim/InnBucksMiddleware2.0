@@ -31,8 +31,9 @@ public final class CsvStatementRenderer {
         StringBuilder out = new StringBuilder(256 + s.lines().size() * 64);
         String ccy = s.currencyCode();
 
-        row(out, "InnBucks Account Statement");
+        row(out, "InnBucks " + s.title());
         row(out, "Account", s.accountId());
+        row(out, "Account type", s.accountKind().displayName());
         row(out, "Customer", s.customerName() == null ? "" : s.customerName());
         row(out, "Mobile", s.msisdn() == null ? "" : s.msisdn());
         row(out, "Currency", ccy);

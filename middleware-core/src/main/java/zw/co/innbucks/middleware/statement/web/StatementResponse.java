@@ -20,6 +20,13 @@ public record StatementResponse(
                 example = "3f0d1c2e-8a4b-4b6e-9f1d-2c3b4a5d6e7f:wallet")
         String accountId,
 
+        @Schema(description = "What kind of deposit account this is. Every kind statements identically "
+                + "(same balances, same lines); use it to title the screen. Customer wallets are always "
+                + "SAVINGS; the console sees FIXED_DEPOSIT / RECURRING_DEPOSIT for the deposit products.",
+                example = "SAVINGS",
+                allowableValues = {"SAVINGS", "FIXED_DEPOSIT", "RECURRING_DEPOSIT", "OTHER"})
+        String accountType,
+
         @Schema(example = "USD")
         String currency,
 
@@ -63,7 +70,7 @@ public record StatementResponse(
 
     public static StatementResponse of(StatementDocument d) {
         return new StatementResponse(
-                d.accountId(), d.currencyCode(), d.customerName(), d.msisdn(),
+                d.accountId(), d.accountKind().name(), d.currencyCode(), d.customerName(), d.msisdn(),
                 d.from(), d.to(), d.generatedAt(),
                 d.openingBalanceMinor(), d.closingBalanceMinor(),
                 d.totalCreditsMinor(), d.totalDebitsMinor(),
