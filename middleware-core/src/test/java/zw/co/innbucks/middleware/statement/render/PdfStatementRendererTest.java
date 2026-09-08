@@ -50,9 +50,9 @@ class PdfStatementRendererTest {
     void rendersHeaderSummaryAndLines() throws IOException {
         byte[] pdf = PdfStatementRenderer.render(document(List.of(
                 new StatementLine("13", "ref-1", LocalDate.of(2026, 8, 3),
-                        "Deposit", CREDIT, 5_000, 15_000, false),
+                        "Deposit", CREDIT, 5_000, 15_000, false, false),
                 new StatementLine("14", null, LocalDate.of(2026, 8, 5),
-                        "Withdrawal", DEBIT, 1_000, 14_000, false))));
+                        "Withdrawal", DEBIT, 1_000, 14_000, false, false))));
 
         assertThat(new String(pdf, 0, 5, StandardCharsets.US_ASCII)).isEqualTo("%PDF-");
         String text = textOf(pdf);
@@ -73,10 +73,19 @@ class PdfStatementRendererTest {
     }
 
     @Test
+    void balanceNeutralLinesAreMarked() throws IOException {
+        byte[] pdf = PdfStatementRenderer.render(document(List.of(
+                new StatementLine("15", null, LocalDate.of(2026, 8, 6),
+                        "Waive Charge", DEBIT, 1_000, 10_000, false, true))));
+
+        assertThat(textOf(pdf)).contains("Waive Charge (no balance effect)");
+    }
+
+    @Test
     void reversedLinesAreMarked() throws IOException {
         byte[] pdf = PdfStatementRenderer.render(document(List.of(
                 new StatementLine("13", null, LocalDate.of(2026, 8, 3),
-                        "Deposit", CREDIT, 5_000, 10_000, true))));
+                        "Deposit", CREDIT, 5_000, 10_000, true, false))));
 
         assertThat(textOf(pdf)).contains("Deposit (reversed)");
     }

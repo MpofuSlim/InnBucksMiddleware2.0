@@ -37,6 +37,16 @@ import java.util.List;
  *   <li><b>Reversed entries are balance-neutral</b>: shown, flagged, excluded
  *       from totals, and never used as a balance anchor (the core's balance
  *       semantics for a reversed row are not a contract we rely on).</li>
+ *   <li><b>Entries the core itself records as moving no money</b> (a waived
+ *       charge, an accrual, a transfer-status marker —
+ *       {@code TransactionEntry.balanceNeutral()}) get the same treatment:
+ *       shown with their amount, excluded from the credit/debit totals, and
+ *       contributing zero to the balance walk. Counting a waived charge as a
+ *       debit made {@code opening + credits − debits} disagree with the
+ *       closing balance by exactly the waived amount — the document
+ *       disagreeing with itself. Unlike reversed rows their running balance
+ *       IS trustworthy (it is simply the unchanged balance), so they may
+ *       carry one and it participates like any other.</li>
  * </ol>
  */
 final class StatementAssembler {
@@ -74,6 +84,18 @@ final class StatementAssembler {
                 lines.add(line(entry, balance));
                 continue;
             }
+            if (entry.balanceNeutral()) {
+                // Shown with its amount, but it moved no money: nothing into
+                // the totals, nothing into the balance walk. Its running
+                // balance (the unchanged balance) still gets the core-wins
+                // treatment, so a core that disagrees is surfaced, not hidden.
+                if (entry.runningBalance() != null && entry.runningBalance().amount() != balance) {
+                    mismatches++;
+                    balance = entry.runningBalance().amount();
+                }
+                lines.add(line(entry, balance));
+                continue;
+            }
             balance += signed(entry);
             if (entry.direction() == TransactionDirection.CREDIT) {
                 credits += entry.amount().amount();
@@ -107,7 +129,9 @@ final class StatementAssembler {
             if (entry.reversed()) {
                 continue;
             }
-            delta += signed(entry);
+            if (!entry.balanceNeutral()) {
+                delta += signed(entry);
+            }
             if (entry.runningBalance() != null) {
                 return entry.runningBalance().amount() - delta;
             }
@@ -125,6 +149,6 @@ final class StatementAssembler {
     private static StatementLine line(TransactionEntry entry, long balanceAfter) {
         return new StatementLine(entry.coreId(), entry.externalRef(), entry.valueDate(),
                 entry.narrative(), entry.direction(), entry.amount().amount(), balanceAfter,
-                entry.reversed());
+                entry.reversed(), entry.balanceNeutral());
     }
 }

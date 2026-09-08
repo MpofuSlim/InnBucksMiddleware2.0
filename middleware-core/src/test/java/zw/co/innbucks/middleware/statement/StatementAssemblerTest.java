@@ -37,6 +37,13 @@ class StatementAssemblerTest {
                 FROM.plusDays(2), reversed);
     }
 
+    private static TransactionEntry neutral(long amountMinor, Long runningBalanceMinor) {
+        return new TransactionEntry(String.valueOf(nextId++), null, DEBIT, "Waive Charge",
+                new MinorUnits(amountMinor, "USD"),
+                runningBalanceMinor == null ? null : new MinorUnits(runningBalanceMinor, "USD"),
+                FROM.plusDays(2), false, true);
+    }
+
     private static StatementAssembler.Result assemble(Long anchor, boolean historyBefore,
                                                       List<TransactionEntry> chronological) {
         return StatementAssembler.assemble("acct:wallet", "USD", "Tariro Moyo", "+263771234567",
@@ -58,6 +65,59 @@ class StatementAssemblerTest {
         assertThat(doc.totalCreditsMinor()).isEqualTo(5_000);
         assertThat(doc.totalDebitsMinor()).isEqualTo(1_000);
         assertThat(result.balanceMismatches()).isZero();
+    }
+
+    /**
+     * The console dev's reproduction, in miniature: a waived charge in range
+     * carried an amount but moved no money. Before the fix it landed in
+     * totalDebits, and opening + credits − debits disagreed with the closing
+     * balance by exactly the waived amount — the document disagreeing with
+     * itself. The line must stay ON the statement, flagged, at the unchanged
+     * balance.
+     */
+    @Test
+    void waivedChargeIsShownButMovesNeitherTotalsNorBalance() {
+        StatementAssembler.Result result = assemble(4_049L, true, List.of(
+                entry(CREDIT, 16_000, 20_049L, false),
+                neutral(1_000, 20_049L),
+                entry(DEBIT, 7_500, 12_549L, false)));
+
+        StatementDocument doc = result.document();
+        assertThat(doc.totalCreditsMinor()).isEqualTo(16_000);
+        assertThat(doc.totalDebitsMinor()).isEqualTo(7_500);
+        assertThat(doc.closingBalanceMinor()).isEqualTo(12_549);
+        assertThat(doc.openingBalanceMinor() + doc.totalCreditsMinor() - doc.totalDebitsMinor())
+                .isEqualTo(doc.closingBalanceMinor());
+        assertThat(doc.lines()).extracting(StatementLine::balanceAfterMinor)
+                .containsExactly(20_049L, 20_049L, 12_549L);
+        assertThat(doc.lines().get(1).balanceNeutral()).isTrue();
+        assertThat(doc.lines().get(1).amountMinor()).isEqualTo(1_000);
+        assertThat(result.balanceMismatches()).isZero();
+    }
+
+    @Test
+    void balancelessNeutralEntryDoesNotCorruptTheBackDerivedOpening() {
+        // Back-derive walks the in-period entries; the balance-less waive in
+        // the middle must contribute ZERO or the opening lands off by its
+        // amount: 11 000 - 3 000 + 2 000 = 10 000.
+        StatementAssembler.Result result = assemble(null, true, List.of(
+                entry(DEBIT, 2_000, null, false),
+                neutral(1_000, null),
+                entry(CREDIT, 3_000, 11_000L, false)));
+
+        assertThat(result.document().openingBalanceMinor()).isEqualTo(10_000);
+        assertThat(result.balanceMismatches()).isZero();
+    }
+
+    @Test
+    void aNeutralEntryWhoseCoreBalanceDisagreesStillSurfacesTheMismatch() {
+        // Its balance should be the UNCHANGED balance; a core that reports
+        // something else wins (book of record) and is counted, not hidden.
+        StatementAssembler.Result result = assemble(10_000L, true, List.of(
+                neutral(1_000, 9_000L)));
+
+        assertThat(result.document().closingBalanceMinor()).isEqualTo(9_000);
+        assertThat(result.balanceMismatches()).isEqualTo(1);
     }
 
     @Test

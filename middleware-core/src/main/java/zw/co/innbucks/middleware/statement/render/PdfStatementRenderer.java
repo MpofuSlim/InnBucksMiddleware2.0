@@ -147,8 +147,11 @@ public final class PdfStatementRenderer {
         for (StatementLine line : s.lines()) {
             Color background = stripe ? ROW_STRIPE : Color.WHITE;
             stripe = !stripe;
-            Font font = line.reversed() ? CELL_MUTED : CELL;
-            String description = line.reversed() ? line.narrative() + " (reversed)" : line.narrative();
+            boolean noEffect = line.reversed() || line.balanceNeutral();
+            Font font = noEffect ? CELL_MUTED : CELL;
+            String description = line.reversed() ? line.narrative() + " (reversed)"
+                    : line.balanceNeutral() ? line.narrative() + " (no balance effect)"
+                    : line.narrative();
             boolean credit = line.direction() == TransactionDirection.CREDIT;
             table.addCell(cell(DATE.format(line.date()), font, background, Element.ALIGN_LEFT));
             table.addCell(cell(description == null ? "" : description, font, background, Element.ALIGN_LEFT));
