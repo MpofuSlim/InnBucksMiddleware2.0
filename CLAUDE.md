@@ -12,7 +12,8 @@ single seam: the `CoreBankingPort`. First core: **Apache Fineract** (own fork,
 core-agnostic code (auth slices, idempotency, audit, country-awareness) was
 ported here; its Oradian integration was NOT and will not be.
 
-* Stack: Spring Boot 4.0.6, Java 21 LTS, Spring Data JDBC, Postgres 16,
+* Stack: Spring Boot 4.1.x (Dependabot-tracked; pin risk lives in the root
+  pom's enforcer rules), Java 21 LTS, Spring Data JDBC, Postgres 16,
   Flyway, Micrometer + OpenTelemetry, Springdoc OpenAPI.
 * App port `8090`, management/actuator port `9090`.
 * Deployed **per (country, core) cell**: `INNBUCKS_COUNTRY` +
@@ -864,6 +865,44 @@ commands, with the exact bytes that were running before. Full procedure
    `CsvStatementRendererTest` (RFC-4180, grouped money must arrive quoted),
    `StatementServiceTest` (probe shape, paging, ceilings) and
    `StatementFlowIntegrationTest` (HTTP wiring, security, renderings).
+
+10b. **Console (bank-issued) statement — DONE.** The "decide that separately"
+   above was decided: `GET /console/savings-accounts/{id}/statement` serves the
+   Mifos console WITHOUT this middleware growing an operator identity —
+   **auth is the operator's own Fineract Basic credential, verified BY
+   Fineract** (`CoreOperatorPort` / `FineractOperatorGateway`: one
+   authorisation-bearing read of the savings account AS the operator; a 200
+   proves both who they are and READ_SAVINGSACCOUNT on that account; the
+   operator RestClient carries NO default auth header so our AppUser can never
+   back an operator call). 403/404 flatten to one 404 `account_not_accessible`
+   (no enumeration oracle); the 401 carries no `WWW-Authenticate` (no browser
+   Basic popup over the console); Spring Security permits `/console/**` because
+   the controller's delegated auth IS the auth. Same `StatementDocument` model
+   and renderers as the customer surface — the two cannot disagree.
+   - **Transaction reads are addressed by the CORE'S OWN account id** — the
+     exact key the operator was just authorised against
+     (`TransactionHistoryQuery.byCoreAccountId`, exactly one addressing per
+     query) — so branch-created accounts (no externalId; the console's
+     MAJORITY case in practice) statement like any other. The collection reads
+     still ride our read-only AppUser; only the account authz read carries the
+     operator's credential. Fineract serves both search path variants from the
+     same method (read from the fork, `SavingsAccountTransactionsApiResource`).
+   - **Throttled BEFORE the credential is touched** — the endpoint would
+     otherwise be an operator-password oracle. Keyed per source ADDRESS
+     deliberately (per-operator keying would let a spray widen itself by
+     rotating usernames), so a branch behind one NAT shares a bucket; budget
+     per cell via `innbucks.statement.console-requests-per-minute` (default
+     30) — every raise is also a faster spray, and this throttle is the ONLY
+     brute-force control in front of Fineract Basic auth (Fineract has no
+     lockout).
+   - CORS exposes `Content-Disposition` (else cross-origin JS reads the
+     statement filename as null).
+   Contract pinned by `FineractOperatorGatewayContractTest` (incl.
+   `verify(0, …ourBasic…)`), the operator cases in `StatementServiceTest`,
+   `TransactionHistoryQueryTest`, the core-id case in
+   `FineractStatementContractTest` (read-credential header verify) and
+   `ConsoleStatementFlowIntegrationTest` (permitAll proof: the 401 carries OUR
+   problem body; branch-account stub refuses external-ref queries).
 
 Next (in order):
 11. **Veengu adapter** behind the same port (`V-Tenant`/`V-Access-Token`
