@@ -13,6 +13,7 @@ import zw.co.innbucks.middleware.corebanking.exception.CoreTransientException;
 import zw.co.innbucks.middleware.corebanking.value.AccountRef;
 import zw.co.innbucks.middleware.corebanking.value.CoreCustomerRef;
 import zw.co.innbucks.middleware.corebanking.value.CustomerProfile;
+import zw.co.innbucks.middleware.corebanking.value.DepositAccountKind;
 import zw.co.innbucks.middleware.corebanking.value.DepositAccountRef;
 import zw.co.innbucks.middleware.corebanking.value.MinorUnits;
 import zw.co.innbucks.middleware.corebanking.value.OperatorAccountView;
@@ -215,8 +216,8 @@ class StatementServiceTest {
     void operatorStatementDelegatesAuthorisationToTheCoreAndRendersTheHolder() {
         OperatorCredential credential = new OperatorCredential("Basic b3A6cHc=");
         when(operatorPort.authorizeAndDescribeAccount(credential, "17"))
-                .thenReturn(new OperatorAccountView(WALLET, "USD", "000000017",
-                        "Shumba Traders", "0771234567"));
+                .thenReturn(new OperatorAccountView(WALLET, DepositAccountKind.SAVINGS, "USD",
+                        "000000017", "Shumba Traders", "0771234567"));
         when(port.listTransactions(coreIdAnchorQuery("17"))).thenReturn(new TransactionPage(List.of(
                 entry("9", CREDIT, 2_000, 10_000L, FROM.minusDays(3))), null));
         when(port.listTransactions(coreIdPeriodQuery("17", 0))).thenReturn(new TransactionPage(List.of(), 0L));
@@ -230,6 +231,7 @@ class StatementServiceTest {
         assertThat(doc.customerName()).isEqualTo("Shumba Traders");
         assertThat(doc.msisdn()).isEqualTo("0771234567");
         assertThat(doc.openingBalanceMinor()).isEqualTo(10_000);
+        assertThat(doc.accountKind()).isEqualTo(DepositAccountKind.SAVINGS);
     }
 
     /**
@@ -243,7 +245,8 @@ class StatementServiceTest {
     void operatorStatementCoversBranchAccountsWithoutAnExternalReference() {
         OperatorCredential credential = new OperatorCredential("Basic b3A6cHc=");
         when(operatorPort.authorizeAndDescribeAccount(credential, "23"))
-                .thenReturn(new OperatorAccountView(null, "USD", "000000023", "Walk In", null));
+                .thenReturn(new OperatorAccountView(null, DepositAccountKind.FIXED_DEPOSIT, "USD",
+                        "000000023", "Walk In", null));
         when(port.listTransactions(coreIdAnchorQuery("23")))
                 .thenReturn(new TransactionPage(List.of(), 0L));
         when(port.listTransactions(coreIdPeriodQuery("23", 0)))
@@ -257,6 +260,9 @@ class StatementServiceTest {
         assertThat(doc.openingBalanceMinor()).isZero();
         assertThat(doc.closingBalanceMinor()).isEqualTo(5_000);
         assertThat(doc.lines()).extracting(StatementLine::coreId).containsExactly("41");
+        // The kind the core reported heads the document; nothing else changes.
+        assertThat(doc.accountKind()).isEqualTo(DepositAccountKind.FIXED_DEPOSIT);
+        assertThat(doc.title()).isEqualTo("Fixed Deposit Statement");
     }
 
     private static TransactionHistoryQuery coreIdAnchorQuery(String coreAccountId) {

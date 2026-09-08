@@ -14,6 +14,7 @@ import zw.co.innbucks.middleware.corebanking.value.AccountRef;
 import zw.co.innbucks.middleware.corebanking.value.OperatorAccountView;
 import zw.co.innbucks.middleware.corebanking.value.OperatorCredential;
 import zw.co.innbucks.middleware.corebanking.value.CoreCustomerRef;
+import zw.co.innbucks.middleware.corebanking.value.DepositAccountKind;
 import zw.co.innbucks.middleware.corebanking.value.DepositAccountRef;
 import zw.co.innbucks.middleware.corebanking.value.TransactionDirection;
 import zw.co.innbucks.middleware.corebanking.value.TransactionEntry;
@@ -93,8 +94,10 @@ public class StatementService {
         validatePeriod(from, to);
         Customer customer = requireMappedCustomer(customerId);
         DepositAccountRef account = requireOwnedAccount(customer, accountId);
+        // The app only ever opens wallets — savings accounts by construction.
         StatementDocument document = assembleFor(byExternalRef(account.account()), accountId,
-                account.currencyCode(), displayName(customer), customer.getMsisdn(), from, to);
+                DepositAccountKind.SAVINGS, account.currencyCode(), displayName(customer),
+                customer.getMsisdn(), from, to);
         generatedCustomer.increment();
         return document;
     }
@@ -111,6 +114,11 @@ public class StatementService {
      * the operator was just authorised against — so branch-created accounts
      * (which carry no external reference) statement like any other. Both
      * addressings are two keys to one account by the port contract.
+     *
+     * <p>Serves FIXED and RECURRING deposits as well as savings: in the core
+     * they are the same running-balance account family behind the same
+     * reads, so nothing here branches on the kind — it only titles the
+     * document ({@link StatementDocument#title()}).
      */
     public StatementDocument statementForOperator(OperatorCredential credential,
                                                   String savingsAccountId,
@@ -123,7 +131,7 @@ public class StatementService {
         }
         OperatorAccountView account = port.authorizeAndDescribeAccount(credential, savingsAccountId);
         StatementDocument document = assembleFor(byCoreAccountId(savingsAccountId),
-                account.accountNumber(), account.currencyCode(), account.holderName(),
+                account.accountNumber(), account.kind(), account.currencyCode(), account.holderName(),
                 account.holderMobile(), from, to);
         generatedConsole.increment();
         return document;
@@ -144,13 +152,14 @@ public class StatementService {
     }
 
     private StatementDocument assembleFor(QueryFactory queries, String displayAccountId,
-                                          String currencyCode, String holderName, String msisdn,
+                                          DepositAccountKind kind, String currencyCode,
+                                          String holderName, String msisdn,
                                           LocalDate from, LocalDate to) {
         Anchor anchor = openingAnchor(queries, from);
         List<TransactionEntry> chronological = collectPeriod(queries, from, to);
 
         StatementAssembler.Result result = StatementAssembler.assemble(
-                displayAccountId, currencyCode, holderName, msisdn,
+                displayAccountId, kind, currencyCode, holderName, msisdn,
                 from, to, Instant.now(), countryProperties.country().zoneId(),
                 anchor.openingMinor(), anchor.historyBeforePeriod(), chronological);
 

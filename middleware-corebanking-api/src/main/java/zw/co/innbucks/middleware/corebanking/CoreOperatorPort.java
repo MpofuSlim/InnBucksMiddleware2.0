@@ -2,8 +2,10 @@ package zw.co.innbucks.middleware.corebanking;
 
 import zw.co.innbucks.middleware.corebanking.exception.CoreAuthException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreClientException;
+import zw.co.innbucks.middleware.corebanking.value.LoanTransactionPage;
 import zw.co.innbucks.middleware.corebanking.value.OperatorAccountView;
 import zw.co.innbucks.middleware.corebanking.value.OperatorCredential;
+import zw.co.innbucks.middleware.corebanking.value.OperatorLoanView;
 
 /**
  * Back-office reads performed WITH THE OPERATOR'S OWN core credential — the
@@ -33,8 +35,32 @@ import zw.co.innbucks.middleware.corebanking.value.OperatorCredential;
  *       mutate core state on an operator's behalf — operator ACTIONS belong
  *       in the core's own console, per the standing back-office rule.</li>
  * </ul>
+ *
+ * <p><b>Loans read entirely as the operator.</b> Deposit-account statements
+ * authorise as the operator and then read the transactions with this
+ * middleware's own read-only service account, because those reads already
+ * existed for the customer app. Loans have no customer-app surface, so the
+ * loan reads below ALL carry the operator's credential: the core enforces its
+ * loan-read permission on every call, and the middleware's service account
+ * never needs — and is never granted — loan access at all. Least privilege,
+ * and no cell re-provisioning to switch it on.
  */
 public interface CoreOperatorPort {
 
     OperatorAccountView authorizeAndDescribeAccount(OperatorCredential credential, String savingsAccountId);
+
+    /**
+     * One authorisation-bearing read of a loan as the operator: a successful
+     * answer proves who the operator is and that they may read this loan.
+     */
+    OperatorLoanView authorizeAndDescribeLoan(OperatorCredential credential, String loanId);
+
+    /**
+     * One page of the loan's transactions, NEWEST FIRST with a deterministic
+     * tiebreak, read as the operator. {@code page} is zero-based. Cores are
+     * expected to exclude pure accrual bookkeeping — a customer-facing
+     * statement is not the place for daily interest-recognition rows.
+     */
+    LoanTransactionPage listLoanTransactions(OperatorCredential credential, String loanId,
+                                             int page, int pageSize);
 }

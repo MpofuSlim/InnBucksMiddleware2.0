@@ -437,29 +437,12 @@ public class FineractAdapter implements CoreBankingPort {
 
     /**
      * Fineract's legacy Gson serializer emits LocalDate as a {@code [yyyy,m,d]}
-     * ARRAY, not an ISO string. Both shapes are accepted so a serializer change
-     * upstream doesn't silently break every statement.
+     * ARRAY, not an ISO string. Both shapes are accepted (see
+     * {@link FineractDates}) so a serializer change upstream doesn't silently
+     * break every statement.
      */
     private static LocalDate parseDate(Object raw) {
-        if (raw == null) {
-            throw new CoreServerException(CoreProvider.FINERACT,
-                    "Fineract returned a transaction with no date", null);
-        }
-        if (raw instanceof List<?> parts && parts.size() >= 3) {
-            return LocalDate.of(asInt(parts.get(0)), asInt(parts.get(1)), asInt(parts.get(2)));
-        }
-        if (raw instanceof CharSequence text) {
-            return LocalDate.parse(text);
-        }
-        throw new CoreServerException(CoreProvider.FINERACT,
-                "Unrecognised transaction date shape from Fineract: " + raw, null);
-    }
-
-    private static int asInt(Object value) {
-        if (value instanceof Number n) {
-            return n.intValue();
-        }
-        return Integer.parseInt(String.valueOf(value));
+        return FineractDates.parseDate(raw);
     }
 
     /**

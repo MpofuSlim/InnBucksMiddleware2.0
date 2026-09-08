@@ -17,7 +17,7 @@ public class StatementRequestException extends RuntimeException {
         this.unprocessable = unprocessable;
     }
 
-    static StatementRequestException invalidPeriod(String message) {
+    public static StatementRequestException invalidPeriod(String message) {
         return new StatementRequestException("statement_period_invalid", message, false);
     }
 
@@ -32,9 +32,22 @@ public class StatementRequestException extends RuntimeException {
                 "Unknown format '" + requested + "'. Use json, pdf or csv.", false);
     }
 
-    static StatementRequestException tooLarge(int maxRows) {
+    public static StatementRequestException tooLarge(int maxRows) {
         return new StatementRequestException("statement_too_large",
                 "This period has more than " + maxRows + " entries. Ask for a shorter period.",
+                true);
+    }
+
+    /**
+     * The loan variant: a loan statement has no period ceiling (it defaults
+     * to the life of the loan), so the only cap is the entry count — and the
+     * fix is a narrower, more RECENT period, because the walk starts from
+     * today.
+     */
+    public static StatementRequestException loanTooLarge(int maxRows) {
+        return new StatementRequestException("statement_too_large",
+                "This loan has more than " + maxRows + " transactions in reach of the requested "
+                        + "period. Ask for a shorter, more recent period.",
                 true);
     }
 

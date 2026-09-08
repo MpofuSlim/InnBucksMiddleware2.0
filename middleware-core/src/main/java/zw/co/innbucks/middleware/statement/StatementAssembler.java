@@ -1,5 +1,6 @@
 package zw.co.innbucks.middleware.statement;
 
+import zw.co.innbucks.middleware.corebanking.value.DepositAccountKind;
 import zw.co.innbucks.middleware.corebanking.value.TransactionDirection;
 import zw.co.innbucks.middleware.corebanking.value.TransactionEntry;
 
@@ -66,7 +67,8 @@ final class StatementAssembler {
      *                            from "opening unknown"
      * @param chronological       the period's entries OLDEST FIRST
      */
-    static Result assemble(String accountId, String currencyCode, String customerName, String msisdn,
+    static Result assemble(String accountId, DepositAccountKind accountKind, String currencyCode,
+                           String customerName, String msisdn,
                            LocalDate from, LocalDate to, Instant generatedAt, ZoneId displayZone,
                            Long openingAnchorMinor, boolean historyBeforePeriod,
                            List<TransactionEntry> chronological) {
@@ -109,8 +111,9 @@ final class StatementAssembler {
             lines.add(line(entry, balance));
         }
 
-        StatementDocument document = new StatementDocument(accountId, currencyCode, customerName, msisdn,
-                from, to, generatedAt, displayZone, opening, balance, credits, debits, lines);
+        StatementDocument document = new StatementDocument(accountId, accountKind, currencyCode,
+                customerName, msisdn, from, to, generatedAt, displayZone, opening, balance, credits,
+                debits, lines);
         return new Result(document, mismatches);
     }
 

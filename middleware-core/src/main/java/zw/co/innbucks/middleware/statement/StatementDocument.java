@@ -1,5 +1,7 @@
 package zw.co.innbucks.middleware.statement;
 
+import zw.co.innbucks.middleware.corebanking.value.DepositAccountKind;
+
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
@@ -24,6 +26,9 @@ import java.util.Objects;
  * do not, the assembler adopts the core's balance (the core is the book of
  * record) and reports the disagreement to the caller instead of hiding it.
  *
+ * @param accountKind  savings, fixed or recurring deposit. Every kind is a
+ *                     running-balance account and statements identically; the
+ *                     kind decides only the document's TITLE
  * @param customerName best-effort display name from the core; null when the
  *                     core has no profile
  * @param msisdn       the holder's mobile as known to whichever surface built
@@ -36,6 +41,7 @@ import java.util.Objects;
  */
 public record StatementDocument(
         String accountId,
+        DepositAccountKind accountKind,
         String currencyCode,
         String customerName,
         String msisdn,
@@ -52,6 +58,7 @@ public record StatementDocument(
 
     public StatementDocument {
         Objects.requireNonNull(accountId, "accountId");
+        Objects.requireNonNull(accountKind, "accountKind");
         Objects.requireNonNull(currencyCode, "currencyCode");
         Objects.requireNonNull(from, "from");
         Objects.requireNonNull(to, "to");
@@ -65,5 +72,19 @@ public record StatementDocument(
         if (to.isBefore(from)) {
             throw new IllegalArgumentException("'to' (" + to + ") is before 'from' (" + from + ")");
         }
+    }
+
+    /**
+     * The document's heading, decided in ONE place so the PDF and the CSV
+     * cannot title the same statement differently. A plain savings account
+     * keeps the historical "Account Statement"; the deposit products name
+     * themselves so a fixed-deposit statement is not mistaken for a
+     * transactional account's.
+     */
+    public String title() {
+        return switch (accountKind) {
+            case SAVINGS, OTHER -> "Account Statement";
+            case FIXED_DEPOSIT, RECURRING_DEPOSIT -> accountKind.displayName() + " Statement";
+        };
     }
 }

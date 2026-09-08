@@ -3,6 +3,7 @@ package zw.co.innbucks.middleware.statement.render;
 import com.lowagie.text.pdf.PdfReader;
 import com.lowagie.text.pdf.parser.PdfTextExtractor;
 import org.junit.jupiter.api.Test;
+import zw.co.innbucks.middleware.corebanking.value.DepositAccountKind;
 import zw.co.innbucks.middleware.statement.StatementDocument;
 import zw.co.innbucks.middleware.statement.StatementLine;
 
@@ -25,8 +26,12 @@ import static zw.co.innbucks.middleware.corebanking.value.TransactionDirection.D
 class PdfStatementRendererTest {
 
     private static StatementDocument document(List<StatementLine> lines) {
+        return document(DepositAccountKind.SAVINGS, lines);
+    }
+
+    private static StatementDocument document(DepositAccountKind kind, List<StatementLine> lines) {
         return new StatementDocument(
-                "3f0d1c2e:wallet", "USD", "Tariro Moyo", "+263771234567",
+                "3f0d1c2e:wallet", kind, "USD", "Tariro Moyo", "+263771234567",
                 LocalDate.of(2026, 8, 1), LocalDate.of(2026, 8, 31),
                 Instant.parse("2026-09-07T10:00:00Z"), ZoneId.of("Africa/Harare"),
                 10_000, 14_000, 5_000, 1_000, lines);
@@ -90,6 +95,24 @@ class PdfStatementRendererTest {
         assertThat(textOf(pdf)).contains("Deposit (reversed)");
     }
 
+    /**
+     * A fixed deposit statements exactly like a savings account — same
+     * balances, same lines — and must NOT be titled as one: a customer hands
+     * this to a bank that reads the heading.
+     */
+    @Test
+    void fixedDepositIsTitledAsOne() throws IOException {
+        String text = textOf(PdfStatementRenderer.render(document(DepositAccountKind.FIXED_DEPOSIT, List.of(
+                new StatementLine("13", null, LocalDate.of(2026, 8, 3),
+                        "Deposit", CREDIT, 5_000, 15_000, false, false)))));
+
+        assertThat(text).contains("Fixed Deposit Statement");
+        assertThat(text).doesNotContain("Account Statement");
+        assertThat(text).contains("Fixed Deposit");
+        // The seventh meta pair must survive the four-column grid.
+        assertThat(text).contains("07 Sep 2026, 12:00");
+    }
+
     @Test
     void emptyPeriodSaysSoInsteadOfRenderingABareGrid() throws IOException {
         byte[] pdf = PdfStatementRenderer.render(document(List.of()));
@@ -100,7 +123,7 @@ class PdfStatementRendererTest {
     @Test
     void missingCustomerNameRendersAPlaceholderNotAnError() throws IOException {
         StatementDocument nameless = new StatementDocument(
-                "3f0d1c2e:wallet", "USD", null, "+263771234567",
+                "3f0d1c2e:wallet", DepositAccountKind.SAVINGS, "USD", null, "+263771234567",
                 LocalDate.of(2026, 8, 1), LocalDate.of(2026, 8, 31),
                 Instant.parse("2026-09-07T10:00:00Z"), ZoneId.of("Africa/Harare"),
                 0, 0, 0, 0, List.of());

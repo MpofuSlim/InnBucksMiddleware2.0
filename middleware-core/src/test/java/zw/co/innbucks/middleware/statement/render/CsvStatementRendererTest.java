@@ -1,6 +1,7 @@
 package zw.co.innbucks.middleware.statement.render;
 
 import org.junit.jupiter.api.Test;
+import zw.co.innbucks.middleware.corebanking.value.DepositAccountKind;
 import zw.co.innbucks.middleware.statement.StatementDocument;
 import zw.co.innbucks.middleware.statement.StatementLine;
 
@@ -17,8 +18,12 @@ import static zw.co.innbucks.middleware.corebanking.value.TransactionDirection.D
 class CsvStatementRendererTest {
 
     private static StatementDocument document() {
+        return document(DepositAccountKind.SAVINGS);
+    }
+
+    private static StatementDocument document(DepositAccountKind kind) {
         return new StatementDocument(
-                "3f0d1c2e:wallet", "USD", "Tariro Moyo", "+263771234567",
+                "3f0d1c2e:wallet", kind, "USD", "Tariro Moyo", "+263771234567",
                 LocalDate.of(2026, 8, 1), LocalDate.of(2026, 8, 31),
                 Instant.parse("2026-09-07T10:00:00Z"), ZoneId.of("Africa/Harare"),
                 10_000, 1_243_000, 1_239_000, 6_000,
@@ -38,6 +43,7 @@ class CsvStatementRendererTest {
 
         assertThat(lines[0]).isEqualTo("InnBucks Account Statement");
         assertThat(csv).contains("Account,3f0d1c2e:wallet\n");
+        assertThat(csv).contains("Account type,Savings\n");
         assertThat(csv).contains("Currency,USD\n");
         assertThat(csv).contains("Period,2026-08-01 to 2026-08-31\n");
         // Money carries grouping commas, so it MUST arrive quoted or the
@@ -54,6 +60,15 @@ class CsvStatementRendererTest {
         // A waived charge: amount shown, balance unchanged, neutral column true.
         assertThat(csv).contains(
                 "2026-08-06,Waive Charge,15,,DEBIT,10.00,\"12,430.00\",false,true\n");
+    }
+
+    @Test
+    void recurringDepositIsTitledAsOne() {
+        String csv = new String(CsvStatementRenderer.render(
+                document(DepositAccountKind.RECURRING_DEPOSIT)), StandardCharsets.UTF_8);
+
+        assertThat(csv).startsWith("InnBucks Recurring Deposit Statement\n");
+        assertThat(csv).contains("Account type,Recurring Deposit\n");
     }
 
     @Test

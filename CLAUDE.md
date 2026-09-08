@@ -904,6 +904,75 @@ commands, with the exact bytes that were running before. Full procedure
    `ConsoleStatementFlowIntegrationTest` (permitAll proof: the 401 carries OUR
    problem body; branch-account stub refuses external-ref queries).
 
+10c. **Console statements for fixed/recurring deposits and LOANS — DONE.**
+   The console offered "Statement" on savings accounts only; business banking
+   lives on loans and its managers/credit read the loan statement daily.
+   - **Fixed and recurring deposits needed no new endpoint.** In the fork they
+     are rows of the same `m_savings_account` table (`depositType` 200/300)
+     behind the same reads — `retrieveOne` filters on id alone and the
+     transaction search has no `deposit_type_enum` clause — so
+     `GET /console/savings-accounts/{id}/statement` already served them. What
+     was missing was the KIND: `OperatorAccountView.kind()` /
+     `DepositAccountKind` (mapped from `depositType.id`, absent = `OTHER`,
+     never a refusal) now heads the document — `accountType` in the JSON,
+     "Fixed Deposit Statement" as the PDF/CSV title via the one
+     `StatementDocument.title()`. Balance policy, lines, ceilings: unchanged.
+   - **Loans are a separate document** (`statement/loan`:
+     `LoanStatementDocument` / `LoanStatementAssembler` / `LoanStatementService`,
+     `LoanPdfStatementRenderer` (landscape A4) / `LoanCsvStatementRenderer`,
+     `GET /console/loans/{loanId}/statement?from&to&format`), not the deposit
+     shape stretched: a loan is an obligation with four moving parts. The
+     statement walks the PRINCIPAL outstanding (the one figure Fineract
+     stores per transaction, `outstanding_loan_balance_derived`) with the
+     same anchor-and-core-wins policy as deposits, shows every line's
+     principal/interest/fee/penalty split, totals by `LoanEntryKind`
+     (DISBURSEMENT / REPAYMENT / WAIVER / WRITE_OFF; OTHER walks the balance
+     but totals nothing; NONE is bookkeeping — shown, never walked), and
+     carries the core's POSITION as at generation (what is owed NOW, null for
+     an undisbursed loan). Metrics `innbucks.loan_statement.generated` /
+     `innbucks.loan_statement.balance_mismatch` (a separate name — Prometheus
+     rejects one meter name with two tag-key sets).
+   - **`from`/`to` are OPTIONAL on loans and there is NO period ceiling** —
+     the request that matters is "the statement of this loan" (since
+     disbursement); `from` absent = life of the loan, `to` absent = today in
+     the cell's zone. The deposit 92-day ceiling guards against transactional
+     volume a loan does not have (accruals are excluded at the wire:
+     `excludedTypes=accrual,accrualActivity,accrualAdjustment`), so the ENTRY
+     ceiling (`max-entries`) is the request-thread protection and still
+     applies, plus a 2×max-entries scan cap because the walk starts from
+     today and Fineract's loan history has no date filter (422
+     `statement_too_large`, "ask for a shorter, more RECENT period").
+   - **Every loan read rides the OPERATOR'S credential** — `CoreOperatorPort`
+     grew `authorizeAndDescribeLoan` + `listLoanTransactions`. Deliberately
+     unlike the deposit split (authorise as operator, read collections with
+     our read AppUser, which was reuse of the customer-app reads): loans have
+     no app surface, so Fineract enforces READ_LOAN per call and
+     `innbucks-mw-read` never gains loan access. No re-provisioning to switch
+     it on.
+   - **Fineract has TWO JSON writers and the loan endpoints use both — read
+     from the fork, not observed on a cell:** `GET /v1/loans/{id}` is a Gson
+     String (fields, `[y,m,d]` dates, ExternalIdAdapter), while
+     `GET /v1/loans/{id}/transactions` returns Spring's `Page<LoanTransactionData>`
+     through Jersey's JACKSON writer (`JerseyJacksonObjectArgumentHandler`:
+     getters, `NON_NULL`, ISO-string dates — no `@JsonLocalDateArrayFormat`
+     on that DTO — page keys `totalElements`/`content`). `GET /v1/savingsaccounts/{id}`
+     is Jackson too (with array dates). `FineractDates` accepts both date
+     shapes everywhere; the page DTO aliases every count spelling. Sort is by
+     JPA field names (`dateOf,desc` + `id,desc`); the page is unfiltered by
+     date, hence the one newest-first walk. `LoanTransactionData` has NO
+     `reversed` field: reversal = `manuallyReversed || reversedOnDate != null`
+     (the flag is only ever set alongside `reverse()`), and
+     `resetDerivedComponents()` nulls the portions AND the balance on
+     reversal, so a reversed row anchors nothing. Type→kind/effect table
+     (keyed on the numeric `LoanTransactionType` id) in
+     `FineractOperatorGateway.classify`.
+   Contract pinned by the loan cases in `FineractOperatorGatewayContractTest`
+   (both writers' shapes, sort/paging/exclusions on the wire, `verify(0,
+   …ourBasic…)`), `LoanStatementAssemblerTest`, `LoanStatementServiceTest`
+   (the walk, the defaults, both ceilings), `Loan{Pdf,Csv}StatementRendererTest`,
+   the FD title cases in the deposit renderer tests, and the loan + FD cases
+   in `ConsoleStatementFlowIntegrationTest` (full JSON contract on the wire).
+
 Next (in order):
 11. **Veengu adapter** behind the same port (`V-Tenant`/`V-Access-Token`
    headers, consent-then-execute saga, REVERSAL capability).
