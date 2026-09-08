@@ -49,10 +49,13 @@ public record StatementResponse(
                 example = "15000")
         long closingBalanceMinor,
 
-        @Schema(description = "Sum of non-reversed credits in the period, MINOR units.", example = "6000")
+        @Schema(description = "Sum of credits in the period that moved money (not reversed, not "
+                + "balance-neutral), MINOR units. openingBalanceMinor + totalCreditsMinor − "
+                + "totalDebitsMinor always equals closingBalanceMinor.", example = "6000")
         long totalCreditsMinor,
 
-        @Schema(description = "Sum of non-reversed debits in the period, MINOR units.", example = "1000")
+        @Schema(description = "Sum of debits in the period that moved money (not reversed, not "
+                + "balance-neutral), MINOR units.", example = "1000")
         long totalDebitsMinor,
 
         List<StatementLineView> lines
@@ -67,7 +70,7 @@ public record StatementResponse(
                 d.lines().stream()
                         .map(l -> new StatementLineView(l.coreId(), l.reference(), l.date(),
                                 l.narrative(), l.direction().name(), l.amountMinor(),
-                                l.balanceAfterMinor(), l.reversed()))
+                                l.balanceAfterMinor(), l.reversed(), l.balanceNeutral()))
                         .toList());
     }
 }

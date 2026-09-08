@@ -130,10 +130,14 @@ class StatementFlowIntegrationTest {
                 new TransactionEntry("15", "ref-abc", TransactionDirection.DEBIT, "Withdrawal",
                         new MinorUnits(1_000L, "KES"), new MinorUnits(14_000L, "KES"),
                         FROM.plusDays(9), false),
+                // A waived charge: amount shown, balance unchanged, moves no money.
+                new TransactionEntry("14", null, TransactionDirection.DEBIT, "Waive Charge",
+                        new MinorUnits(1_000L, "KES"), new MinorUnits(15_000L, "KES"),
+                        FROM.plusDays(5), false, true),
                 new TransactionEntry("12", null, TransactionDirection.CREDIT, "Deposit",
                         new MinorUnits(5_000L, "KES"), new MinorUnits(15_000L, "KES"),
                         FROM.plusDays(2), false)),
-                2L);
+                3L);
     }
 
     @Test
@@ -148,13 +152,20 @@ class StatementFlowIntegrationTest {
                 .andExpect(jsonPath("$.msisdn").value("+254712000099"))
                 .andExpect(jsonPath("$.openingBalanceMinor").value(10_000))
                 .andExpect(jsonPath("$.closingBalanceMinor").value(14_000))
+                // The waive is on the statement but in neither total: 5 000 / 1 000.
                 .andExpect(jsonPath("$.totalCreditsMinor").value(5_000))
                 .andExpect(jsonPath("$.totalDebitsMinor").value(1_000))
                 // Oldest first — the wire served newest first.
                 .andExpect(jsonPath("$.lines[0].id").value("12"))
                 .andExpect(jsonPath("$.lines[0].balanceAfterMinor").value(15_000))
-                .andExpect(jsonPath("$.lines[1].id").value("15"))
-                .andExpect(jsonPath("$.lines[1].reference").value("ref-abc"));
+                .andExpect(jsonPath("$.lines[0].balanceNeutral").value(false))
+                // The JSON view must carry the flag — the CSV alone is not the contract.
+                .andExpect(jsonPath("$.lines[1].id").value("14"))
+                .andExpect(jsonPath("$.lines[1].balanceNeutral").value(true))
+                .andExpect(jsonPath("$.lines[1].balanceAfterMinor").value(15_000))
+                .andExpect(jsonPath("$.lines[2].id").value("15"))
+                .andExpect(jsonPath("$.lines[2].reference").value("ref-abc"))
+                .andExpect(jsonPath("$.lines[2].balanceNeutral").value(false));
     }
 
     @Test

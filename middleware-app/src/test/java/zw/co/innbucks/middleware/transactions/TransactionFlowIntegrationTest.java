@@ -223,7 +223,11 @@ class TransactionFlowIntegrationTest {
                     // No externalRef: booked on the core, never through us.
                     new TransactionEntry("9", null, TransactionDirection.CREDIT, "Interest Posting",
                             new MinorUnits(250L, "KES"), null,
-                            LocalDate.of(2026, 7, 1), false)),
+                            LocalDate.of(2026, 7, 1), false),
+                    // Moved no money — the feed must say so on the wire.
+                    new TransactionEntry("6", null, TransactionDirection.DEBIT, "Waive Charge",
+                            new MinorUnits(1000L, "KES"), new MinorUnits(15000L, "KES"),
+                            LocalDate.of(2026, 7, 1), false, true)),
                     143L);
         };
 
@@ -246,7 +250,10 @@ class TransactionFlowIntegrationTest {
                 // Core-booked entries carry no reference and may have no running
                 // balance — neither may be invented.
                 .andExpect(jsonPath("$.entries[1].reference").doesNotExist())
-                .andExpect(jsonPath("$.entries[1].runningBalanceMinor").doesNotExist());
+                .andExpect(jsonPath("$.entries[1].runningBalanceMinor").doesNotExist())
+                .andExpect(jsonPath("$.entries[0].balanceNeutral").value(false))
+                .andExpect(jsonPath("$.entries[2].id").value("6"))
+                .andExpect(jsonPath("$.entries[2].balanceNeutral").value(true));
     }
 
     @Test

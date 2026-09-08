@@ -118,6 +118,50 @@ class ConsoleStatementFlowIntegrationTest {
                 .andExpect(jsonPath("$.lines[0].id").value("12"));
     }
 
+    /**
+     * The JSON contract for no-money entries — asserted on the WIRE, because
+     * the flag once made it into the CSV renderer and the internal line model
+     * but not the JSON view DTO, and nothing here noticed. Same shape the
+     * console dev reproduced: a Waive Charge in range.
+     */
+    @Test
+    void balanceNeutralLinesAreFlaggedInTheJsonAndExcludedFromTotals() throws Exception {
+        stubPort.onListTransactions = query -> {
+            if (query.from() == null) {
+                return new TransactionPage(List.of(
+                        new TransactionEntry("9", null, TransactionDirection.CREDIT, "Deposit",
+                                new MinorUnits(2_000L, "KES"), new MinorUnits(10_000L, "KES"),
+                                FROM.minusDays(3), false)),
+                        null);
+            }
+            return new TransactionPage(List.of(
+                    new TransactionEntry("14", null, TransactionDirection.DEBIT, "Withdrawal",
+                            new MinorUnits(1_000L, "KES"), new MinorUnits(14_000L, "KES"),
+                            FROM.plusDays(9), false),
+                    new TransactionEntry("13", null, TransactionDirection.DEBIT, "Waive Charge",
+                            new MinorUnits(1_000L, "KES"), new MinorUnits(15_000L, "KES"),
+                            FROM.plusDays(5), false, true),
+                    new TransactionEntry("12", null, TransactionDirection.CREDIT, "Deposit",
+                            new MinorUnits(5_000L, "KES"), new MinorUnits(15_000L, "KES"),
+                            FROM.plusDays(2), false)),
+                    3L);
+        };
+
+        mockMvc.perform(get("/console/savings-accounts/{id}/statement", "17")
+                        .param("from", "2026-08-01").param("to", "2026-08-31")
+                        .header(HttpHeaders.AUTHORIZATION, OPERATOR_BASIC))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.totalCreditsMinor").value(5_000))
+                .andExpect(jsonPath("$.totalDebitsMinor").value(1_000))
+                .andExpect(jsonPath("$.closingBalanceMinor").value(14_000))
+                .andExpect(jsonPath("$.lines[0].balanceNeutral").value(false))
+                .andExpect(jsonPath("$.lines[1].id").value("13"))
+                .andExpect(jsonPath("$.lines[1].balanceNeutral").value(true))
+                .andExpect(jsonPath("$.lines[1].amountMinor").value(1_000))
+                .andExpect(jsonPath("$.lines[1].balanceAfterMinor").value(15_000))
+                .andExpect(jsonPath("$.lines[2].balanceNeutral").value(false));
+    }
+
     @Test
     void pdfDownloadsWithTheAccountNumberInTheFilename() throws Exception {
         MvcResult result = mockMvc.perform(get("/console/savings-accounts/{id}/statement", "17")
