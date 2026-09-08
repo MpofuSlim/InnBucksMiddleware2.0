@@ -124,6 +124,49 @@ class FineractStatementContractTest {
                 .withoutQueryParam("toDate"));
     }
 
+    /**
+     * Core-account-id addressing (the console surface's key for branch-created
+     * accounts) rides {@code /v1/savingsaccounts/{id}/transactions/search}. In
+     * the fork both path variants delegate to the same private
+     * {@code searchTransactions} method
+     * (SavingsAccountTransactionsApiResource), so parameters and envelope are
+     * identical by construction — pinned here with the live-cell envelope
+     * captured 2026-07-31 on the external-id variant.
+     */
+    @Test
+    void coreAccountIdAddressingRidesTheNumericIdPathWithTheSameContract() {
+        String byIdPath = "/v1/savingsaccounts/23/transactions/search";
+        wireMock.stubFor(get(urlPathEqualTo(byIdPath)).willReturn(okJson("""
+                {
+                  "total": 1,
+                  "content": [
+                    {"id":41,"entryType":"CREDIT",
+                     "transactionType":{"id":1,"value":"Deposit","deposit":true,"withdrawal":false},
+                     "amount":50.00,"runningBalance":50.00,"reversed":false,"date":[2026,8,3]}
+                  ],
+                  "pageable": {"pageNumber":0,"pageSize":20}
+                }""")));
+
+        TransactionPage page = adapter.listTransactions(TransactionHistoryQuery.byCoreAccountId(
+                "23", LocalDate.of(2026, 8, 1), LocalDate.of(2026, 8, 31), 0, 20));
+
+        assertThat(page.totalCount()).isEqualTo(1);
+        assertThat(page.entries()).hasSize(1);
+        assertThat(page.entries().get(0).coreId()).isEqualTo("41");
+        assertThat(page.entries().get(0).amount().amount()).isEqualTo(5000);
+
+        wireMock.verify(getRequestedFor(urlPathEqualTo(byIdPath))
+                .withQueryParam("offset", equalTo("0"))
+                .withQueryParam("limit", equalTo("20"))
+                .withQueryParam("orderBy", equalTo("transactionDate,id"))
+                .withQueryParam("sortOrder", equalTo("DESC"))
+                .withQueryParam("fromDate", equalTo("2026-08-01"))
+                .withQueryParam("toDate", equalTo("2026-08-31"))
+                // This read rides OUR read AppUser — the operator's credential
+                // authorises the account read, never the statement collection.
+                .withHeader("Authorization", equalTo(basicAuth(READ_USER, READ_PASS))));
+    }
+
     @Test
     void anEmptyStatementIsAnAnswerNotAFailure() {
         wireMock.stubFor(get(urlPathEqualTo(PATH))

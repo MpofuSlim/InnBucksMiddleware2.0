@@ -97,8 +97,7 @@ public class ConsoleStatementController {
             @ApiResponse(responseCode = "404", description = "Account not found OR not readable by this "
                     + "operator — deliberately indistinguishable (errorCode account_not_accessible)",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
-            @ApiResponse(responseCode = "422", description = "errorCode statement_too_large (narrow the "
-                    + "period) or statement_unsupported_account (account carries no external reference)",
+            @ApiResponse(responseCode = "422", description = "errorCode statement_too_large — narrow the period",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
             @ApiResponse(responseCode = "429", description = "Too many requests from this source",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class))),

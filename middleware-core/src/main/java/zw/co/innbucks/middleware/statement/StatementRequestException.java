@@ -38,14 +38,6 @@ public class StatementRequestException extends RuntimeException {
                 true);
     }
 
-    static StatementRequestException unsupportedAccount() {
-        return new StatementRequestException("statement_unsupported_account",
-                "This account carries no external reference, so its transactions cannot be read "
-                        + "through this middleware yet. Statements for branch-created accounts are a "
-                        + "planned extension.",
-                true);
-    }
-
     public String errorCode() {
         return errorCode;
     }

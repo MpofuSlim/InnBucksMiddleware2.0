@@ -23,7 +23,18 @@ public record StatementProperties(
         int maxEntries,
 
         /** Page size used against the core while collecting the period. */
-        int pageSize
+        int pageSize,
+
+        /**
+         * Console statement requests allowed per source ADDRESS per minute.
+         * The throttle is the operator-password-oracle defence, so it stays
+         * keyed by resolved client IP (an attacker must not widen the budget
+         * by rotating usernames) — which also means a whole branch behind one
+         * NAT shares a bucket. Raise this deliberately, per cell, when a
+         * branch's legitimate batch printing hits 429; every raise is also a
+         * faster credential spray.
+         */
+        int consoleRequestsPerMinute
 ) {
 
     /**
@@ -34,5 +45,6 @@ public record StatementProperties(
         maxPeriodDays = maxPeriodDays <= 0 ? 92 : maxPeriodDays;
         maxEntries = maxEntries <= 0 ? 1_000 : maxEntries;
         pageSize = pageSize <= 0 ? 100 : Math.min(pageSize, 100);
+        consoleRequestsPerMinute = consoleRequestsPerMinute <= 0 ? 30 : consoleRequestsPerMinute;
     }
 }

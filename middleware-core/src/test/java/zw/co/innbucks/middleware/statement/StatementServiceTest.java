@@ -80,7 +80,7 @@ class StatementServiceTest {
 
         // pageSize 2 so the paging loop is actually exercised.
         service = new StatementService(customers, port, resolver,
-                new CountryProperties(Country.ZW), new StatementProperties(92, 4, 2),
+                new CountryProperties(Country.ZW), new StatementProperties(92, 4, 2, 30),
                 operatorProvider, new SimpleMeterRegistry());
     }
 
@@ -201,9 +201,9 @@ class StatementServiceTest {
         when(operatorPort.authorizeAndDescribeAccount(credential, "17"))
                 .thenReturn(new OperatorAccountView(WALLET, "USD", "000000017",
                         "Shumba Traders", "0771234567"));
-        when(port.listTransactions(anchorQuery())).thenReturn(new TransactionPage(List.of(
+        when(port.listTransactions(coreIdAnchorQuery("17"))).thenReturn(new TransactionPage(List.of(
                 entry("9", CREDIT, 2_000, 10_000L, FROM.minusDays(3))), null));
-        when(port.listTransactions(periodQuery(0))).thenReturn(new TransactionPage(List.of(), 0L));
+        when(port.listTransactions(coreIdPeriodQuery("17", 0))).thenReturn(new TransactionPage(List.of(), 0L));
 
         StatementDocument doc = service.statementForOperator(credential, "17", FROM, TO);
 
@@ -216,19 +216,39 @@ class StatementServiceTest {
         assertThat(doc.openingBalanceMinor()).isEqualTo(10_000);
     }
 
+    /**
+     * The majority console case in practice: a branch-created account with no
+     * external reference. The reads are keyed by the CORE'S OWN account id —
+     * the exact id the operator was just authorised against — so the account
+     * needs no external id at all, and the Mockito stubs above double as the
+     * proof (an external-ref query would return null and NPE the assembler).
+     */
     @Test
-    void operatorStatementRefusesAnAccountWithoutAnExternalReference() {
+    void operatorStatementCoversBranchAccountsWithoutAnExternalReference() {
         OperatorCredential credential = new OperatorCredential("Basic b3A6cHc=");
         when(operatorPort.authorizeAndDescribeAccount(credential, "23"))
-                .thenReturn(new OperatorAccountView(null, "USD", "000000023", null, null));
+                .thenReturn(new OperatorAccountView(null, "USD", "000000023", "Walk In", null));
+        when(port.listTransactions(coreIdAnchorQuery("23")))
+                .thenReturn(new TransactionPage(List.of(), 0L));
+        when(port.listTransactions(coreIdPeriodQuery("23", 0)))
+                .thenReturn(new TransactionPage(List.of(
+                        entry("41", CREDIT, 5_000, 5_000L, FROM.plusDays(2))), 1L));
 
-        assertThatThrownBy(() -> service.statementForOperator(credential, "23", FROM, TO))
-                .isInstanceOf(StatementRequestException.class)
-                .satisfies(ex -> {
-                    assertThat(((StatementRequestException) ex).errorCode())
-                            .isEqualTo("statement_unsupported_account");
-                    assertThat(((StatementRequestException) ex).unprocessable()).isTrue();
-                });
+        StatementDocument doc = service.statementForOperator(credential, "23", FROM, TO);
+
+        assertThat(doc.accountId()).isEqualTo("000000023");
+        assertThat(doc.customerName()).isEqualTo("Walk In");
+        assertThat(doc.openingBalanceMinor()).isZero();
+        assertThat(doc.closingBalanceMinor()).isEqualTo(5_000);
+        assertThat(doc.lines()).extracting(StatementLine::coreId).containsExactly("41");
+    }
+
+    private static TransactionHistoryQuery coreIdAnchorQuery(String coreAccountId) {
+        return TransactionHistoryQuery.byCoreAccountId(coreAccountId, null, FROM.minusDays(1), 0, 5);
+    }
+
+    private static TransactionHistoryQuery coreIdPeriodQuery(String coreAccountId, int offset) {
+        return TransactionHistoryQuery.byCoreAccountId(coreAccountId, FROM, TO, offset, 2);
     }
 
     @Test
@@ -238,7 +258,7 @@ class StatementServiceTest {
         when(absent.getIfAvailable()).thenReturn(null);
         StatementService withoutGateway = new StatementService(customers, port,
                 serviceResolver(), new CountryProperties(Country.ZW),
-                new StatementProperties(92, 4, 2), absent, new SimpleMeterRegistry());
+                new StatementProperties(92, 4, 2, 30), absent, new SimpleMeterRegistry());
 
         assertThatThrownBy(() -> withoutGateway.statementForOperator(
                 new OperatorCredential("Basic b3A6cHc="), "17", FROM, TO))

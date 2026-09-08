@@ -353,8 +353,11 @@ public class FineractAdapter implements CoreBankingPort {
 
     @Override
     public TransactionPage listTransactions(TransactionHistoryQuery query) {
-        TransactionSearchPage page = client.searchSavingsTransactions(
-                query.account().externalId(), query.from(), query.to(), query.offset(), query.limit());
+        TransactionSearchPage page = query.coreAccountId() != null
+                ? client.searchSavingsTransactionsByCoreId(
+                        query.coreAccountId(), query.from(), query.to(), query.offset(), query.limit())
+                : client.searchSavingsTransactions(
+                        query.account().externalId(), query.from(), query.to(), query.offset(), query.limit());
         if (page == null || page.pageItems() == null) {
             // A positive 404 on the account, or an empty page — an empty
             // statement is a legitimate answer, not a failure. Here 0 is a
