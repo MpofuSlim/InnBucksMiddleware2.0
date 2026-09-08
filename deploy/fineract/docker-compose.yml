@@ -17,6 +17,22 @@
 name: innbucks-fineract
 
 services:
+  # One-shot ownership fix for the document/image content volume. The Jib
+  # image runs Fineract as nobody (uid 65534) and /fineract-content does not
+  # exist inside the image, so Docker initialises the fresh named volume as
+  # root:root 755 — and EVERY document upload then dies with a 500, because
+  # filesystem storage is the active content backend (S3 is deliberately off).
+  # Ownership lives on the volume, so this completes once and is a no-op on
+  # every restart after. Numeric ids on purpose: they hold regardless of what
+  # /etc/passwd calls uid 65534 in either image.
+  fineract-content-init:
+    image: alpine:3.22
+    command: chown -R 65534:65534 /fineract-content
+    volumes:
+      - innbucks-fineract-content:/fineract-content
+    network_mode: "none"
+    restart: "no"
+
   fineract-db:
     # Matches the Postgres line the fork's own compose tests against.
     image: postgres:18.3
@@ -57,6 +73,8 @@ services:
     depends_on:
       fineract-db:
         condition: service_healthy
+      fineract-content-init:
+        condition: service_completed_successfully
     environment:
       FINERACT_NODE_ID: "1"
 
