@@ -950,7 +950,8 @@ commands, with the exact bytes that were running before. Full procedure
      `innbucks-mw-read` never gains loan access. No re-provisioning to switch
      it on.
    - **Fineract has TWO JSON writers and the loan endpoints use both — read
-     from the fork, not observed on a cell:** `GET /v1/loans/{id}` is a Gson
+     from the fork, then FIELD-VERIFIED on the ZW cell (2026-09-08):**
+     `GET /v1/loans/{id}` is a Gson
      String (fields, `[y,m,d]` dates, ExternalIdAdapter), while
      `GET /v1/loans/{id}/transactions` returns Spring's `Page<LoanTransactionData>`
      through Jersey's JACKSON writer (`JerseyJacksonObjectArgumentHandler`:
@@ -966,6 +967,22 @@ commands, with the exact bytes that were running before. Full procedure
      reversal, so a reversed row anchors nothing. Type→kind/effect table
      (keyed on the numeric `LoanTransactionType` id) in
      `FineractOperatorGateway.classify`.
+   - **The staging verification (2026-09-08), worth keeping:** all seven live
+     loans statemented, and on every disbursed one both invariants held —
+     `opening + Σ principalDeltaMinor == closing` AND `closing ==
+     position.principalOutstandingMinor` (zero
+     `innbucks.loan_statement.balance_mismatch`), which is the real proof that
+     the type→principal-effect table agrees with Fineract's own
+     `outstanding_loan_balance_derived`. Three shapes confirmed live: a
+     rejected (never-disbursed) loan returns `position: null` with no lines,
+     Jackson's `NON_NULL` really does DROP an unallocated fee/penalty portion
+     (so `feesMinor` is absent, not `0` — render blank), and **on a written-off
+     loan `totals.writtenOffMinor` EXCEEDS `totals.disbursedMinor`** (loan 7:
+     3 666.09 written off against 3 000.00 disbursed) because the write-off
+     line's amount is principal + interest + fees while only its principal
+     portion moves the balance. That last one is not a bug and must not be
+     "fixed" into agreement — but it is the number an operator will query
+     first, so the FE doc says it explicitly.
    Contract pinned by the loan cases in `FineractOperatorGatewayContractTest`
    (both writers' shapes, sort/paging/exclusions on the wire, `verify(0,
    …ourBasic…)`), `LoanStatementAssemblerTest`, `LoanStatementServiceTest`
