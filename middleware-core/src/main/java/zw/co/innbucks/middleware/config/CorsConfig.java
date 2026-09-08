@@ -33,7 +33,9 @@ public class CorsConfig {
                 "X-Request-Id",
                 "Idempotency-Key"
         ));
-        config.setExposedHeaders(List.of("X-Request-Id"));
+        // Content-Disposition must be exposed or cross-origin JS reads it as
+        // null and the console cannot use the server-chosen statement filename.
+        config.setExposedHeaders(List.of("X-Request-Id", "Content-Disposition"));
         config.setAllowCredentials(false);
         config.setMaxAge(3600L);
 

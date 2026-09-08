@@ -179,15 +179,36 @@ class ConsoleStatementFlowIntegrationTest {
                 .andExpect(jsonPath("$.errorCode").value("account_not_accessible"));
     }
 
+    /**
+     * The majority console case: a branch-created account with no external
+     * reference. The transaction reads must be addressed by the CORE account
+     * id the operator quoted — the stub refuses anything else, so a
+     * regression back to external-ref addressing fails loudly here.
+     */
     @Test
-    void branchAccountWithoutExternalReferenceIs422() throws Exception {
+    void branchAccountWithoutExternalReferenceStillGetsItsStatement() throws Exception {
         stubOperatorPort.onAuthorize = (credential, accountId) ->
                 new OperatorAccountView(null, "KES", "000000023", "Walk In", null);
+        stubPort.onListTransactions = query -> {
+            assertThat(query.coreAccountId()).isEqualTo("17");
+            assertThat(query.account()).isNull();
+            if (query.from() == null) {
+                return new TransactionPage(List.of(), 0L);
+            }
+            return new TransactionPage(List.of(
+                    new TransactionEntry("41", null, TransactionDirection.CREDIT, "Deposit",
+                            new MinorUnits(5_000L, "KES"), new MinorUnits(5_000L, "KES"),
+                            FROM.plusDays(2), false)),
+                    1L);
+        };
 
         mockMvc.perform(get("/console/savings-accounts/{id}/statement", "17")
                         .param("from", "2026-08-01").param("to", "2026-08-31")
                         .header(HttpHeaders.AUTHORIZATION, OPERATOR_BASIC))
-                .andExpect(status().isUnprocessableEntity())
-                .andExpect(jsonPath("$.errorCode").value("statement_unsupported_account"));
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.accountId").value("000000023"))
+                .andExpect(jsonPath("$.customerName").value("Walk In"))
+                .andExpect(jsonPath("$.openingBalanceMinor").value(0))
+                .andExpect(jsonPath("$.closingBalanceMinor").value(5_000));
     }
 }

@@ -122,6 +122,10 @@ innbucks:
     max-period-days: ${STATEMENT_MAX_PERIOD_DAYS:92}
     max-entries: ${STATEMENT_MAX_ENTRIES:1000}
     page-size: ${STATEMENT_PAGE_SIZE:100}
+    # Console statement throttle, per source ADDRESS per minute (the
+    # operator-password-oracle defence — see ConsoleStatementRateLimiter).
+    # A busy branch behind one NAT shares a bucket; raise deliberately.
+    console-requests-per-minute: ${STATEMENT_CONSOLE_REQUESTS_PER_MINUTE:30}
   ledger:
     # How often the reconciler sweeps (fixed-delay). Stale PENDING rows are
     # parked as UNKNOWN after stale-pending-threshold; parked/in-flight rows

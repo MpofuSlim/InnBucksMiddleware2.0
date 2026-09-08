@@ -93,7 +93,7 @@ public class StatementService {
         validatePeriod(from, to);
         Customer customer = requireMappedCustomer(customerId);
         DepositAccountRef account = requireOwnedAccount(customer, accountId);
-        StatementDocument document = assembleFor(account.account(), accountId,
+        StatementDocument document = assembleFor(byExternalRef(account.account()), accountId,
                 account.currencyCode(), displayName(customer), customer.getMsisdn(), from, to);
         generatedCustomer.increment();
         return document;
@@ -106,6 +106,11 @@ public class StatementService {
      * fully delegated to the core via {@link CoreOperatorPort}: this method
      * runs no ownership check of its own because the core already refused
      * operators who may not read the account.
+     *
+     * <p>Transactions are read by the CORE'S OWN account id — the exact key
+     * the operator was just authorised against — so branch-created accounts
+     * (which carry no external reference) statement like any other. Both
+     * addressings are two keys to one account by the port contract.
      */
     public StatementDocument statementForOperator(OperatorCredential credential,
                                                   String savingsAccountId,
@@ -117,23 +122,32 @@ public class StatementService {
                     "This cell's core adapter does not support operator-credential reads.");
         }
         OperatorAccountView account = port.authorizeAndDescribeAccount(credential, savingsAccountId);
-        if (account.accountExternalId() == null) {
-            // Transactions are read through the port by external reference; a
-            // branch-created account has none. Refusing beats guessing.
-            throw StatementRequestException.unsupportedAccount();
-        }
-        StatementDocument document = assembleFor(new AccountRef(account.accountExternalId()),
+        StatementDocument document = assembleFor(byCoreAccountId(savingsAccountId),
                 account.accountNumber(), account.currencyCode(), account.holderName(),
                 account.holderMobile(), from, to);
         generatedConsole.increment();
         return document;
     }
 
-    private StatementDocument assembleFor(AccountRef account, String displayAccountId,
+    /** How this statement's reads address the account — one key, both reads. */
+    private interface QueryFactory {
+        TransactionHistoryQuery make(LocalDate from, LocalDate to, int offset, int limit);
+    }
+
+    private static QueryFactory byExternalRef(AccountRef account) {
+        return (from, to, offset, limit) -> new TransactionHistoryQuery(account, from, to, offset, limit);
+    }
+
+    private static QueryFactory byCoreAccountId(String coreAccountId) {
+        return (from, to, offset, limit) ->
+                TransactionHistoryQuery.byCoreAccountId(coreAccountId, from, to, offset, limit);
+    }
+
+    private StatementDocument assembleFor(QueryFactory queries, String displayAccountId,
                                           String currencyCode, String holderName, String msisdn,
                                           LocalDate from, LocalDate to) {
-        Anchor anchor = openingAnchor(account, from);
-        List<TransactionEntry> chronological = collectPeriod(account, from, to);
+        Anchor anchor = openingAnchor(queries, from);
+        List<TransactionEntry> chronological = collectPeriod(queries, from, to);
 
         StatementAssembler.Result result = StatementAssembler.assemble(
                 displayAccountId, currencyCode, holderName, msisdn,
@@ -169,9 +183,9 @@ public class StatementService {
      * exact, not approximate. Reversed entries are skipped as anchors and
      * contribute nothing, matching the assembler's policy.
      */
-    private Anchor openingAnchor(AccountRef account, LocalDate from) {
-        TransactionPage before = corePort.listTransactions(new TransactionHistoryQuery(
-                account, null, from.minusDays(1), 0, ANCHOR_PROBE_ENTRIES));
+    private Anchor openingAnchor(QueryFactory queries, LocalDate from) {
+        TransactionPage before = corePort.listTransactions(
+                queries.make(null, from.minusDays(1), 0, ANCHOR_PROBE_ENTRIES));
         if (before.entries().isEmpty()) {
             return new Anchor(null, false);
         }
@@ -190,13 +204,13 @@ public class StatementService {
         return new Anchor(null, true);
     }
 
-    private List<TransactionEntry> collectPeriod(AccountRef account, LocalDate from, LocalDate to) {
+    private List<TransactionEntry> collectPeriod(QueryFactory queries, LocalDate from, LocalDate to) {
         List<TransactionEntry> newestFirst = new ArrayList<>();
         int offset = 0;
         int pageSize = properties.pageSize();
         while (true) {
             TransactionPage page = corePort.listTransactions(
-                    new TransactionHistoryQuery(account, from, to, offset, pageSize));
+                    queries.make(from, to, offset, pageSize));
             newestFirst.addAll(page.entries());
             if (newestFirst.size() > properties.maxEntries()) {
                 throw StatementRequestException.tooLarge(properties.maxEntries());

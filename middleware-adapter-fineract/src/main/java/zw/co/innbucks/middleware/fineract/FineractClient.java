@@ -129,9 +129,30 @@ public class FineractClient {
     public TransactionSearchPage searchSavingsTransactions(String accountExternalId,
                                                            LocalDate from, LocalDate to,
                                                            int offset, int limit) {
+        return searchTransactions("/v1/savingsaccounts/external-id/{acct}/transactions/search",
+                accountExternalId, from, to, offset, limit);
+    }
+
+    /**
+     * The same search keyed by the NUMERIC savings account id — the handle an
+     * operator quotes, and the only one a branch-created account has (no
+     * externalId). In the fork both path variants funnel into the same private
+     * {@code searchTransactions} method, so parameters, ordering and envelope
+     * are identical by construction.
+     */
+    public TransactionSearchPage searchSavingsTransactionsByCoreId(String savingsAccountId,
+                                                                   LocalDate from, LocalDate to,
+                                                                   int offset, int limit) {
+        return searchTransactions("/v1/savingsaccounts/{id}/transactions/search",
+                savingsAccountId, from, to, offset, limit);
+    }
+
+    private TransactionSearchPage searchTransactions(String pathTemplate, String accountKey,
+                                                     LocalDate from, LocalDate to,
+                                                     int offset, int limit) {
         return read(() -> readClient.get()
                 .uri(uri -> {
-                    uri.path("/v1/savingsaccounts/external-id/{acct}/transactions/search")
+                    uri.path(pathTemplate)
                             .queryParam("offset", offset)
                             .queryParam("limit", limit)
                             .queryParam("orderBy", "transactionDate,id")
@@ -144,7 +165,7 @@ public class FineractClient {
                     if (to != null) {
                         uri.queryParam("toDate", to.format(dateFormatter));
                     }
-                    return uri.build(accountExternalId);
+                    return uri.build(accountKey);
                 })
                 .retrieve()
                 .body(TransactionSearchPage.class));
