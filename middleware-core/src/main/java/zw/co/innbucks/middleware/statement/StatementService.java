@@ -6,8 +6,13 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.stereotype.Service;
 import zw.co.innbucks.middleware.common.country.CountryProperties;
+import org.springframework.beans.factory.ObjectProvider;
 import zw.co.innbucks.middleware.corebanking.CoreBankingPort;
+import zw.co.innbucks.middleware.corebanking.CoreOperatorPort;
 import zw.co.innbucks.middleware.corebanking.exception.CoreBankingException;
+import zw.co.innbucks.middleware.corebanking.value.AccountRef;
+import zw.co.innbucks.middleware.corebanking.value.OperatorAccountView;
+import zw.co.innbucks.middleware.corebanking.value.OperatorCredential;
 import zw.co.innbucks.middleware.corebanking.value.CoreCustomerRef;
 import zw.co.innbucks.middleware.corebanking.value.DepositAccountRef;
 import zw.co.innbucks.middleware.corebanking.value.TransactionDirection;
@@ -64,18 +69,23 @@ public class StatementService {
     private final CustomerNameResolver nameResolver;
     private final CountryProperties countryProperties;
     private final StatementProperties properties;
-    private final Counter generated;
+    private final ObjectProvider<CoreOperatorPort> operatorPort;
+    private final Counter generatedCustomer;
+    private final Counter generatedConsole;
     private final Counter balanceMismatches;
 
     public StatementService(CustomerRepository customerRepository, CoreBankingPort corePort,
                             CustomerNameResolver nameResolver, CountryProperties countryProperties,
-                            StatementProperties properties, MeterRegistry meterRegistry) {
+                            StatementProperties properties, ObjectProvider<CoreOperatorPort> operatorPort,
+                            MeterRegistry meterRegistry) {
         this.customerRepository = customerRepository;
         this.corePort = corePort;
         this.nameResolver = nameResolver;
         this.countryProperties = countryProperties;
         this.properties = properties;
-        this.generated = meterRegistry.counter("innbucks.statement.generated");
+        this.operatorPort = operatorPort;
+        this.generatedCustomer = meterRegistry.counter("innbucks.statement.generated", "surface", "customer");
+        this.generatedConsole = meterRegistry.counter("innbucks.statement.generated", "surface", "console");
         this.balanceMismatches = meterRegistry.counter("innbucks.statement.balance_mismatch");
     }
 
@@ -83,12 +93,50 @@ public class StatementService {
         validatePeriod(from, to);
         Customer customer = requireMappedCustomer(customerId);
         DepositAccountRef account = requireOwnedAccount(customer, accountId);
+        StatementDocument document = assembleFor(account.account(), accountId,
+                account.currencyCode(), displayName(customer), customer.getMsisdn(), from, to);
+        generatedCustomer.increment();
+        return document;
+    }
 
+    /**
+     * The console (bank-issued) statement. Same balance policy, same
+     * renderings — the ONLY differences are who vouches for the caller and
+     * whose name heads the document. Authentication and authorisation are
+     * fully delegated to the core via {@link CoreOperatorPort}: this method
+     * runs no ownership check of its own because the core already refused
+     * operators who may not read the account.
+     */
+    public StatementDocument statementForOperator(OperatorCredential credential,
+                                                  String savingsAccountId,
+                                                  LocalDate from, LocalDate to) {
+        validatePeriod(from, to);
+        CoreOperatorPort port = operatorPort.getIfAvailable();
+        if (port == null) {
+            throw new StatementUnavailableException(
+                    "This cell's core adapter does not support operator-credential reads.");
+        }
+        OperatorAccountView account = port.authorizeAndDescribeAccount(credential, savingsAccountId);
+        if (account.accountExternalId() == null) {
+            // Transactions are read through the port by external reference; a
+            // branch-created account has none. Refusing beats guessing.
+            throw StatementRequestException.unsupportedAccount();
+        }
+        StatementDocument document = assembleFor(new AccountRef(account.accountExternalId()),
+                account.accountNumber(), account.currencyCode(), account.holderName(),
+                account.holderMobile(), from, to);
+        generatedConsole.increment();
+        return document;
+    }
+
+    private StatementDocument assembleFor(AccountRef account, String displayAccountId,
+                                          String currencyCode, String holderName, String msisdn,
+                                          LocalDate from, LocalDate to) {
         Anchor anchor = openingAnchor(account, from);
         List<TransactionEntry> chronological = collectPeriod(account, from, to);
 
         StatementAssembler.Result result = StatementAssembler.assemble(
-                accountId, account.currencyCode(), displayName(customer), customer.getMsisdn(),
+                displayAccountId, currencyCode, holderName, msisdn,
                 from, to, Instant.now(), countryProperties.country().zoneId(),
                 anchor.openingMinor(), anchor.historyBeforePeriod(), chronological);
 
@@ -98,9 +146,8 @@ public class StatementService {
             // this is the operator signal that the two are drifting apart.
             balanceMismatches.increment(result.balanceMismatches());
             log.warn("Statement for account {} had {} core balance/amount disagreement(s) in {}..{}",
-                    accountId, result.balanceMismatches(), from, to);
+                    displayAccountId, result.balanceMismatches(), from, to);
         }
-        generated.increment();
         return result.document();
     }
 
@@ -122,9 +169,9 @@ public class StatementService {
      * exact, not approximate. Reversed entries are skipped as anchors and
      * contribute nothing, matching the assembler's policy.
      */
-    private Anchor openingAnchor(DepositAccountRef account, LocalDate from) {
+    private Anchor openingAnchor(AccountRef account, LocalDate from) {
         TransactionPage before = corePort.listTransactions(new TransactionHistoryQuery(
-                account.account(), null, from.minusDays(1), 0, ANCHOR_PROBE_ENTRIES));
+                account, null, from.minusDays(1), 0, ANCHOR_PROBE_ENTRIES));
         if (before.entries().isEmpty()) {
             return new Anchor(null, false);
         }
@@ -143,13 +190,13 @@ public class StatementService {
         return new Anchor(null, true);
     }
 
-    private List<TransactionEntry> collectPeriod(DepositAccountRef account, LocalDate from, LocalDate to) {
+    private List<TransactionEntry> collectPeriod(AccountRef account, LocalDate from, LocalDate to) {
         List<TransactionEntry> newestFirst = new ArrayList<>();
         int offset = 0;
         int pageSize = properties.pageSize();
         while (true) {
             TransactionPage page = corePort.listTransactions(
-                    new TransactionHistoryQuery(account.account(), from, to, offset, pageSize));
+                    new TransactionHistoryQuery(account, from, to, offset, pageSize));
             newestFirst.addAll(page.entries());
             if (newestFirst.size() > properties.maxEntries()) {
                 throw StatementRequestException.tooLarge(properties.maxEntries());

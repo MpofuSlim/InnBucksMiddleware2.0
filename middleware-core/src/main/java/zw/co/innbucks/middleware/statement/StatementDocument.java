@@ -25,8 +25,11 @@ import java.util.Objects;
  * record) and reports the disagreement to the caller instead of hiding it.
  *
  * @param customerName best-effort display name from the core; null when the
- *                     core has no profile (the statement still renders — the
- *                     MSISDN identifies the holder)
+ *                     core has no profile
+ * @param msisdn       the holder's mobile as known to whichever surface built
+ *                     the statement; NULLABLE — a console statement for a
+ *                     branch-registered client may have none, and the account
+ *                     identity carries the document then
  * @param generatedAt  the instant this document was assembled; rendered in
  *                     {@code displayZone} (the deployment country's civil
  *                     zone — storage and logs stay UTC, per the house rule)
@@ -50,7 +53,6 @@ public record StatementDocument(
     public StatementDocument {
         Objects.requireNonNull(accountId, "accountId");
         Objects.requireNonNull(currencyCode, "currencyCode");
-        Objects.requireNonNull(msisdn, "msisdn");
         Objects.requireNonNull(from, "from");
         Objects.requireNonNull(to, "to");
         Objects.requireNonNull(generatedAt, "generatedAt");

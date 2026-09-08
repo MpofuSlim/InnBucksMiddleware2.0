@@ -7,6 +7,7 @@ import org.springframework.beans.factory.ObjectProvider;
 import zw.co.innbucks.middleware.common.country.Country;
 import zw.co.innbucks.middleware.common.country.CountryProperties;
 import zw.co.innbucks.middleware.corebanking.CoreBankingPort;
+import zw.co.innbucks.middleware.corebanking.CoreOperatorPort;
 import zw.co.innbucks.middleware.corebanking.CoreProvider;
 import zw.co.innbucks.middleware.corebanking.exception.CoreTransientException;
 import zw.co.innbucks.middleware.corebanking.value.AccountRef;
@@ -14,6 +15,8 @@ import zw.co.innbucks.middleware.corebanking.value.CoreCustomerRef;
 import zw.co.innbucks.middleware.corebanking.value.CustomerProfile;
 import zw.co.innbucks.middleware.corebanking.value.DepositAccountRef;
 import zw.co.innbucks.middleware.corebanking.value.MinorUnits;
+import zw.co.innbucks.middleware.corebanking.value.OperatorAccountView;
+import zw.co.innbucks.middleware.corebanking.value.OperatorCredential;
 import zw.co.innbucks.middleware.corebanking.value.TransactionDirection;
 import zw.co.innbucks.middleware.corebanking.value.TransactionEntry;
 import zw.co.innbucks.middleware.corebanking.value.TransactionHistoryQuery;
@@ -47,6 +50,7 @@ class StatementServiceTest {
 
     private final CustomerRepository customers = mock(CustomerRepository.class);
     private final CoreBankingPort port = mock(CoreBankingPort.class);
+    private final CoreOperatorPort operatorPort = mock(CoreOperatorPort.class);
 
     private StatementService service;
 
@@ -71,10 +75,13 @@ class StatementServiceTest {
         CustomerNameResolver resolver = new CustomerNameResolver(provider,
                 new ProfileCacheProperties(false, Duration.ofMinutes(5), 1000), new SimpleMeterRegistry());
 
+        ObjectProvider<CoreOperatorPort> operatorProvider = mock(ObjectProvider.class);
+        when(operatorProvider.getIfAvailable()).thenReturn(operatorPort);
+
         // pageSize 2 so the paging loop is actually exercised.
         service = new StatementService(customers, port, resolver,
                 new CountryProperties(Country.ZW), new StatementProperties(92, 4, 2),
-                new SimpleMeterRegistry());
+                operatorProvider, new SimpleMeterRegistry());
     }
 
     private static TransactionEntry entry(String id, TransactionDirection direction, long amount,
@@ -171,7 +178,7 @@ class StatementServiceTest {
                 .satisfies(ex -> {
                     assertThat(((StatementRequestException) ex).errorCode())
                             .isEqualTo("statement_too_large");
-                    assertThat(((StatementRequestException) ex).tooLarge()).isTrue();
+                    assertThat(((StatementRequestException) ex).unprocessable()).isTrue();
                 });
     }
 
@@ -186,6 +193,64 @@ class StatementServiceTest {
 
         assertThat(doc.customerName()).isNull();
         assertThat(doc.msisdn()).isEqualTo("+263771234567");
+    }
+
+    @Test
+    void operatorStatementDelegatesAuthorisationToTheCoreAndRendersTheHolder() {
+        OperatorCredential credential = new OperatorCredential("Basic b3A6cHc=");
+        when(operatorPort.authorizeAndDescribeAccount(credential, "17"))
+                .thenReturn(new OperatorAccountView(WALLET, "USD", "000000017",
+                        "Shumba Traders", "0771234567"));
+        when(port.listTransactions(anchorQuery())).thenReturn(new TransactionPage(List.of(
+                entry("9", CREDIT, 2_000, 10_000L, FROM.minusDays(3))), null));
+        when(port.listTransactions(periodQuery(0))).thenReturn(new TransactionPage(List.of(), 0L));
+
+        StatementDocument doc = service.statementForOperator(credential, "17", FROM, TO);
+
+        // The document is headed by what the CORE said, not by any local row —
+        // the account NUMBER identifies it, the holder may have an
+        // unnormalised mobile, and no customer table was consulted.
+        assertThat(doc.accountId()).isEqualTo("000000017");
+        assertThat(doc.customerName()).isEqualTo("Shumba Traders");
+        assertThat(doc.msisdn()).isEqualTo("0771234567");
+        assertThat(doc.openingBalanceMinor()).isEqualTo(10_000);
+    }
+
+    @Test
+    void operatorStatementRefusesAnAccountWithoutAnExternalReference() {
+        OperatorCredential credential = new OperatorCredential("Basic b3A6cHc=");
+        when(operatorPort.authorizeAndDescribeAccount(credential, "23"))
+                .thenReturn(new OperatorAccountView(null, "USD", "000000023", null, null));
+
+        assertThatThrownBy(() -> service.statementForOperator(credential, "23", FROM, TO))
+                .isInstanceOf(StatementRequestException.class)
+                .satisfies(ex -> {
+                    assertThat(((StatementRequestException) ex).errorCode())
+                            .isEqualTo("statement_unsupported_account");
+                    assertThat(((StatementRequestException) ex).unprocessable()).isTrue();
+                });
+    }
+
+    @Test
+    void operatorStatementIsUnavailableWhenTheCellHasNoOperatorGateway() {
+        @SuppressWarnings("unchecked")
+        ObjectProvider<CoreOperatorPort> absent = mock(ObjectProvider.class);
+        when(absent.getIfAvailable()).thenReturn(null);
+        StatementService withoutGateway = new StatementService(customers, port,
+                serviceResolver(), new CountryProperties(Country.ZW),
+                new StatementProperties(92, 4, 2), absent, new SimpleMeterRegistry());
+
+        assertThatThrownBy(() -> withoutGateway.statementForOperator(
+                new OperatorCredential("Basic b3A6cHc="), "17", FROM, TO))
+                .isInstanceOf(StatementUnavailableException.class);
+    }
+
+    @SuppressWarnings("unchecked")
+    private CustomerNameResolver serviceResolver() {
+        ObjectProvider<CoreBankingPort> provider = mock(ObjectProvider.class);
+        when(provider.getIfAvailable()).thenReturn(port);
+        return new CustomerNameResolver(provider,
+                new ProfileCacheProperties(false, Duration.ofMinutes(5), 1000), new SimpleMeterRegistry());
     }
 
     private static TransactionPage fullPage(String idA, String idB) {

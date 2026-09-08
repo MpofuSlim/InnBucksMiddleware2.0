@@ -34,7 +34,7 @@ public final class CsvStatementRenderer {
         row(out, "InnBucks Account Statement");
         row(out, "Account", s.accountId());
         row(out, "Customer", s.customerName() == null ? "" : s.customerName());
-        row(out, "Mobile", s.msisdn());
+        row(out, "Mobile", s.msisdn() == null ? "" : s.msisdn());
         row(out, "Currency", ccy);
         row(out, "Period", DATE.format(s.from()) + " to " + DATE.format(s.to()));
         row(out, "Generated", GENERATED.format(s.generatedAt().atZone(s.displayZone())));

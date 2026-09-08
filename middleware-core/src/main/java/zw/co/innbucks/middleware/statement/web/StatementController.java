@@ -27,12 +27,9 @@ import zw.co.innbucks.middleware.statement.StatementDocument;
 import zw.co.innbucks.middleware.statement.StatementRequestException;
 import zw.co.innbucks.middleware.statement.StatementService;
 import zw.co.innbucks.middleware.statement.StatementUnavailableException;
-import zw.co.innbucks.middleware.statement.render.CsvStatementRenderer;
-import zw.co.innbucks.middleware.statement.render.PdfStatementRenderer;
 
 import java.net.URI;
 import java.time.LocalDate;
-import java.util.Locale;
 import java.util.UUID;
 
 /**
@@ -97,44 +94,15 @@ public class StatementController {
                     schema = @Schema(allowableValues = {"json", "pdf", "csv"}, defaultValue = "json"))
             @RequestParam(defaultValue = "json") String format) {
 
-        String rendering = format.toLowerCase(Locale.ROOT);
-        if (!rendering.equals("json") && !rendering.equals("pdf") && !rendering.equals("csv")) {
-            throw StatementRequestException.invalidFormat(format);
-        }
-
+        String rendering = StatementDownloads.rendering(format);
         StatementDocument document = statementService.statementFor(
                 UUID.fromString(jwt.getSubject()), accountId, from, to);
-
-        return switch (rendering) {
-            case "pdf" -> download(PdfStatementRenderer.render(document),
-                    MediaType.APPLICATION_PDF, filename(document, "pdf"));
-            case "csv" -> download(CsvStatementRenderer.render(document),
-                    MediaType.parseMediaType("text/csv;charset=UTF-8"), filename(document, "csv"));
-            default -> ResponseEntity.ok(StatementResponse.of(document));
-        };
-    }
-
-    private static ResponseEntity<byte[]> download(byte[] body, MediaType type, String filename) {
-        return ResponseEntity.ok()
-                .contentType(type)
-                .header("Content-Disposition", "attachment; filename=\"" + filename + "\"")
-                .body(body);
-    }
-
-    /**
-     * Colon-free (the accountId contains one, and a colon breaks the filename
-     * on half the operating systems the download lands on), identified by the
-     * same last-4 tail the app already shows for the account.
-     */
-    private static String filename(StatementDocument document, String extension) {
-        String alnum = document.accountId().replaceAll("[^A-Za-z0-9]", "");
-        String tail = alnum.length() >= 4 ? alnum.substring(alnum.length() - 4) : alnum;
-        return "innbucks-statement-" + tail + "-" + document.from() + "-" + document.to() + "." + extension;
+        return StatementDownloads.respond(rendering, document);
     }
 
     @ExceptionHandler(StatementRequestException.class)
     public ResponseEntity<ProblemDetail> badRequest(StatementRequestException ex) {
-        HttpStatus status = ex.tooLarge() ? HttpStatus.UNPROCESSABLE_ENTITY : HttpStatus.BAD_REQUEST;
+        HttpStatus status = ex.unprocessable() ? HttpStatus.UNPROCESSABLE_ENTITY : HttpStatus.BAD_REQUEST;
         return problem(status, "Statement not producible as asked", ex.getMessage(), ex.errorCode());
     }
 
