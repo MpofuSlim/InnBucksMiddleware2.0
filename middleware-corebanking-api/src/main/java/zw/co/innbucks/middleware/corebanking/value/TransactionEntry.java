@@ -18,6 +18,16 @@ import java.util.Objects;
  *                    report one (it is not guaranteed for every entry type)
  * @param narrative   the core's label for the entry (e.g. "Deposit",
  *                    "Interest Posting") — display text, never parsed
+ * @param balanceNeutral true for entries whose amount MOVES NO MONEY — a
+ *                    waived charge, an accrual, a transfer-status marker. The
+ *                    core records them with an amount (what was waived or
+ *                    accrued) but its own running balance does not move, so
+ *                    consumers must exclude them from credit/debit totals and
+ *                    balance arithmetic or the document stops reconciling
+ *                    against itself. {@code direction} is display-only for
+ *                    such entries. Distinct from {@code reversed}: a reversed
+ *                    entry DID move money and was undone; a neutral one never
+ *                    moved any.
  */
 public record TransactionEntry(
         String coreId,
@@ -27,7 +37,8 @@ public record TransactionEntry(
         MinorUnits amount,
         MinorUnits runningBalance,
         LocalDate valueDate,
-        boolean reversed
+        boolean reversed,
+        boolean balanceNeutral
 ) {
 
     public TransactionEntry {
@@ -35,5 +46,13 @@ public record TransactionEntry(
         Objects.requireNonNull(direction, "direction");
         Objects.requireNonNull(amount, "amount");
         Objects.requireNonNull(valueDate, "valueDate");
+    }
+
+    /** A balance-moving entry — the overwhelmingly common case. */
+    public TransactionEntry(String coreId, String externalRef, TransactionDirection direction,
+                            String narrative, MinorUnits amount, MinorUnits runningBalance,
+                            LocalDate valueDate, boolean reversed) {
+        this(coreId, externalRef, direction, narrative, amount, runningBalance, valueDate,
+                reversed, false);
     }
 }

@@ -82,7 +82,8 @@ public class ProfileService {
                         e.amount().amount(),
                         e.runningBalance() == null ? null : e.runningBalance().amount(),
                         e.valueDate(),
-                        e.reversed()))
+                        e.reversed(),
+                        e.balanceNeutral()))
                 .toList();
 
         return new StatementView(accountId, account.currencyCode(), entries,

@@ -22,6 +22,10 @@ import java.util.Objects;
  * @param reversed  reversed entries stay ON the statement (a statement is a
  *                  history, not a current view) but are balance-neutral and
  *                  excluded from the credit/debit totals
+ * @param balanceNeutral entries the core records as moving no money (a waived
+ *                  charge, an accrual, a transfer-status marker): shown with
+ *                  their amount, excluded from the credit/debit totals, and
+ *                  the balance does not move across them
  */
 public record StatementLine(
         String coreId,
@@ -31,7 +35,8 @@ public record StatementLine(
         TransactionDirection direction,
         long amountMinor,
         long balanceAfterMinor,
-        boolean reversed
+        boolean reversed,
+        boolean balanceNeutral
 ) {
 
     public StatementLine {

@@ -38,6 +38,12 @@ public record StatementEntryView(
 
         @Schema(description = "True if the entry was reversed. Reversed entries stay on the statement "
                 + "by design — a statement is a history, not a current view.", example = "false")
-        boolean reversed
+        boolean reversed,
+
+        @Schema(description = "True for entries that move no money — a waived charge, an accrual, a "
+                + "transfer-status marker. The amount is what was waived or accrued, the balance does "
+                + "not change across the entry, and it is excluded from any totals. Render it "
+                + "informationally, never as money in or out.", example = "false")
+        boolean balanceNeutral
 ) {
 }

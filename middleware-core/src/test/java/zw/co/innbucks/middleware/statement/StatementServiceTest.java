@@ -138,6 +138,22 @@ class StatementServiceTest {
     }
 
     @Test
+    void anchorWalkContributesZeroForABalancelessBalanceNeutralEntry() {
+        // Newest pre-period entry is a balance-less waived charge: it moved no
+        // money, so the anchor must land at 10 000, not 10 000 − 300.
+        TransactionEntry waive = new TransactionEntry("9", null, DEBIT, "Waive Charge",
+                new MinorUnits(300, "USD"), null, FROM.minusDays(1), false, true);
+        when(port.listTransactions(anchorQuery())).thenReturn(new TransactionPage(List.of(
+                waive,
+                entry("7", DEBIT, 200, 10_000L, FROM.minusDays(4))), null));
+        when(port.listTransactions(periodQuery(0))).thenReturn(new TransactionPage(List.of(), 0L));
+
+        StatementDocument doc = service.statementFor(CUSTOMER, WALLET, FROM, TO);
+
+        assertThat(doc.openingBalanceMinor()).isEqualTo(10_000);
+    }
+
+    @Test
     void someoneElsesAccountIsRefusedBeforeAnyStatementRead() {
         assertThatThrownBy(() -> service.statementFor(CUSTOMER, "not-mine:wallet", FROM, TO))
                 .isInstanceOf(AccountOwnershipException.class);

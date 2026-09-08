@@ -125,6 +125,48 @@ class FineractStatementContractTest {
     }
 
     /**
+     * A waived charge, shaped per the fork's serialisation, NOT observed and
+     * guessed: SavingsAccountTransactionType.WAIVE_CHARGES (id 6) carries no
+     * TransactionEntryType, so Gson DROPS the {@code entryType} key entirely;
+     * the running-balance recalculation (SavingsAccount's isCredit()/isDebit()
+     * loop) skips such types, so {@code runningBalance} is the UNCHANGED
+     * balance. The entry must map balance-neutral or the statement's totals
+     * stop reconciling against its own closing balance by exactly the waived
+     * amount (found by the console dev on a live account).
+     */
+    @Test
+    void aWaivedChargeMapsBalanceNeutralAndADepositDoesNot() {
+        wireMock.stubFor(get(urlPathEqualTo(PATH)).willReturn(okJson("""
+                {
+                  "total": 2,
+                  "content": [
+                    {"id":52,"entryType":"CREDIT",
+                     "transactionType":{"id":1,"code":"savingsAccountTransactionType.deposit",
+                                        "value":"Deposit","deposit":true,"withdrawal":false},
+                     "amount":30.00,"runningBalance":125.49,"reversed":false,"date":[2026,8,20]},
+                    {"id":51,
+                     "transactionType":{"id":6,"code":"savingsAccountTransactionType.waiveCharge",
+                                        "value":"Waive Charge","deposit":false,"withdrawal":false},
+                     "amount":10.00,"runningBalance":95.49,"reversed":false,"date":[2026,8,12]}
+                  ],
+                  "pageable": {"pageNumber":0,"pageSize":20}
+                }""")));
+
+        TransactionPage page = adapter.listTransactions(query(null, null, 0, 20));
+
+        var deposit = page.entries().get(0);
+        assertThat(deposit.balanceNeutral()).isFalse();
+        assertThat(deposit.direction()).isEqualTo(TransactionDirection.CREDIT);
+
+        var waive = page.entries().get(1);
+        assertThat(waive.balanceNeutral()).isTrue();
+        assertThat(waive.narrative()).isEqualTo("Waive Charge");
+        assertThat(waive.amount().amount()).isEqualTo(1000);
+        assertThat(waive.runningBalance().amount()).isEqualTo(9549);
+        assertThat(waive.reversed()).isFalse();
+    }
+
+    /**
      * Core-account-id addressing (the console surface's key for branch-created
      * accounts) rides {@code /v1/savingsaccounts/{id}/transactions/search}. In
      * the fork both path variants delegate to the same private

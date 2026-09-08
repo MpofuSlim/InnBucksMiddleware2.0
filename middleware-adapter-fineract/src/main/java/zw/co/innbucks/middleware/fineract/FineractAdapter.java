@@ -386,7 +386,27 @@ public class FineractAdapter implements CoreBankingPort {
                 MinorUnits.ofMajor(amount, currency),
                 t.runningBalance() == null ? null : MinorUnits.ofMajor(t.runningBalance(), currency),
                 parseDate(t.date()),
-                Boolean.TRUE.equals(t.reversed()));
+                Boolean.TRUE.equals(t.reversed()),
+                balanceNeutral(t));
+    }
+
+    /**
+     * True for entries Fineract itself treats as moving no money. In the fork,
+     * SavingsAccountTransactionType gives WAIVE_CHARGES, ACCRUAL, the
+     * transfer-status markers, WRITTEN_OFF and INVALID no TransactionEntryType
+     * — Gson drops the null, so the wire key is ABSENT — and the running
+     * balance recalculation (SavingsAccount, the isCredit()/isDebit() loop)
+     * skips exactly those types. Mirroring the same predicate keeps our
+     * totals reconciling with the balances the core reports: a waived charge
+     * carried an amount but its running balance did not move.
+     */
+    private static boolean balanceNeutral(FineractDtos.SavingsTransaction t) {
+        if (t.entryType() != null) {
+            return false;
+        }
+        FineractDtos.TransactionTypeData type = t.transactionType();
+        return type == null
+                || (!Boolean.TRUE.equals(type.deposit()) && !Boolean.TRUE.equals(type.withdrawal()));
     }
 
     /**

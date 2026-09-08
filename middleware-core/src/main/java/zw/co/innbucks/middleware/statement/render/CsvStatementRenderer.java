@@ -44,7 +44,8 @@ public final class CsvStatementRenderer {
         row(out, "Closing balance", StatementMoney.format(s.closingBalanceMinor(), ccy));
         out.append('\n');
 
-        row(out, "Date", "Description", "Transaction ID", "Reference", "Direction", "Amount", "Balance", "Reversed");
+        row(out, "Date", "Description", "Transaction ID", "Reference", "Direction", "Amount", "Balance",
+                "Reversed", "Balance neutral");
         for (StatementLine line : s.lines()) {
             row(out,
                     DATE.format(line.date()),
@@ -54,7 +55,8 @@ public final class CsvStatementRenderer {
                     line.direction().name(),
                     StatementMoney.format(line.amountMinor(), ccy),
                     StatementMoney.format(line.balanceAfterMinor(), ccy),
-                    Boolean.toString(line.reversed()));
+                    Boolean.toString(line.reversed()),
+                    Boolean.toString(line.balanceNeutral()));
         }
         return out.toString().getBytes(StandardCharsets.UTF_8);
     }

@@ -24,9 +24,11 @@ class CsvStatementRendererTest {
                 10_000, 1_243_000, 1_239_000, 6_000,
                 List.of(
                         new StatementLine("13", "37130855-ref", LocalDate.of(2026, 8, 3),
-                                "Deposit", CREDIT, 1_239_000, 1_249_000, false),
+                                "Deposit", CREDIT, 1_239_000, 1_249_000, false, false),
                         new StatementLine("14", null, LocalDate.of(2026, 8, 5),
-                                "Fee, monthly", DEBIT, 6_000, 1_243_000, false)));
+                                "Fee, monthly", DEBIT, 6_000, 1_243_000, false, false),
+                        new StatementLine("15", null, LocalDate.of(2026, 8, 6),
+                                "Waive Charge", DEBIT, 1_000, 1_243_000, false, true)));
     }
 
     @Test
@@ -43,12 +45,15 @@ class CsvStatementRendererTest {
         assertThat(csv).contains("Opening balance,100.00\n");
         assertThat(csv).contains("Closing balance,\"12,430.00\"\n");
         assertThat(csv).contains(
-                "Date,Description,Transaction ID,Reference,Direction,Amount,Balance,Reversed\n");
+                "Date,Description,Transaction ID,Reference,Direction,Amount,Balance,Reversed,Balance neutral\n");
         assertThat(csv).contains(
-                "2026-08-03,Deposit,13,37130855-ref,CREDIT,\"12,390.00\",\"12,490.00\",false\n");
+                "2026-08-03,Deposit,13,37130855-ref,CREDIT,\"12,390.00\",\"12,490.00\",false,false\n");
         // Narrative containing a comma is quoted; null reference is an empty field.
         assertThat(csv).contains(
-                "2026-08-05,\"Fee, monthly\",14,,DEBIT,60.00,\"12,430.00\",false\n");
+                "2026-08-05,\"Fee, monthly\",14,,DEBIT,60.00,\"12,430.00\",false,false\n");
+        // A waived charge: amount shown, balance unchanged, neutral column true.
+        assertThat(csv).contains(
+                "2026-08-06,Waive Charge,15,,DEBIT,10.00,\"12,430.00\",false,true\n");
     }
 
     @Test

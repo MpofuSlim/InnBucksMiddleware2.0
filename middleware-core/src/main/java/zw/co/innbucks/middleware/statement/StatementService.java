@@ -195,9 +195,13 @@ public class StatementService {
                 continue;
             }
             if (entry.runningBalance() != null) {
+                // A balance-neutral entry's running balance is simply the
+                // unchanged balance — a perfectly good anchor.
                 return new Anchor(entry.runningBalance().amount() + newerDelta, true);
             }
-            newerDelta += signed(entry);
+            if (!entry.balanceNeutral()) {
+                newerDelta += signed(entry);
+            }
         }
         // History exists but nothing probed carries a balance; the assembler
         // will back-derive from the period itself, or refuse honestly.
