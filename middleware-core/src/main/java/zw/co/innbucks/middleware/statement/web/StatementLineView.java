@@ -40,6 +40,13 @@ public record StatementLineView(
         @Schema(description = "True if the entry was reversed. Reversed entries stay on the statement, "
                 + "do not move the balance, and are excluded from the money-in/out totals.",
                 example = "false")
-        boolean reversed
+        boolean reversed,
+
+        @Schema(description = "True for entries that move no money — a waived charge, an accrual, a "
+                + "transfer-status marker. The amount is what was waived or accrued, the balance does "
+                + "not change across the line, and it is excluded from the money-in/out totals. Render "
+                + "informationally, never as money in or out; direction is display-only for these.",
+                example = "false")
+        boolean balanceNeutral
 ) {
 }
