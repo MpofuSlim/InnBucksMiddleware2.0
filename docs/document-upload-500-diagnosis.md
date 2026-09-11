@@ -306,21 +306,37 @@ post-upload check.
 
 ## Fixes
 
-### Immediate, no code, deployable today
+### Immediate, no code — APPLIED
 
-If probes B or C are the cause, widen both whitelists in the `fineract`
-service's `environment:` block in `deploy/fineract/docker-compose.yml`, next to
-`FINERACT_CONTENT_FILESYSTEM_ROOT_FOLDER` at `:172`:
+Both whitelists are now widened in the `fineract` service's `environment:` block
+in `deploy/fineract/docker-compose.yml`, next to
+`FINERACT_CONTENT_FILESYSTEM_ROOT_FOLDER`:
 
 ```yaml
-FINERACT_CONTENT_REGEX_WHITELIST: "(?i).*\\.pdf$,(?i).*\\.docx?$,(?i).*\\.xlsx?$,(?i).*\\.jpe?g$,(?i).*\\.png$,(?i).*\\.tiff?$"
-FINERACT_CONTENT_MIME_WHITELIST: "application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,image/jpeg,image/png,image/tiff"
+FINERACT_CONTENT_REGEX_WHITELIST: '(?i).*\.pdf,(?i).*\.docx?,(?i).*\.xlsx?,(?i).*\.jpe?g,(?i).*\.png,(?i).*\.tiff?'
+FINERACT_CONTENT_MIME_WHITELIST: 'application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,image/jpeg,image/png,image/tiff'
 ```
 
-The `(?i)` prefix kills the uppercase-extension class outright.
+This kills the uppercase-extension class outright and adds `.tif`/`.tiff`. Both
+`*_ENABLED` flags are untouched and still default to `true` — the gates stay on,
+they are only widened. **A cell picks this up with `docker compose up -d`.**
+
+Note two things about the form of those lines, both of which an earlier draft of
+this document got wrong:
+
+- **No `$` anchors.** `matches()` requires a full match already, so they are
+  redundant — and a literal `$` in a compose file must be written `$$` or it is
+  eaten by interpolation. Dropping them is behaviourally identical and avoids
+  the trap. `evil.pdf.exe` is still rejected.
+- **Single-quoted, not double-quoted.** YAML treats `\.` as an invalid escape
+  inside double quotes; single quotes pass the backslash through untouched.
+
+Verified with `docker compose config` (emits both values verbatim, exit 0) and
+by running the six compiled patterns through `Pattern.matcher(name).matches()`
+in Java 21 against 20 filenames, including the rejection cases.
 
 > [!WARNING]
-> **Widen both lists in lockstep.** Adding a filename pattern without its
+> **Keep the two lists in lockstep.** Adding a filename pattern without its
 > matching MIME type just moves the failure from the pre-upload check (probe B)
 > to the post-upload Tika check (probe D) — same 500, different line.
 >
@@ -328,9 +344,14 @@ The `(?i)` prefix kills the uppercase-extension class outright.
 > compose file's own comments at `:113-118`, `.env` only feeds `${...}`
 > interpolation and is not passed into containers.
 
-Which formats the institution accepts as an appraisal form is a policy call for
-CBS, not an engineering one. `(?i)` is unambiguously right; `tif`/`tiff` and
-`heic` need a decision.
+**Still open, and a policy call for CBS rather than engineering:** `.heic`
+(iPhone photos) is deliberately not on the list. Adding it to both lists would
+not be enough on its own — the post-upload Tika check (probe D) compares the
+sniffed type against the declared one and has no property gate, so HEIC would
+need probe D run against a real file before it could be relied on. `.doc` and
+`.docx` carry the same caveat for a different reason: legacy Office files
+routinely sniff as `application/x-tika-msoffice` and OOXML files as
+`application/zip`, which no whitelist change can fix.
 
 ### The fork fix (pending)
 

@@ -171,6 +171,31 @@ services:
       FINERACT_INSECURE_HTTP_CLIENT: "false"
       FINERACT_CONTENT_FILESYSTEM_ROOT_FOLDER: /fineract-content
 
+      # Upload whitelists for documents and images. Both gates stay ON — the
+      # *_ENABLED flags default true and are deliberately not touched. These
+      # two lines WIDEN the stock lists (application.properties:181-184); they
+      # do not disable anything.
+      #
+      # Two reasons to override them here:
+      #   * WhitelistContentPolicy compiles the patterns with plain
+      #     Pattern.compile — no CASE_INSENSITIVE — and matches with
+      #     matches(), so the stock list rejects APPRAISAL.PDF and SCAN.JPG
+      #     outright. Scanners and phone cameras emit uppercase extensions
+      #     constantly. (?i) is per-pattern; there is no global flag to set.
+      #   * .tif/.tiff is the default output of most office scanners and is
+      #     missing from the stock list entirely.
+      #
+      # No `$` anchors. matches() requires a FULL match already, so they are
+      # redundant, and a literal `$` would have to be written `$$` to survive
+      # compose interpolation. Dropping them still rejects evil.pdf.exe and
+      # avoids the escaping trap. Single-quoted so YAML leaves `\.` alone.
+      #
+      # KEEP THE TWO LISTS IN LOCKSTEP. A filename pattern with no matching
+      # mime type just moves the rejection from the pre-upload check to the
+      # post-upload Tika check — same opaque 500, different line.
+      FINERACT_CONTENT_REGEX_WHITELIST: '(?i).*\.pdf,(?i).*\.docx?,(?i).*\.xlsx?,(?i).*\.jpe?g,(?i).*\.png,(?i).*\.tiff?'
+      FINERACT_CONTENT_MIME_WHITELIST: 'application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,image/jpeg,image/png,image/tiff'
+
       # Deliberately NO Spring profile (the sample ships `test,diagnostics`)
       # and NO JDWP debug agent in JAVA_TOOL_OPTIONS.
       JAVA_TOOL_OPTIONS: >-
