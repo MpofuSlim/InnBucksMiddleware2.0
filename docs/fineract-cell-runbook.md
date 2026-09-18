@@ -418,13 +418,50 @@ cell file, in the one order that is safe:
    **assert the middleware's own permission codes are NOT flagged**, then
    optionally flip the global switch (`ENABLE_MAKER_CHECKER`).
 
-**Step 6e's assertion is not configurable and runs on every provision**, even on
-a cell that never enables maker-checker — because the flag can also be set from
-the console by someone flagging everything that sounds important. It is derived
-from the script's own `READ_PERMS`/`WRITE_PERMS` arrays rather than a copied
-list, so adding a permission to the middleware protects it automatically. If it
-finds one flagged it unflags it and says so; if that keeps recurring, somebody
-is setting it in the console.
+**Step 6e's assertion is not configurable and runs on every provision.** It is
+derived from the script's own `READ_PERMS`/`WRITE_PERMS` arrays rather than a
+copied list, so adding a permission to the middleware protects it automatically.
+If it finds one flagged it unflags it and says so.
+
+> [!IMPORTANT]
+> **Apache Fineract SEEDS three of the middleware's own write permissions as
+> maker-checkerable.** This is not a guard against a careless console user — a
+> virgin cell arrives with part of the customer rail already flagged. Verified
+> in `0002_initial_data.xml` on 2026-09-18 (66 of 834 seeded permissions carry
+> `can_maker_checker="true"`):
+>
+> | code | id | seeded | what it is for us |
+> |---|---|---|---|
+> | `APPROVE_SAVINGSACCOUNT` | 359 | **true** | the approve leg of the wallet saga — every registration |
+> | `ACTIVATE_CLIENT` | 313 | **true** | every registration |
+> | `CREATE_ACCOUNTTRANSFER` | 379 | **true** | every customer transfer |
+> | `CREATE_SAVINGSACCOUNT` | 189 | false | — |
+> | `DEPOSIT_` / `WITHDRAWAL_SAVINGSACCOUNT` | 250/252 | false | — |
+>
+> The flag sits harmless while the global switch is off, so a cell can carry it
+> for months and break only on the day someone enables maker-checker. Then
+> registration and transfers park, and `FineractClient.failIfParkedByMakerChecker`
+> correctly refuses them as `CoreUnknownOutcomeException` — the customer simply
+> cannot register or transfer, by any route.
+>
+> So run 6e **before** enabling maker-checker on any new cell, and read its last
+> line. "Keep the middleware's codes off the task list" is not enough advice on
+> its own: Fineract puts three of them on that list for you.
+
+On the ZW cell (2026-09-18) the assertion found `CREATE_SAVINGSACCOUNT` and
+`CREATE_ACCOUNTTRANSFER` flagged. Only the second is seeded that way, and
+nothing in the fork ever flips the first — so someone had used the console's
+*Configure Maker Checker Tasks* screen. `PUT /permissions` merges rather than
+replaces (`PermissionWritePlatformServiceJpaRepositoryImpl:58`, iterating only
+the request's entries), but that screen posts every checkbox it renders, so one
+save rewrites the whole maintenance set — which also explains why the two
+seeded-true codes above were *not* flagged there. If the assertion keeps finding
+codes flagged after a provision, that screen is where it is coming from.
+
+READ permissions cannot be flagged at all: the same write service throws
+`PermissionNotFoundException` for any code that is `READ_*`, ends `_CHECKER`, or
+sits in the `special` grouping (`:62-64`). So the three `READ_PERMS` in the
+assertion are structurally safe and only the write codes can ever trip it.
 
 The parsing and set arithmetic behind 6b/6e live in `provision-lib.sh` and are
 covered by `./provision-selftest.sh` (no cell, no network). Run it after

@@ -509,7 +509,26 @@ ensure_user "innbucks-mw-write" "$MW_WRITE_PASSWORD" "$WRITE_ROLE_ID"
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Cache the build's permission codes once — 6b and 6e both check against it.
-ALL_CODES=$(api GET "/v1/permissions" | jq -r '.[]?.code // empty')
+#
+# Read via a ROLE's permission listing, NOT GET /v1/permissions. The three
+# permission queries in PermissionReadPlatformServiceImpl filter differently,
+# and only this one is unfiltered:
+#
+#   GET /v1/permissions            "where code not like '%\_CHECKER'"   (:96)
+#   ?makerCheckerable=true         ...also excludes 'special' and READ_%  (:108)
+#   GET /v1/roles/{id}/permissions  no where clause at all               (:113)
+#
+# 249 of the 834 seeded permissions are '<CODE>_CHECKER' rows, so the obvious
+# endpoint hides every one of them. On the ZW cell that made 6b report
+# UNDOTRANSACTION_SAVINGSACCOUNT_CHECKER as "does not exist on this build" and
+# skip the grant — when it exists, seeded at id 370. A checker grant is exactly
+# what a maker-checker setup needs, so validating against the filtered list
+# makes the step unable to do the one job the bank most needs from it.
+#
+# Any role id works; the query returns every permission with a 'selected' flag
+# saying whether THIS role holds it. We only read the codes.
+ALL_CODES=$(api GET "/v1/roles/${READ_ROLE_ID}/permissions" \
+  | jq -r '.permissionUsageData[]?.code // empty')
 
 log "6b/7 applying bank operational role grants ..."
 if [[ -n "${BANK_ROLE_GRANTS:-}" ]]; then

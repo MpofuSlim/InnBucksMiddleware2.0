@@ -816,6 +816,26 @@ commands, with the exact bytes that were running before. Full procedure
    names in a cell file come from the cell's own `GET /v1/roles`, and a grant
    to a role with no members is worth nothing — check `GET /v1/users` too.
 
+   **Two Fineract facts the step depends on, verified in the fork 2026-09-18.**
+   (1) **Fineract SEEDS three of our write permissions maker-checkerable** —
+   `APPROVE_SAVINGSACCOUNT` (359), `ACTIVATE_CLIENT` (313) and
+   `CREATE_ACCOUNTTRANSFER` (379) all carry `can_maker_checker="true"` in
+   `0002_initial_data.xml`. So a VIRGIN cell already has registration and
+   transfers flagged, and 6e is load-bearing at first provision, not merely a
+   guard against console fiddling. The flag is inert until the global switch is
+   flipped, which is why it can sit unnoticed for months. (2) **The three
+   permission listings filter differently** and only one is unfiltered:
+   `GET /v1/permissions` is `where code not like '%\_CHECKER'`,
+   `?makerCheckerable=true` also drops `special` and `READ_%`, and
+   `GET /v1/roles/{id}/permissions` has no where clause
+   (`PermissionReadPlatformServiceImpl:96/108/113`). 249 of 912 seeded codes are
+   checkers, so the obvious endpoint hides every one — which made 6b report a
+   real permission as non-existent and skip the checker grant that dual control
+   requires. Validate codes against the ROLE listing. Relatedly `PUT /permissions`
+   MERGES (`PermissionWritePlatformServiceJpaRepositoryImpl:58`) and refuses any
+   `READ_*`, `_CHECKER` or `special` code outright (`:62-64`), so our READ perms
+   can never be flagged at all.
+
 9. **Credential-spray detection — DONE.** See the security invariant above.
    The gap it closes was found by auditing the rate-limiting story end to end:
    every existing control is scoped to ONE victim or ONE address, and a spray
