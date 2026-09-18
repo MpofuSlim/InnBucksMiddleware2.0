@@ -356,6 +356,50 @@ the API and the docs suggest. Note also that `CREATE_CLIENT` alone is not
 enough to check: creating a client with `active:true` runs the activate
 command inline, so `ACTIVATE_CLIENT` gates it too.
 
+**The middleware now also guards this client-side** (`FineractClient`
+refuses a `rollbackTransaction:true` response as `CoreUnknownOutcomeException`,
+pinned by the parked-command cases in `FineractClientContractTest`): a
+mis-flagged permission can no longer make a parked deposit read as a SUCCESS
+— the row parks UNKNOWN, the log screams `Fineract PARKED command … for
+maker-checker approval`, and the parked-overdue page fires if it's not fixed.
+The rail still stalls until the SQL above runs, so the guard is a tripwire,
+not a substitute for the exemption. Never resolve it by approving the parked
+commands in bulk from the Checker Inbox — approval RE-EXECUTES them, moving
+customer money at approval time, hours after the app told the customer the
+movement failed.
+
+### Enabling maker-checker for the BANK's own dual control
+
+The back office WILL want maker-checker on (reversals, journals, write-offs,
+product and user changes). Verified against the fork — all four pieces are
+needed, and each alone looks like "maker-checker is broken":
+
+1. **The global switch is seeded OFF** (`c_configuration` `maker-checker`,
+   `enabled=false` from the first tenant changeset). Enable via the API —
+   `PUT /v1/configurations/name/maker-checker` `{"enabled":true}` — which
+   evicts the config cache immediately; a direct SQL UPDATE needs a Fineract
+   restart to be seen. While it is off, every per-task flag is dead, which is
+   why "Configure Maker Checker Tasks" alone changes nothing.
+2. **Flag the tasks** (`PUT /v1/permissions` `{"permissions":{"CREATE_JOURNALENTRY":true,…}}`
+   or the console's Configure Maker Checker Tasks) — immediate, uncached.
+   Never flag the eight middleware codes above.
+3. **The maker must NOT hold `ALL_FUNCTIONS` or `CHECKER_SUPER_USER`** — a
+   superuser maker self-checks and posts directly (`AppUser.hasPermissionTo`
+   short-circuits on `ALL_FUNCTIONS`), so testing maker-checker as the
+   `mifos` admin proves nothing. Test with the real least-privilege roles.
+4. **Checkers need the `<CODE>_CHECKER` permission** for each task (seeded
+   for most codes) — it both scopes what their Checker Inbox
+   (`GET /v1/makercheckers`, pending-only) shows and authorizes
+   `POST /v1/makercheckers/{id}?command=approve|reject`. Self-approval is
+   refused unless `enable-same-maker-checker` is enabled (seeded off — leave
+   it off; it defeats the point).
+
+Five actions have **no seeded `_CHECKER` row** (`UNDOWRITEOFF_LOAN`,
+`RECOVERYPAYMENT_LOAN`, `REVERSE_JOURNALENTRY`, `ADJUSTTRANSACTION_SAVINGSACCOUNT`,
+`UNDO_WAIVECHARGE`): under maker-checker only a `CHECKER_SUPER_USER` can
+approve those until a fork changeset adds the rows — flag them as tasks only
+with that understood.
+
 ### The logical business date (bites every cell restored from a dump)
 
 Fineract dates writes by its **logical business date**, not the wall clock,

@@ -5,6 +5,8 @@ import org.springframework.http.HttpStatusCode;
 import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientResponseException;
+import zw.co.innbucks.middleware.corebanking.CoreProvider;
+import zw.co.innbucks.middleware.corebanking.exception.CoreUnknownOutcomeException;
 import zw.co.innbucks.middleware.corebanking.value.TxRef;
 import zw.co.innbucks.middleware.fineract.dto.FineractDtos;
 import zw.co.innbucks.middleware.fineract.dto.FineractDtos.ClientAccountsResponse;
@@ -320,13 +322,50 @@ public class FineractClient {
         TxRef ref = new TxRef(idempotencyKey);
         return resilience.write(() -> {
             try {
-                return call.get();
+                T result = call.get();
+                failIfParkedByMakerChecker(result, ref);
+                return result;
             } catch (RestClientResponseException ex) {
                 throw FineractErrorMapper.mapWriteFailure(ex, ref);
             } catch (ResourceAccessException ex) {
                 throw FineractErrorMapper.mapWriteIoFailure(ex, ref);
             }
         });
+    }
+
+    /**
+     * MAKER-CHECKER guard. If a permission this middleware issues is ever
+     * flagged {@code can_maker_checker} (one console click once the bank
+     * enables maker-checker for its own back-office dual control), Fineract
+     * PARKS the command for a human checker and answers a success-shaped
+     * {@code 200 {"commandId":N,"rollbackTransaction":true}} — with no
+     * resourceId and no amount echo, so every downstream guard would wave it
+     * through and a deposit that moved NO money would close the ledger row
+     * COMPLETED and SMS the customer a success.
+     *
+     * <p>The parked command is not dead — a checker approving it later
+     * re-executes it, money moving at that moment. That is exactly the
+     * UNKNOWN-outcome contract: never mis-report, never blind-retry, park the
+     * row and let reconciliation-by-ref settle it (approved → the ref appears
+     * → COMPLETED; rejected → positive 404-by-ref → FAILED; stuck → the
+     * parked-overdue operator page). Hence {@link CoreUnknownOutcomeException},
+     * not a client fault — and a screaming log line naming the fix, because
+     * the real remedy is operational: keep the middleware's permission codes
+     * OFF the maker-checker task list (provision-cell.sh prints the exact
+     * UPDATE) or the whole rail stalls.
+     */
+    private void failIfParkedByMakerChecker(Object result, TxRef ref) {
+        if (result instanceof CommandResponse response && response.parkedByMakerChecker()) {
+            log.error("Fineract PARKED command {} for maker-checker approval (ref={}). The cell is "
+                            + "misconfigured: a permission used by innbucks-mw-write has can_maker_checker=true. "
+                            + "Unflag the middleware's permission codes (see provision-cell.sh) — an automated "
+                            + "rail cannot satisfy dual control. Movement parked as UNKNOWN, never mis-reported.",
+                    response.commandId(), ref.reference());
+            throw new CoreUnknownOutcomeException(CoreProvider.FINERACT, ref,
+                    "Fineract parked the command for maker-checker approval (commandId="
+                            + response.commandId() + ") — nothing applied yet; outcome awaits a human checker",
+                    null);
+        }
     }
 
     private void putLocaleAndDateFormat(Map<String, Object> body) {
