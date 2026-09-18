@@ -13,9 +13,25 @@
 #   5. create TWO least-privilege roles (read / write) after verifying every
 #      permission code exists on this build — never ALL_FUNCTIONS
 #   6. create the two AppUsers the middleware rides     innbucks-mw-read / -write
+#   6b. grant the BANK's operational roles                BANK_ROLE_GRANTS
+#   6c. make GL control accounts refuse manual journals   CONTROL_ACCOUNT_GLCODES
+#   6d. warn on loan products with accounting = None      ASSERT_LOAN_PRODUCT_ACCOUNTING
+#   6e. maker-checker: flag tasks, ASSERT the middleware's own codes are NOT
+#       flagged (always, not configurable), then optionally flip the global
+#       switch                        MAKER_CHECKER_TASKS / ENABLE_MAKER_CHECKER
 #   7. (optional, RUN_SMOKE=1) drive the EXACT adapter call sequence with the
 #      new write credentials: client -> wallet create/approve/activate ->
 #      deposit -> read the transaction back by external id
+#
+# Steps 6b-6e are per-market POLICY and belong in a cell file, not in your
+# shell history:
+#
+#     set -a; source deploy/cells/cell.zw.env; set +a     # policy, committed
+#     set -a; source deploy/fineract/.env;     set +a     # secrets, gitignored
+#     ./deploy/fineract/provision-cell.sh
+#
+# See deploy/cells/cell.example.env. Everything is additive and idempotent: a
+# re-run re-asserts the file's intent and never revokes a grant it doesn't name.
 #
 # Required env:
 #   ADMIN_PASSWORD        current password of ADMIN_USER (default mifos)
@@ -102,6 +118,12 @@ WRITE_PERMS=(CREATE_CLIENT ACTIVATE_CLIENT CREATE_SAVINGSACCOUNT APPROVE_SAVINGS
 
 log()  { printf '>> %s\n' "$*" >&2; }
 fail() { printf 'FATAL: %s\n' "$*" >&2; exit 1; }
+
+# Parsing + set arithmetic for steps 6b/6e. Kept in a lib so
+# provision-selftest.sh can cover it without a cell — mc_violations in
+# particular is the one function here whose false negative costs money.
+# shellcheck source=provision-lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/provision-lib.sh"
 
 # api METHOD PATH [JSON_BODY] [USER PASS] — prints the response body; nonzero on >=400.
 api() {
@@ -472,6 +494,154 @@ ensure_user() { # USERNAME PASSWORD ROLE_ID
 }
 ensure_user "innbucks-mw-read"  "$MW_READ_PASSWORD"  "$READ_ROLE_ID"
 ensure_user "innbucks-mw-write" "$MW_WRITE_PASSWORD" "$WRITE_ROLE_ID"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6b–6e: the BANK's operational policy, driven from deploy/cells/cell.<iso>.env.
+#
+# Everything below is per-market POLICY and lives in that file as data, with one
+# deliberate exception: step 6e's assertion that the middleware's own permission
+# codes are never maker-checkerable is derived from READ_PERMS/WRITE_PERMS above
+# and is NOT configurable. A cell file can widen what the bank dual-controls; it
+# can never switch off the thing that keeps the customer rail moving.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Cache the build's permission codes once — 6b and 6e both check against it.
+ALL_CODES=$(api GET "/v1/permissions" | jq -r '.[]?.code // empty')
+
+log "6b/7 applying bank operational role grants ..."
+if [[ -n "${BANK_ROLE_GRANTS:-}" ]]; then
+  while IFS=$'\t' read -r role_name role_codes; do
+    [[ -n "$role_name" ]] || continue
+    # Validate BEFORE granting. An unknown code is not refused by Fineract in a
+    # way that reaches the operator — the role simply never gets it, and the
+    # holder authenticates fine and is refused everywhere. Warn per code and
+    # grant the rest rather than failing the whole cell over one typo.
+    valid=()
+    while IFS= read -r c; do
+      if grep -qxF -- "$c" <<<"$ALL_CODES"; then
+        valid+=("$c")
+      else
+        near=$(grep -i "${c#*_}" <<<"$ALL_CODES" | head -5 | paste -sd' ' -)
+        log "  WARN: '${c}' does not exist on this build — NOT granted to '${role_name}'. Similar: ${near:-<none>}"
+      fi
+    done < <(split_list ',' "$role_codes")
+    if ((${#valid[@]} == 0)); then
+      log "  '${role_name}': no valid codes — skipped"
+      continue
+    fi
+    ensure_role "$role_name" "InnBucks cell operational role" "${valid[@]}" >/dev/null
+    log "  '${role_name}': ${#valid[@]} code(s) asserted"
+  done < <(parse_role_grants "${BANK_ROLE_GRANTS}")
+else
+  log "  BANK_ROLE_GRANTS not set — skipping (roles stay as the console left them)"
+fi
+
+log "6c/7 enforcing GL control accounts (no manual journal entries) ..."
+if [[ -n "${CONTROL_ACCOUNT_GLCODES:-}" ]]; then
+  GL_ACCOUNTS=$(api GET "/v1/glaccounts")
+  while IFS= read -r glcode; do
+    glcode="${glcode// /}"
+    [[ -n "$glcode" ]] || continue
+    gl_row=$(jq -r --arg g "$glcode" \
+      '[.[]? | select(.glCode == $g)] | .[0] | select(.!= null) | "\(.id)\t\(.manualEntriesAllowed)"' \
+      <<<"$GL_ACCOUNTS")
+    if [[ -z "$gl_row" ]]; then
+      log "  WARN: no GL account with glCode '${glcode}' — skipped"
+      continue
+    fi
+    gl_id="${gl_row%%$'\t'*}"; gl_manual="${gl_row##*$'\t'}"
+    if [[ "$gl_manual" == "false" ]]; then
+      log "  ${glcode} already refuses manual entries"
+      continue
+    fi
+    if api PUT "/v1/glaccounts/${gl_id}" '{"manualEntriesAllowed":false}' >/dev/null; then
+      log "  ${glcode} (id=${gl_id}) now refuses manual entries"
+    else
+      log "  WARN: could not update glCode '${glcode}' — check the UPDATE_GLACCOUNT permission"
+    fi
+  done < <(tr '|' '\n' <<<"${CONTROL_ACCOUNT_GLCODES}")
+else
+  log "  CONTROL_ACCOUNT_GLCODES not set — skipping"
+fi
+
+log "6d/7 checking loan products have accounting enabled ..."
+if [[ "${ASSERT_LOAN_PRODUCT_ACCOUNTING:-1}" == "1" ]]; then
+  # accountingRule id 1 = None. A write-off on such a product SUCCEEDS and posts
+  # NO journal entries at all (the journal poster early-returns when no
+  # accounting flag is set on the product) — silent, and only visible when the
+  # GL is reconciled. Warn rather than fail: the mappings are authored in the
+  # console (6-8 account ids per product) and a cell stand-up must not depend on
+  # the bank's product catalogue being finished.
+  UNMAPPED=$(api GET "/v1/loanproducts" \
+    | jq -r '.[]? | select((.accountingRule.id // 1) == 1) | "\(.id)\t\(.name)"')
+  if [[ -n "$UNMAPPED" ]]; then
+    log "  WARN: these loan products have accounting = None. Write-offs on them will"
+    log "        post NOTHING to the GL, silently. Set Cash/Accrual + full mappings"
+    log "        (incl. losses-written-off and income-from-recovery) in the console:"
+    while IFS= read -r row; do [[ -n "$row" ]] && log "          id=${row%%$'\t'*}  ${row##*$'\t'}"; done <<<"$UNMAPPED"
+  else
+    log "  all loan products have accounting enabled"
+  fi
+else
+  log "  ASSERT_LOAN_PRODUCT_ACCOUNTING=0 — skipped"
+fi
+
+log "6e/7 maker-checker ..."
+# Order is the whole safety argument: flag the bank's tasks, THEN assert the
+# middleware's codes are clear, and only then flip the global switch.
+if [[ -n "${MAKER_CHECKER_TASKS:-}" ]]; then
+  mc_valid=()
+  while IFS= read -r c; do
+    if grep -qxF -- "$c" <<<"$ALL_CODES"; then
+      mc_valid+=("$c")
+    else
+      log "  WARN: task '${c}' does not exist on this build — not flagged"
+    fi
+  done < <(split_list ',' "${MAKER_CHECKER_TASKS}")
+  if ((${#mc_valid[@]})); then
+    api PUT "/v1/permissions" "$(json_flag_map true "${mc_valid[@]}")" >/dev/null
+    log "  flagged ${#mc_valid[@]} task(s) as maker-checkerable"
+  fi
+else
+  log "  MAKER_CHECKER_TASKS not set — no tasks flagged"
+fi
+
+# THE INVARIANT. Not configurable, and re-asserted on every run even when this
+# cell never enables maker-checker — because the flag can also be set from the
+# console, by someone flagging "everything that sounds important".
+#
+# What happens if one of these IS flagged: Fineract runs the handler, rolls the
+# transaction back, parks the command for a human, and answers the middleware a
+# success-SHAPED 200 {"commandId":N,"rollbackTransaction":true} with no
+# resourceId. An automated rail has no second human, so the customer's deposit
+# never completes. (The middleware refuses that response as an UNKNOWN outcome
+# rather than mis-reporting success — see FineractClient.failIfParkedByMakerChecker
+# — but the rail is still stalled until the flag comes off.)
+log "  asserting the middleware's own permission codes are NOT maker-checkerable ..."
+PROTECTED_CODES=("${READ_PERMS[@]}" "${WRITE_PERMS[@]}")
+FLAGGED_CODES=$(api GET "/v1/permissions?makerCheckerable=true" \
+  | jq -r '.[]? | select(.selected == true) | .code // empty')
+mapfile -t VIOLATIONS < <(mc_violations "$FLAGGED_CODES" "${PROTECTED_CODES[@]}")
+if ((${#VIOLATIONS[@]})); then
+  log "  !! ${#VIOLATIONS[@]} middleware code(s) were maker-checker flagged: ${VIOLATIONS[*]}"
+  log "  !! An automated rail cannot satisfy dual control — unflagging now."
+  api PUT "/v1/permissions" "$(json_flag_map false "${VIOLATIONS[@]}")" >/dev/null
+  log "  !! unflagged. If this keeps coming back, someone is flagging them in the console."
+else
+  log "  clear — all ${#PROTECTED_CODES[@]} middleware codes are unflagged"
+fi
+
+if [[ "${ENABLE_MAKER_CHECKER:-0}" == "1" ]]; then
+  MC_STATE=$(api GET "/v1/configurations/name/maker-checker" | jq -r '.enabled // false')
+  if [[ "$MC_STATE" == "true" ]]; then
+    log "  global maker-checker already enabled"
+  else
+    api PUT "/v1/configurations/name/maker-checker" '{"enabled":true}' >/dev/null
+    log "  global maker-checker ENABLED (takes effect immediately — the config cache is evicted)"
+  fi
+else
+  log "  ENABLE_MAKER_CHECKER=0 — global switch left OFF (every per-task flag above is inert until it is on)"
+fi
 
 if [[ "${RUN_SMOKE:-0}" == "1" ]]; then
   log "7/7 smoke: driving the adapter's exact call sequence with the mw credentials ..."

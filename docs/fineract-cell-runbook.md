@@ -131,6 +131,26 @@ laptop: `ssh -L 8443:127.0.0.1:8443 <box>`.
 
 ## 4. Provision the tenant
 
+**Per-market policy lives in `deploy/cells/cell.<iso>.env`, not in your shell
+history.** Role grants, the maker-checker task list, control-account glCodes —
+anything that should be identical every time this market's cell is stood up —
+belongs in that file, which is committed and reviewable as a diff. Secrets stay
+in the gitignored `.env`. Source both, then run the script:
+
+```sh
+set -a; source ../cells/cell.zw.env; set +a     # policy, committed, NON-SECRET
+set -a; source .env;                 set +a     # secrets, gitignored
+./provision-cell.sh
+```
+
+Everything the script does is idempotent and **additive** — a re-run re-asserts
+the cell file's intent and never revokes a grant the file does not name, because
+stripping a permission an operator added deliberately is worse than leaving one
+behind. See `deploy/cells/cell.example.env` for what each key means.
+
+The block below is the equivalent done by hand, and still the right shape for a
+first stand-up where you are generating the passwords as you go:
+
 ```sh
 cd deploy/fineract
 export ADMIN_PASSWORD=password                  # the stock default…
@@ -367,6 +387,37 @@ not a substitute for the exemption. Never resolve it by approving the parked
 commands in bulk from the Checker Inbox — approval RE-EXECUTES them, moving
 customer money at approval time, hours after the app told the customer the
 movement failed.
+
+### Maker-checker is provisioned, not hand-configured
+
+`provision-cell.sh` steps 6b–6e apply the bank's operational policy from the
+cell file, in the one order that is safe:
+
+1. **6b** grant the bank's operational roles (`BANK_ROLE_GRANTS`) — creates the
+   role if absent, validates every code against the running build first, and
+   warns loudly on a typo instead of silently producing a role that
+   authenticates fine and is refused everywhere.
+2. **6c** make the GL control accounts refuse manual journals
+   (`CONTROL_ACCOUNT_GLCODES`, keyed on glCode because ids differ per cell).
+3. **6d** warn about loan products whose accounting rule is None — a write-off
+   on one of those succeeds and posts **nothing** to the GL, silently.
+4. **6e** flag the bank's maker-checker tasks (`MAKER_CHECKER_TASKS`), then
+   **assert the middleware's own permission codes are NOT flagged**, then
+   optionally flip the global switch (`ENABLE_MAKER_CHECKER`).
+
+**Step 6e's assertion is not configurable and runs on every provision**, even on
+a cell that never enables maker-checker — because the flag can also be set from
+the console by someone flagging everything that sounds important. It is derived
+from the script's own `READ_PERMS`/`WRITE_PERMS` arrays rather than a copied
+list, so adding a permission to the middleware protects it automatically. If it
+finds one flagged it unflags it and says so; if that keeps recurring, somebody
+is setting it in the console.
+
+The parsing and set arithmetic behind 6b/6e live in `provision-lib.sh` and are
+covered by `./provision-selftest.sh` (no cell, no network). Run it after
+touching either — a false negative in the violation check is the difference
+between a working customer rail and every deposit parking for an approver who
+does not exist.
 
 ### Enabling maker-checker for the BANK's own dual control
 
