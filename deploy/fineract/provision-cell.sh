@@ -513,8 +513,28 @@ ALL_CODES=$(api GET "/v1/permissions" | jq -r '.[]?.code // empty')
 
 log "6b/7 applying bank operational role grants ..."
 if [[ -n "${BANK_ROLE_GRANTS:-}" ]]; then
+  ALL_ROLES=$(api GET "/v1/roles")
+  ALL_ROLE_NAMES=$(jq -r '.[]?.name // empty' <<<"$ALL_ROLES")
   while IFS=$'\t' read -r role_name role_codes; do
     [[ -n "$role_name" ]] || continue
+    # The role must ALREADY EXIST. A grant names a role this bank's operators
+    # are assigned to; if the name does not match one, the right answer is to
+    # say so, never to create it.
+    #
+    # Creating it is what this step used to do, and it is the worst kind of
+    # wrong: on the ZW cell 'Test Internal Auditor' did not match the real
+    # 'TEST Internal Audit', so the run made an EMPTY role nobody holds,
+    # granted it correctly, and printed "1 code(s) asserted". A success line
+    # for a change that reached no human — while the auditor it was meant for
+    # still could not read the audit log.
+    role_id=$(jq -r --arg n "$role_name" 'first(.[] | select(.name == $n) | .id) // empty' <<<"$ALL_ROLES")
+    if [[ -z "$role_id" ]]; then
+      near=$(suggest_roles "$role_name" "$ALL_ROLE_NAMES") || true
+      log "  !! role '${role_name}' does not exist on this cell — NOT created, grants SKIPPED."
+      log "  !!   closest existing: ${near:-<none>}"
+      log "  !!   fix the name in the cell file; roles are created by the bank, not here."
+      continue
+    fi
     # Validate BEFORE granting. An unknown code is not refused by Fineract in a
     # way that reaches the operator — the role simply never gets it, and the
     # holder authenticates fine and is refused everywhere. Warn per code and
@@ -539,8 +559,12 @@ if [[ -n "${BANK_ROLE_GRANTS:-}" ]]; then
       log "  '${role_name}': no valid codes — skipped"
       continue
     fi
-    ensure_role "$role_name" "InnBucks cell operational role" "${valid[@]}" >/dev/null
-    log "  '${role_name}': ${#valid[@]} code(s) asserted"
+    # PUT /v1/roles/{id}/permissions MERGES (RoleWritePlatformServiceJpaRepositoryImpl
+    # iterates only the codes in the request), so this adds without stripping
+    # anything the bank granted in the console.
+    api PUT "/v1/roles/${role_id}/permissions" \
+      "$(printf '%s\n' "${valid[@]}" | jq -R . | jq -s 'map({(.): true}) | add | {permissions: .}')" >/dev/null
+    log "  '${role_name}' (id=${role_id}): ${#valid[@]} code(s) asserted"
   done < <(parse_role_grants "${BANK_ROLE_GRANTS}")
 else
   log "  BANK_ROLE_GRANTS not set — skipping (roles stay as the console left them)"

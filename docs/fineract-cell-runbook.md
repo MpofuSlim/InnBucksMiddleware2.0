@@ -393,10 +393,23 @@ movement failed.
 `provision-cell.sh` steps 6b–6e apply the bank's operational policy from the
 cell file, in the one order that is safe:
 
-1. **6b** grant the bank's operational roles (`BANK_ROLE_GRANTS`) — creates the
-   role if absent, validates every code against the running build first, and
-   warns loudly on a typo instead of silently producing a role that
-   authenticates fine and is refused everywhere.
+1. **6b** grant the bank's operational roles (`BANK_ROLE_GRANTS`) — the role
+   must ALREADY EXIST (roles belong to the bank; a name matching nothing is
+   refused, with the closest existing names printed), and every code is checked
+   against the running build first, so a typo warns loudly instead of silently
+   producing a role that authenticates fine and is refused everywhere.
+
+   **Get the role names from the cell, never from a test script.** 6b used to
+   create a missing role, and on the ZW cell that turned three near-miss names
+   ("Test Internal Auditor" vs the real "TEST Internal Audit") into three empty
+   roles nobody held — each granted correctly and each reported as success,
+   while the auditor still could not read the audit log. A grant to a role with
+   no members changes nothing for anyone, so check both:
+
+   ```sh
+   api GET /v1/roles | jq -r '.[]|"\(.id)\t\(.name)"'
+   api GET /v1/users | jq -r '.[]|"\(.username)\t\([.selectedRoles[]?.name]|join(", "))"'
+   ```
 2. **6c** make the GL control accounts refuse manual journals
    (`CONTROL_ACCOUNT_GLCODES`, keyed on glCode because ids differ per cell).
 3. **6d** warn about loan products whose accounting rule is None — a write-off

@@ -94,6 +94,43 @@ suggest_codes() {
   return 0
 }
 
+# suggest_roles NAME ALL_NAMES — up to 5 existing role names resembling NAME,
+# '|'-joined (role names contain spaces and '/', so a comma would be ambiguous).
+#
+# Same always-succeeds contract as suggest_codes, for the same reason — see the
+# note there. This one matters more in practice: role names are typed by a human
+# into a cell file and are the thing most likely to be wrong, so the hint IS the
+# fix. On the ZW cell, 'Test Internal Auditor' should have pointed straight at
+# 'TEST Internal Audit'.
+#
+# It RANKS by how many of the name's words a role contains, and that is the
+# whole design. A plain "contains any word" filter is useless on a real cell:
+# every role there is prefixed "TEST", so every role matches and the hint lists
+# all of them. Scoring puts the intended role FIRST — 'Test Internal Auditor'
+# scores 2 against 'TEST Internal Audit' and 1 against everything else.
+#
+# Words shorter than 4 characters are ignored (they match noise), comparison is
+# case-insensitive, and ties break alphabetically so the output is deterministic
+# and testable. Capped at 3: this is a nudge toward the right name, not a
+# directory listing. awk receives the name as a VARIABLE, so no glob or regex
+# metacharacter in it can be interpreted.
+suggest_roles() {
+  local name="${1:-}" all="${2:-}" out
+  [[ -n "$name" && -n "$all" ]] || return 0
+  out=$(awk -v name="$name" '
+      BEGIN { n = split(tolower(name), w, /[^[:alnum:]]+/) }
+      {
+        role = tolower($0); score = 0
+        for (i = 1; i <= n; i++)
+          if (length(w[i]) >= 4 && index(role, w[i]) > 0) score++
+        if (score > 0) printf "%d\t%s\n", score, $0
+      }' <<<"$all" \
+    | sort -t"$(printf '\t')" -k1,1nr -k2,2 \
+    | awk 'NR<=3' | cut -f2- | paste -sd'|' -) || true
+  printf '%s' "$out"
+  return 0
+}
+
 # json_flag_map BOOL CODE... — {"permissions":{"CODE":BOOL,...}}, the body shape
 # PUT /v1/permissions takes for both flagging and unflagging.
 json_flag_map() {

@@ -806,7 +806,15 @@ commands, with the exact bytes that were running before. Full procedure
    unknown-code "did you mean" hint exited step 6b before printing the warning
    it was computing, skipping 6c–6e and the maker-checker assertion with it —
    the same SIGPIPE trap `gen_password` already documents, twenty lines later.
-   A provisioning step may fail loudly, never silently.
+   A provisioning step may fail loudly, never silently. **Same rule, second
+   offender: 6b must never CREATE a role it cannot find.** A grant names a role
+   the bank's operators already hold; conjuring one produces an empty role
+   nobody is assigned to, granted perfectly and reported as `N code(s)
+   asserted`, while the person it was for still cannot do the thing. That is
+   exactly what the ZW run did with three near-miss names from a test script
+   ("Test Internal Auditor" vs the cell's real "TEST Internal Audit"). Role
+   names in a cell file come from the cell's own `GET /v1/roles`, and a grant
+   to a role with no members is worth nothing — check `GET /v1/users` too.
 
 9. **Credential-spray detection — DONE.** See the security invariant above.
    The gap it closes was found by auditing the rate-limiting story end to end:
