@@ -146,6 +146,30 @@ is "never kills a set -e caller" \
          n=$(suggest_roles 'Zzzz Qqqq' "$ROLES"); printf 'alive:%s' "$n" ) )" \
    "alive:"
 
+printf 'checker_gaps\n'
+# THE gap this exists for: the ZW cell flagged eight tasks and granted ONE
+# checker. Nothing errored; seven approval queues simply could never drain.
+is "reports a flagged task with no checker grant" \
+   "$(checker_gaps 'WRITEOFF_LOAN,APPROVE_LOAN' 'Ops=WRITEOFF_LOAN_CHECKER')" \
+   "APPROVE_LOAN"
+is "silent when every task is covered" \
+   "$(checker_gaps 'WRITEOFF_LOAN,APPROVE_LOAN' 'A=WRITEOFF_LOAN_CHECKER;B=APPROVE_LOAN_CHECKER')" \
+   ""
+is "the MAKER grant is not mistaken for the checker" \
+   "$(checker_gaps 'WRITEOFF_LOAN' 'Ops=WRITEOFF_LOAN')" \
+   "WRITEOFF_LOAN"
+is "checkers may share one role" \
+   "$(checker_gaps 'CREATE_USER,APPROVE_LOAN' 'A=CREATE_USER_CHECKER,APPROVE_LOAN_CHECKER')" \
+   ""
+is "no grants at all reports every task" \
+   "$(checker_gaps 'CREATE_USER,APPROVE_LOAN' '')" \
+   "$(printf 'CREATE_USER\nAPPROVE_LOAN')"
+is "no tasks is silent" "$(checker_gaps '' 'A=CREATE_USER_CHECKER')" ""
+is "never kills a set -e caller" \
+   "$( ( set -euo pipefail; . ./provision-lib.sh
+         g=$(checker_gaps 'CREATE_USER' ''); printf 'alive:%s' "$g" ) )" \
+   "alive:CREATE_USER"
+
 printf 'json_flag_map\n'
 if command -v jq >/dev/null; then
   is "flags true"  "$(json_flag_map true  A B | jq -c .)" '{"permissions":{"A":true,"B":true}}'

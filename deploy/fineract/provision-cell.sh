@@ -655,6 +655,18 @@ if [[ -n "${MAKER_CHECKER_TASKS:-}" ]]; then
     api PUT "/v1/permissions" "$(json_flag_map true "${mc_valid[@]}")" >/dev/null
     log "  flagged ${#mc_valid[@]} task(s) as maker-checkerable"
   fi
+  # Flagging a task and granting its checker are two halves of ONE decision,
+  # split across two settings in this file. Doing one without the other parks
+  # commands into an inbox no non-superuser can act on — no error, just an
+  # approval queue that never drains.
+  mapfile -t MC_GAPS < <(checker_gaps "${MAKER_CHECKER_TASKS}" "${BANK_ROLE_GRANTS:-}")
+  if ((${#MC_GAPS[@]})); then
+    log "  WARN: ${#MC_GAPS[@]} flagged task(s) have no '<CODE>_CHECKER' grant in BANK_ROLE_GRANTS:"
+    for t in "${MC_GAPS[@]}"; do log "          ${t} -> nobody holds ${t}_CHECKER"; done
+    log "        Those commands will park where only a CHECKER_SUPER_USER can approve them."
+  else
+    log "  every flagged task has a checker grant"
+  fi
 else
   log "  MAKER_CHECKER_TASKS not set — no tasks flagged"
 fi
