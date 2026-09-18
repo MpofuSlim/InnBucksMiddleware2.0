@@ -59,6 +59,17 @@ Build: `./mvnw verify` at the root. Run locally:
   (`CoreAuthException` / `CoreClientException` / `CoreServerException` /
   `CoreTransientException` / `CoreUnknownOutcomeException`); nothing upstream
   of an adapter sees a core-specific exception or raw body.
+* **A maker-checker-PARKED command is UNKNOWN, never a success.** Fineract
+  answers a parked command with a success-shaped
+  `200 {"commandId":N,"rollbackTransaction":true}` and no resourceId/echo —
+  before the guard, a parked deposit closed the ledger COMPLETED and SMS'd
+  the customer while zero money moved. `FineractClient.failIfParkedByMakerChecker`
+  refuses that shape as `CoreUnknownOutcomeException` (reconciliation-by-ref
+  then settles it: checker approves → ref appears → COMPLETED; rejects →
+  positive 404 → FAILED). Pinned by the parked-command cases in
+  `FineractClientContractTest`. The operational fix stays "keep the
+  middleware's permission codes off the maker-checker task list" — runbook
+  §"Maker-checker must not gate the middleware's commands".
 
 ## Auth model
 

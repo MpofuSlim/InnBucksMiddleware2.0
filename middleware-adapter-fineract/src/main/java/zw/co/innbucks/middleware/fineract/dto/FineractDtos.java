@@ -124,10 +124,28 @@ public final class FineractDtos {
     public record SavingsSummaryData(BigDecimal accountBalance, BigDecimal availableBalance) {
     }
 
-    /** Fineract command responses: {officeId, clientId, savingsId, resourceId, changes:{...}}. */
+    /**
+     * Fineract command responses: {officeId, clientId, savingsId, resourceId, changes:{...}}.
+     *
+     * <p>{@code commandId} + {@code rollbackTransaction} are the MAKER-CHECKER
+     * PARKING shape: when a command's permission is flagged
+     * {@code can_maker_checker} (and the global maker-checker config is on),
+     * Fineract runs the handler, ROLLS THE WHOLE TRANSACTION BACK, stores the
+     * command awaiting a human checker, and answers a success-shaped
+     * {@code 200 {"commandId":N,"rollbackTransaction":true}} with no
+     * resourceId (RollbackTransactionNotApprovedExceptionMapper returns
+     * Response.ok()). Nothing has been applied. Dropping this flag is how a
+     * parked deposit once read as a success — model it, never ignore it.
+     */
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record CommandResponse(Long resourceId, Long clientId, Long savingsId,
+                                  Long commandId, Boolean rollbackTransaction,
                                   java.util.Map<String, Object> changes) {
+
+        /** True iff Fineract parked this command for a human checker instead of applying it. */
+        public boolean parkedByMakerChecker() {
+            return Boolean.TRUE.equals(rollbackTransaction);
+        }
     }
 
     @JsonIgnoreProperties(ignoreUnknown = true)

@@ -249,4 +249,58 @@ class FineractClientContractTest {
         assertThatThrownBy(() -> deadClient.deposit("acct", new BigDecimal("1.00"), "r", "k"))
                 .isInstanceOf(CoreTransientException.class);
     }
+
+    // ------------------------------------------- maker-checker parked commands
+
+    /**
+     * Stub shape read out of the fork, not observed: a command whose
+     * permission is flagged {@code can_maker_checker} rolls back and answers
+     * {@code Response.ok()} with a Gson body that drops nulls —
+     * {@code RollbackTransactionNotApprovedExceptionMapper:48-51} +
+     * {@code CommandProcessingResult.withCommandId(...).setRollbackTransaction(true)},
+     * no resourceId for a savings deposit ({@code CommandWrapperBuilder:1938-1945}
+     * sets entityId null). So the exact wire is
+     * {@code 200 {"commandId":N,"rollbackTransaction":true}}.
+     */
+    @Test
+    void aParkedDepositIsUnknownOutcomeNeverASilentSuccess() {
+        wireMock.stubFor(post(urlPathEqualTo("/v1/savingsaccounts/external-id/acct-1/transactions"))
+                .willReturn(okJson("{\"commandId\":91,\"rollbackTransaction\":true}")));
+
+        // Before this guard the parked 200 deserialized into an all-null
+        // CommandResponse and read as SUCCESS: ledger COMPLETED, customer
+        // SMS'd, zero money moved, nothing ever reconciled. UNKNOWN is the
+        // contract: the checker may still approve it later.
+        assertThatThrownBy(() -> client.deposit("acct-1", new BigDecimal("10.00"), "ref-mc", "key-mc"))
+                .isInstanceOf(CoreUnknownOutcomeException.class)
+                .hasMessageContaining("maker-checker")
+                .hasMessageContaining("commandId=91")
+                .satisfies(ex -> assertThat(((CoreUnknownOutcomeException) ex).txRef().reference())
+                        .isEqualTo("key-mc"));
+    }
+
+    @Test
+    void aParkedClientCreateIsUnknownOutcomeToo() {
+        // The registration saga leg: a parked create must park, not dead-end
+        // the customer with a half-registered row that "succeeded".
+        wireMock.stubFor(post(urlEqualTo("/v1/clients"))
+                .willReturn(okJson("{\"commandId\":92,\"rollbackTransaction\":true}")));
+
+        assertThatThrownBy(() -> client.createClient("cust-uuid-9", "A", "B", "+254712000009", "key-mc2"))
+                .isInstanceOf(CoreUnknownOutcomeException.class)
+                .hasMessageContaining("maker-checker");
+    }
+
+    @Test
+    void anExplicitRollbackFalseStaysASuccess() {
+        // Guard must key on TRUE only — absent (every other test) and explicit
+        // false both stay ordinary successes.
+        wireMock.stubFor(post(urlPathEqualTo("/v1/savingsaccounts/external-id/acct-1/transactions"))
+                .willReturn(okJson("{\"resourceId\":77,\"rollbackTransaction\":false}")));
+
+        CommandResponse response = client.deposit("acct-1", new BigDecimal("3.00"), "ref-ok", "key-ok");
+
+        assertThat(response.resourceId()).isEqualTo(77L);
+        assertThat(response.parkedByMakerChecker()).isFalse();
+    }
 }
