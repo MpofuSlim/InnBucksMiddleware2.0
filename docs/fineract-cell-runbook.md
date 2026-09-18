@@ -419,6 +419,21 @@ touching either — a false negative in the violation check is the difference
 between a working customer rail and every deposit parking for an approver who
 does not exist.
 
+**The script runs under `set -euo pipefail`, so any helper that can legitimately
+"find nothing" must be written to succeed anyway.** A `grep … | head -N | …`
+returns nonzero both when grep matches nothing and when head closes early and
+SIGPIPEs grep into 141; either kills the run *silently*, wherever it happens to
+sit. That bit step 6b on the ZW cell: the "did you mean" hint for an unknown
+permission code exited the script before it could print the warning it was
+building, and 6c–6e — the maker-checker assertion among them — never ran. The
+output simply stopped after the first role, with no error.
+
+Read that as the general rule, not one fixed line: **a provisioning step may
+fail loudly, never silently, and least of all while reporting someone else's
+typo.** If you add a step, check what it does on the empty result. The selftest
+covers the two shapes above by running them in a subshell with `-e` ON, so a
+regression fails on your laptop rather than half-way through a cell.
+
 ### Enabling maker-checker for the BANK's own dual control
 
 The back office WILL want maker-checker on (reversals, journals, write-offs,
