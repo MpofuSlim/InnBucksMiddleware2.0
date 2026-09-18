@@ -131,6 +131,31 @@ suggest_roles() {
   return 0
 }
 
+# checker_gaps TASKS GRANTS — prints each maker-checker task for which no role
+# in GRANTS holds the matching '<TASK>_CHECKER'.
+#
+# Flagging a task and granting its checker are two halves of ONE decision, and
+# splitting them across two settings in the same file makes it easy to do one
+# and not the other. The ZW cell shipped exactly that: eight tasks flagged, one
+# checker granted. Nothing fails — commands park correctly into an inbox no
+# non-superuser can act on, which reads to an operator as "maker-checker is
+# broken", the same symptom the UAT already reported for a different reason.
+#
+# Reported as a gap rather than an error: a bank may deliberately route some
+# approvals through a CHECKER_SUPER_USER, and five actions have no seeded
+# _CHECKER row at all, so this cannot be a hard refusal.
+checker_gaps() {
+  local tasks="${1:-}" grants="${2:-}" task granted
+  [[ -n "$tasks" ]] || return 0
+  granted=$({ parse_role_grants "$grants" 2>/dev/null | cut -f2- | tr ',' '\n' || true; } \
+            | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+  while IFS= read -r task; do
+    [[ -n "$task" ]] || continue
+    grep -qxF -- "${task}_CHECKER" <<<"$granted" || printf '%s\n' "$task"
+  done < <(split_list ',' "$tasks")
+  return 0
+}
+
 # json_flag_map BOOL CODE... — {"permissions":{"CODE":BOOL,...}}, the body shape
 # PUT /v1/permissions takes for both flagging and unflagging.
 json_flag_map() {
