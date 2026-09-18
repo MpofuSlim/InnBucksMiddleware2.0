@@ -799,7 +799,14 @@ commands, with the exact bytes that were running before. Full procedure
    by `provision-selftest.sh` (no cell, no network, 25 cases); the
    `_CHECKER`-sibling case there is why the check is `grep -xF` and never a
    substring match — every protected code has a `<CODE>_CHECKER` sibling whose
-   flagging is normal and harmless.
+   flagging is normal and harmless. **The script runs `set -euo pipefail`, so a
+   helper that can legitimately find nothing MUST still succeed**: a
+   `grep … | head -N` returns nonzero on no-match AND when head SIGPIPEs grep
+   into 141, and either kills the run silently wherever it sits. That is how the
+   unknown-code "did you mean" hint exited step 6b before printing the warning
+   it was computing, skipping 6c–6e and the maker-checker assertion with it —
+   the same SIGPIPE trap `gen_password` already documents, twenty lines later.
+   A provisioning step may fail loudly, never silently.
 
 9. **Credential-spray detection — DONE.** See the security invariant above.
    The gap it closes was found by auditing the rate-limiting story end to end:

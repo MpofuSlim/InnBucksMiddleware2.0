@@ -458,7 +458,10 @@ done
 ensure_role() { # NAME DESCRIPTION PERMS...
   local name="$1" desc="$2"; shift 2
   local id
-  id=$(api GET "/v1/roles" | jq -r --arg n "$name" '.[] | select(.name==$n) | .id' | head -1)
+  # first(...) inside jq rather than '| head -1': head closing the pipe early
+  # SIGPIPEs jq into 141, which pipefail turns fatal. Harmless while a name
+  # matches at most once, lethal the day one matches twice.
+  id=$(api GET "/v1/roles" | jq -r --arg n "$name" 'first(.[] | select(.name==$n) | .id) // empty')
   if [[ -z "$id" ]]; then
     id=$(api POST "/v1/roles" \
       "$(jq -n --arg n "$name" --arg d "$desc" '{name:$n, description:$d}')" | jq -r '.resourceId')
@@ -521,7 +524,14 @@ if [[ -n "${BANK_ROLE_GRANTS:-}" ]]; then
       if grep -qxF -- "$c" <<<"$ALL_CODES"; then
         valid+=("$c")
       else
-        near=$(grep -i "${c#*_}" <<<"$ALL_CODES" | head -5 | paste -sd' ' -)
+        # The '|| true' is load-bearing under 'set -euo pipefail'. This pipeline
+        # returns nonzero in two ORDINARY situations — grep matching nothing, and
+        # head closing early and SIGPIPE-ing grep into 141 (the same trap
+        # gen_password documents above) — and either would kill the script
+        # SILENTLY, before the warning below that explains why. Losing the hint
+        # is cosmetic; exiting here skips steps 6c-6e including the
+        # maker-checker assertion, which is the one thing that must always run.
+        near=$(suggest_codes "$c" "$ALL_CODES") || true
         log "  WARN: '${c}' does not exist on this build — NOT granted to '${role_name}'. Similar: ${near:-<none>}"
       fi
     done < <(split_list ',' "$role_codes")

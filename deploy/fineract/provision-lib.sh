@@ -68,6 +68,32 @@ mc_violations() {
   return 0
 }
 
+# suggest_codes CODE ALL_CODES — up to 5 codes resembling CODE, space-joined,
+# for the "did you mean" half of an unknown-permission warning. Empty when
+# nothing resembles it.
+#
+# ALWAYS SUCCEEDS, and that is the entire point. Its caller runs under
+# 'set -euo pipefail' while reporting a typo, so a naive
+#     near=$(grep -i "$frag" <<<"$all" | head -5 | paste -sd' ' -)
+# kills the whole provision run SILENTLY in two ordinary cases: grep matching
+# nothing (exit 1), and head closing early so grep dies of SIGPIPE (141) — the
+# same trap gen_password documents. Either one exits BEFORE the warning it was
+# computing, and takes steps 6c-6e with it, including the maker-checker
+# assertion. A missing hint is cosmetic; a skipped assertion is not.
+#
+# Hence: grep neutralised with '|| true', 'awk NR<=5' instead of head (it drains
+# the stream rather than closing it), and an unconditional 'return 0'.
+#
+# -F, not a regex: a permission-code fragment is literal text.
+suggest_codes() {
+  local code="${1:-}" all="${2:-}" needle out
+  needle="${code#*_}"                      # drop the ACTION_, keep the entity
+  [[ -n "$needle" && -n "$all" ]] || return 0
+  out=$({ grep -iF -- "$needle" <<<"$all" || true; } | awk 'NR<=5' | paste -sd' ' -) || true
+  printf '%s' "$out"
+  return 0
+}
+
 # json_flag_map BOOL CODE... — {"permissions":{"CODE":BOOL,...}}, the body shape
 # PUT /v1/permissions takes for both flagging and unflagging.
 json_flag_map() {

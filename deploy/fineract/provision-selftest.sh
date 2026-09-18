@@ -96,6 +96,32 @@ is "literal match, not regex" \
    "$(mc_violations "$(printf 'CREATE_CLIENT.*')" "${MW[@]}")" \
    ""
 
+printf 'suggest_codes\n'
+CODES=$(printf 'READ_CLIENT\nCREATE_CLIENT\nDEPOSIT_SAVINGSACCOUNT\nWITHDRAWAL_SAVINGSACCOUNT\nDEPOSIT_SAVINGSACCOUNT_CHECKER\nBLOCKDEBIT_SAVINGSACCOUNT\nUNBLOCKDEBIT_SAVINGSACCOUNT\nAPPROVE_SAVINGSACCOUNT')
+is "suggests on the entity half" \
+   "$(suggest_codes 'FROBNICATE_CLIENT' "$CODES")" \
+   "READ_CLIENT CREATE_CLIENT"
+is "no resemblance is empty, not an error" \
+   "$(suggest_codes 'FROBNICATE_WIDGET' "$CODES")" \
+   ""
+is "empty inputs" "$(suggest_codes '' "$CODES")$(suggest_codes 'X_Y' '')" ""
+# 6 codes contain SAVINGSACCOUNT; the hint is capped at 5.
+is "caps the hint at 5" \
+   "$(suggest_codes 'BOGUS_SAVINGSACCOUNT' "$CODES" | wc -w | tr -d ' ')" \
+   "5"
+
+# THE regression. Both of these shapes previously killed provision-cell.sh
+# outright — under 'set -euo pipefail' a no-match grep exits 1 and an early-
+# closing head SIGPIPEs grep into 141, and the script died mid-step 6b with no
+# message, silently skipping 6c-6e and the maker-checker assertion with it.
+# Run in a subshell with -e ON, so a regression fails here instead of on a cell.
+survives() { ( set -euo pipefail; . ./provision-lib.sh
+               near=$(suggest_codes "$1" "$2"); printf 'alive:%s' "$near" ); }
+is "no-match does not kill a set -e caller" \
+   "$(survives 'FROBNICATE_WIDGET' "$CODES")" "alive:"
+is "overflowing match does not kill a set -e caller" \
+   "$(survives 'BOGUS_SAVINGSACCOUNT' "$CODES" | cut -d' ' -f1)" "alive:DEPOSIT_SAVINGSACCOUNT"
+
 printf 'json_flag_map\n'
 if command -v jq >/dev/null; then
   is "flags true"  "$(json_flag_map true  A B | jq -c .)" '{"permissions":{"A":true,"B":true}}'
