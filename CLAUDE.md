@@ -781,6 +781,26 @@ commands, with the exact bytes that were running before. Full procedure
    (dedup, ownership, never-throw) and the observed-copy cases in
    `TransactionMessageComposerTest`.
 
+   **Cell POLICY is data; cell SAFETY is code.** Per-market policy — bank role
+   grants, the maker-checker task list, control-account glCodes — lives in
+   `deploy/cells/cell.<iso>.env`: committed, NON-SECRET (this repo is public),
+   reviewable as a diff, sourced before `provision-cell.sh`, applied by its
+   steps 6b–6e additively and idempotently. Deliberately NOT configurable is
+   **6e's assertion that the middleware's own permission codes are never
+   `can_maker_checker`** — it is derived from the script's `READ_PERMS`/
+   `WRITE_PERMS` arrays (so a new middleware permission is protected
+   automatically, never a copied list that drifts), it runs on EVERY provision
+   even on a cell that never enables maker-checker (the flag can be set from
+   the console too), and it unflags + screams rather than merely warning. A
+   cell file can widen what the bank dual-controls; it can never switch off the
+   thing that keeps the customer rail moving. Ordering inside 6e is the rest of
+   the safety argument: flag the bank's tasks → assert → only then flip the
+   global switch. Parsing + set arithmetic are in `provision-lib.sh`, covered
+   by `provision-selftest.sh` (no cell, no network, 25 cases); the
+   `_CHECKER`-sibling case there is why the check is `grep -xF` and never a
+   substring match — every protected code has a `<CODE>_CHECKER` sibling whose
+   flagging is normal and harmless.
+
 9. **Credential-spray detection — DONE.** See the security invariant above.
    The gap it closes was found by auditing the rate-limiting story end to end:
    every existing control is scoped to ONE victim or ONE address, and a spray
