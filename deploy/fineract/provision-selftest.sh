@@ -122,6 +122,30 @@ is "no-match does not kill a set -e caller" \
 is "overflowing match does not kill a set -e caller" \
    "$(survives 'BOGUS_SAVINGSACCOUNT' "$CODES" | cut -d' ' -f1)" "alive:DEPOSIT_SAVINGSACCOUNT"
 
+printf 'suggest_roles\n'
+ROLES=$(printf 'SUPER USER\nTEST Teller\nTEST Internal Audit\nTEST Risk Manager\nTEST Operations Manager\nTEST Operations Manager Checker\nTEST Branch Operations Supervisor / Branch Manager\ninnbucks-mw-read')
+# THE case this exists for. The ZW cell file said "Test Internal Auditor"; the
+# cell has "TEST Internal Audit". Every role on that cell begins "TEST", so a
+# match-any-word filter would list all of them and help nobody — the intended
+# role must come FIRST, which is what the scoring buys.
+is "puts the intended role first despite a shared TEST prefix" \
+   "$(suggest_roles 'Test Internal Auditor' "$ROLES" | cut -d'|' -f1)" \
+   "TEST Internal Audit"
+is "case-insensitive, and an exact name still ranks first" \
+   "$(suggest_roles 'test risk manager' "$ROLES" | cut -d'|' -f1)" \
+   "TEST Risk Manager"
+is "capped at three suggestions" \
+   "$(suggest_roles 'TEST Manager' "$ROLES" | tr '|' '\n' | grep -c .)" \
+   "3"
+is "nothing alike is empty" "$(suggest_roles 'Zzzz Qqqq' "$ROLES")" ""
+is "short words are ignored"  "$(suggest_roles 'a of the' "$ROLES")" ""
+is "empty inputs" "$(suggest_roles '' "$ROLES")$(suggest_roles 'X' '')" ""
+is "a glob in the name does not expand" "$(suggest_roles '*' "$ROLES")" ""
+is "never kills a set -e caller" \
+   "$( ( set -euo pipefail; . ./provision-lib.sh
+         n=$(suggest_roles 'Zzzz Qqqq' "$ROLES"); printf 'alive:%s' "$n" ) )" \
+   "alive:"
+
 printf 'json_flag_map\n'
 if command -v jq >/dev/null; then
   is "flags true"  "$(json_flag_map true  A B | jq -c .)" '{"permissions":{"A":true,"B":true}}'
