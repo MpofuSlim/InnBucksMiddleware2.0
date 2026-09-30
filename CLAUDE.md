@@ -364,7 +364,7 @@ first (`RegisterService:77`, `LoginService:91`, `OtpService`,
 `RecipientLookupService:103`). The doc tells the console to mirror that
 normalizer branch for branch — including its two fail-closed rules: letters or
 stray symbols reject rather than get stripped, and only mobile prefixes (71
-NetOne, 73 Telecel, 77/78 Econet) are valid, because these numbers exist to
+NetOne, 73 Telecel, 77/78/79 Econet — 79 added 2026-09-30) are valid, because these numbers exist to
 receive OTPs. **The mixed formatting breaks search, not money** — recipient
 lookup keys on our own `customer` table, never on Fineract's `mobileNo` — so
 it is hygiene, not an incident. A console that accepts what the middleware

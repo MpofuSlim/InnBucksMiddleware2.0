@@ -35,7 +35,9 @@ class ZimbabweMsisdnNormalizerTest {
             "0711234567",   // NetOne
             "0731234567",   // Telecel
             "0771234567",   // Econet
-            "0781234567"    // Econet
+            "0781234567",   // Econet
+            "0791234567",   // Econet (added 2026-09-30)
+            "+263791234567" // Econet, canonical
     })
     void acceptsEveryMobileNetworkPrefix(String input) {
         assertThat(normalizer.isValid(input)).isTrue();
@@ -45,7 +47,7 @@ class ZimbabweMsisdnNormalizerTest {
     @ValueSource(strings = {
             "0242123456",     // Harare landline — we only ever SMS mobiles
             "0721234567",     // 72 is not an allocated mobile prefix
-            "0791234567",     // 79 likewise
+            "0761234567",     // 76 likewise
             "077123456",      // one digit short
             "07712345678",    // one digit long
             "+254771234567",  // Kenyan number in a Zimbabwe cell
@@ -53,6 +55,12 @@ class ZimbabweMsisdnNormalizerTest {
     })
     void rejectsNonMobileWrongLengthAndForeignNumbers(String input) {
         assertThat(normalizer.isValid(input)).isFalse();
+    }
+
+    @Test
+    void normalisesAnEconet079NumberToE164() {
+        assertThat(normalizer.normalize("079 123 4567")).isEqualTo("+263791234567");
+        assertThat(normalizer.normalize("263791234567")).isEqualTo("+263791234567");
     }
 
     @Test
