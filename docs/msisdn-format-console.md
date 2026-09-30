@@ -29,11 +29,11 @@ because anything is currently failing.
 
 ## The canonical rule
 
-**Canonical form is E.164: `+263` followed by `7`, then one of `1 3 7 8`, then
+**Canonical form is E.164: `+263` followed by `7`, then one of `1 3 7 8 9`, then
 7 digits.** Total 13 characters, no spaces.
 
 ```
-^\+2637[1378][0-9]{7}$
+^\+2637[13789][0-9]{7}$
 ```
 
 Accept these three input shapes and convert:
@@ -55,9 +55,9 @@ Two rules the backend deliberately enforces, and the console should too:
 A number with a letter in it is user error or something worse, and quietly
 deleting characters turns a typo into a plausible-looking wrong number.
 
-**Only mobile prefixes are valid** — `71` NetOne, `73` Telecel, `77` and `78`
-Econet. That list is exhaustive and confirmed (2026-09-03); anything else,
-including `72`, is not an allocated ZW mobile range. Landlines and short codes
+**Only mobile prefixes are valid** — `71` NetOne, `73` Telecel, `77`, `78` and
+`79` Econet. That list was confirmed on 2026-09-03; Econet added `79` on
+2026-09-30. Anything else, including `72`, is not an allocated ZW mobile range. Landlines and short codes
 are rejected too, because these numbers exist to receive OTPs and step-up
 approvals; a landline is a customer record that can never complete an app
 registration.
@@ -65,7 +65,7 @@ registration.
 ### Reference implementation
 
 ```js
-const MOBILE = /^\+2637[1378]\d{7}$/;
+const MOBILE = /^\+2637[13789]\d{7}$/;
 const ALLOWED = /^[0-9+\s\-.()]+$/;
 
 /** Returns canonical E.164, or null if the input is not a valid ZW mobile. */
@@ -124,7 +124,7 @@ SELECT id, display_name, mobile_no
 FROM m_client
 WHERE mobile_no IS NOT NULL
   AND mobile_no <> ''
-  AND mobile_no !~ '^\+2637[1378][0-9]{7}$'
+  AND mobile_no !~ '^\+2637[13789][0-9]{7}$'
 ORDER BY id;
 ```
 
@@ -134,7 +134,7 @@ The `0…` rows convert mechanically and could be backfilled:
 -- Review the SELECT above first. This is a data change; take a backup.
 UPDATE m_client
 SET mobile_no = '+263' || substring(mobile_no from 2)
-WHERE mobile_no ~ '^07[1378][0-9]{7}$';
+WHERE mobile_no ~ '^07[13789][0-9]{7}$';
 ```
 
 Deliberately narrow: it only touches numbers that are unambiguously a local-form
@@ -169,7 +169,7 @@ records the app can never match. Copy the rule; don't fork it.
 
 | Claim | File |
 |---|---|
-| Canonical `+2637[1378]…` pattern, three accepted shapes | `ZimbabweMsisdnNormalizer.java:22-59` |
+| Canonical `+2637[13789]…` pattern, three accepted shapes | `ZimbabweMsisdnNormalizer.java:22-59` |
 | Letters/symbols rejected rather than stripped | `ZimbabweMsisdnNormalizer.java:27,39-41` |
 | Mobile-only prefixes and why | `ZimbabweMsisdnNormalizer.java:8-17` |
 | Registration normalises before writing to the core | `RegisterService.java:77` |

@@ -11,15 +11,15 @@ import java.util.regex.Pattern;
  * {@code 0771234567} — and emits the canonical E.164 form.
  *
  * <p>Mobile prefixes (the digit after the leading {@code 7}): NetOne 71,
- * Telecel 73, Econet 77 and 78. Landline and short-code ranges are rejected:
+ * Telecel 73, Econet 77, 78 and 79 (79 added by Econet, 2026-09-30). Landline and short-code ranges are rejected:
  * this middleware only ever messages mobiles (OTP, step-up approvals), so a
  * non-mobile number is a registration that could never complete.
  */
 @Component
 public class ZimbabweMsisdnNormalizer implements MsisdnNormalizer {
 
-    /** +263 7[1|3|7|8] then 7 more digits, e.g. +263771234567. */
-    private static final Pattern CANONICAL = Pattern.compile("^\\+2637[1378][0-9]{7}$");
+    /** +263 7[1|3|7|8|9] then 7 more digits, e.g. +263771234567. */
+    private static final Pattern CANONICAL = Pattern.compile("^\\+2637[13789][0-9]{7}$");
 
     // Same fail-closed policy as Kenya: letters or stray symbols are a strong
     // signal of user error or malicious input and must not be silently
