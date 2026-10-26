@@ -47,6 +47,23 @@
              effective value, i.e. this override. Read the parent directly:
                V=4.1.1; curl -s "https://repo1.maven.org/maven2/org/springframework/boot/spring-boot-dependencies/$V/spring-boot-dependencies-$V.pom" | grep tomcat.version -->
         <tomcat.version>11.0.25</tomcat.version>
+        <!-- Jackson: Spring Boot 4.1.1's BOM manages 3.1.5 (tools.jackson, the
+             app's JSON) and 2.21.5 (com.fasterxml, the springdoc/swagger
+             transitive), which carry five HIGH denial-of-service CVEs between
+             them — CVE-2026-89407 (regex backtracking) and CVE-2026-89425
+             (unbounded StringBuilder) in jackson-core, CVE-2026-68497 (unbounded
+             numeric parsing), CVE-2026-91776 (TypeDeserializerBase cache growth)
+             and CVE-2026-91777 (quadratic forward references) in
+             jackson-databind. 3.1.7 and 2.21.7 are the fix lines. Overriding the
+             two BOM properties moves each family as one aligned set — never pin
+             core/databind alone, which would split a family.
+
+             Same rule as tomcat.version above: these MUST be >= the BOM's own
+             values. On every Spring Boot bump, read the BOM and raise these or
+             delete them once the BOM is at or past the fix lines:
+               V=4.1.1; curl -s "https://repo1.maven.org/maven2/org/springframework/boot/spring-boot-dependencies/$V/spring-boot-dependencies-$V.pom" | grep jackson -->
+        <jackson-bom.version>3.1.7</jackson-bom.version>
+        <jackson-2-bom.version>2.21.7</jackson-2-bom.version>
         <!-- Postgres JDBC override REMOVED (was 42.7.12). It existed for
              CVE-2026-42198 (HIGH, client-side DoS via a malicious SCRAM-SHA-256
              response), fixed in 42.7.11; Spring Boot 4.1.1's BOM now manages
