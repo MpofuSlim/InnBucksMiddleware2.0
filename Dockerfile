@@ -53,6 +53,9 @@ FROM eclipse-temurin:21-jre-alpine AS runtime
 # Verify with `apk policy <pkg>` against the CURRENT base before adding one.
 #   CVE-2026-45447 (HIGH) — libssl3/libcrypto3/openssl PKCS#7 / S/MIME
 #     signed-message handling; fixed in 3.5.7-r0.
+#   CVE-2026-111497 (HIGH) — brotli-libs out-of-bounds write in the Brotli
+#     decoder; fixed in 1.2.1-r0. The alpine 3.24.3 base ships 1.2.0-r1, and
+#     Trivy's 3.24 advisory data names 1.2.1-r0 as the in-branch fix.
 #
 # BUMP THE DATE BELOW WHENEVER TRIVY REPORTS A FIXED-IN-BRANCH CVE. That is not
 # bookkeeping — it is the fix. 2026-09-02: the Release gate failed on libexpat
@@ -61,13 +64,14 @@ FROM eclipse-temurin:21-jre-alpine AS runtime
 # the blanket upgrade never re-ran against the refreshed index. The base image
 # had not changed, so nothing else busted the cache. Same shape as the failure
 # this ARG was introduced for.
-ARG ALPINE_SECURITY_REFRESH=2026-09-02-libexpat-cve-2026-66046
+ARG ALPINE_SECURITY_REFRESH=2026-10-26-brotli-cve-2026-111497
 RUN echo "Security refresh: $ALPINE_SECURITY_REFRESH" \
  && apk update \
  && apk --no-cache upgrade \
  && apk info -e 'libssl3>=3.5.7-r0' \
  && apk info -e 'libcrypto3>=3.5.7-r0' \
  && apk info -e 'openssl>=3.5.7-r0' \
+ && apk info -e 'brotli-libs>=1.2.1-r0' \
  && apk --no-cache add wget \
  && addgroup -S app && adduser -S -G app app
 WORKDIR /app
