@@ -84,6 +84,15 @@ Build: `./mvnw verify` at the root. Run locally:
   `nid_hash`, `auth_time`. High-value withdrawals/transfers additionally
   need a step-up SMS approval bound to the exact transaction
   (`X-Step-Up-Token`; `innbucks.stepup.*`).
+* **PIN set/reset revokes the customer's refresh families** in the PIN's own
+  transaction (reason `pin_set` / `pin_reset`, live sessions ended counted in
+  the audit row) — every family that exists when it runs: a refresh or an
+  OLD-PIN login racing the reset can still leave one alive (`PinService`'s
+  known-gaps comment; deferred gap (b) under slice 9). Access tokens (10m,
+  stateless) are not revocable and lapse on their own. Refresh deliberately
+  IGNORES the wrong-PIN lock — anyone can type wrong PINs against a number,
+  so gating refresh on it would be a sign-out-everywhere DoS. A future admin
+  block must revoke families explicitly.
 * **SMS/notifications ride the InnBucks notification gateway**
   (`NOTIFY_PROVIDER=innbucks-gateway` + `NOTIFY_API_*` — same platform
   gateway as the ticketing fleet; email surface pinned for later), with an

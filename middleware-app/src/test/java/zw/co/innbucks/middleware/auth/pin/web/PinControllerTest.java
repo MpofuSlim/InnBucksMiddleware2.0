@@ -13,8 +13,10 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
+import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.context.WebApplicationContext;
+import zw.co.innbucks.middleware.auth.pin.PinHasher;
 import zw.co.innbucks.middleware.customer.CustomerStatus;
 import zw.co.innbucks.middleware.customer.KycTier;
 import zw.co.innbucks.middleware.otp.OtpPurpose;
@@ -46,6 +48,7 @@ class PinControllerTest {
     @Autowired WebApplicationContext context;
     @Autowired JdbcTemplate jdbcTemplate;
     @Autowired VerificationTokenIssuer verificationTokenIssuer;
+    @Autowired PinHasher pinHasher;
 
     final ObjectMapper objectMapper = new ObjectMapper();
     MockMvc mockMvc;
@@ -203,6 +206,127 @@ class PinControllerTest {
         assertThat((String) row.get("pin_hash")).startsWith("$argon2id$");
         assertThat(((Number) row.get("failed_pin_attempts")).intValue()).isEqualTo(0);
         assertThat(row.get("last_failed_pin_at")).isNull();
+    }
+
+    @Test
+    void resetPinEndsEverySessionTheCustomerAlreadyHas() throws Exception {
+        // The "Forgot PIN" after a lost phone: signed in on the lost handset
+        // AND on their own, and the lost one has refreshed once — so its
+        // family also holds a rotated predecessor row.
+        jdbcTemplate.update("UPDATE customer SET status = ?, pin_hash = ? WHERE id = ?",
+                CustomerStatus.ACTIVE.dbValue(), pinHasher.hash("1234"), customerId);
+        String lostPhone = refreshTokenFrom(login("1234", "device-lost"));
+        String lostPhoneRotated = refreshTokenFrom(refresh(lostPhone, "device-lost")
+                .andExpect(status().isOk()));
+        String ownPhone = refreshTokenFrom(login("1234", "device-own"));
+        // A session that lapsed on its own: revoked with the rest, but it was
+        // not live, so it is not counted.
+        Instant now = Instant.now();
+        insertRefreshToken(customerId, "e".repeat(64), now.minusSeconds(3600));
+        // Another customer's session must come through untouched.
+        UUID otherCustomerId = UUID.randomUUID();
+        jdbcTemplate.update("""
+                INSERT INTO customer
+                    (id, country, msisdn, pin_hash, kyc_tier, core_provider, core_external_id,
+                     status, failed_pin_attempts, created_at, updated_at)
+                VALUES (?, ?, ?, NULL, ?, ?, ?, ?, 0, ?, ?)
+                """,
+                otherCustomerId, "KE", "+254712000000", KycTier.BASIC.dbValue(), "FINERACT",
+                "EXT-PIN-OTHER", CustomerStatus.ACTIVE.dbValue(),
+                Timestamp.from(now), Timestamp.from(now));
+        insertRefreshToken(otherCustomerId, "f".repeat(64), now.plusSeconds(3600));
+
+        mockMvc.perform(post("/auth/pin/reset")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"verificationToken":"%s","pin":"9999"}
+                                """.formatted(mintVerificationToken(OtpPurpose.PIN_RESET).token())))
+                .andExpect(status().isNoContent());
+
+        // Neither family can mint another access token.
+        refresh(lostPhoneRotated, "device-lost")
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.errorCode").value("refresh_invalid"));
+        refresh(ownPhone, "device-own")
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.errorCode").value("refresh_invalid"));
+
+        // Every row went, the rotated predecessor and the expired one included,
+        // under one reason.
+        assertThat(jdbcTemplate.queryForList(
+                "SELECT revocation_reason FROM refresh_token WHERE customer_id = ?", String.class, customerId))
+                .hasSize(4)
+                .containsOnly("pin_reset");
+        // Only the resetting customer's rows: the other customer is still signed in.
+        assertThat(jdbcTemplate.queryForMap(
+                "SELECT revoked_at, revocation_reason FROM refresh_token WHERE customer_id = ?", otherCustomerId))
+                .containsEntry("revoked_at", null)
+                .containsEntry("revocation_reason", null);
+        // The audit counts SESSIONS (live family heads), not rows: two.
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT metadata ->> 'sessionsRevoked' FROM audit_event WHERE action = 'pin_reset'",
+                String.class))
+                .isEqualTo("2");
+
+        // The new PIN starts sessions as normal — the revocation is not sticky.
+        String fresh = refreshTokenFrom(login("9999", "device-own"));
+        refresh(fresh, "device-own").andExpect(status().isOk());
+    }
+
+    @Test
+    void setPinRevokesAnyRefreshFamilyTheCustomerHolds() throws Exception {
+        // A PENDING customer cannot log in, so a live family here is an
+        // anomaly — but a first PIN is a credential change all the same.
+        insertRefreshToken(customerId, "a".repeat(64), Instant.now().plusSeconds(3600));
+
+        mockMvc.perform(post("/auth/pin/set")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"verificationToken":"%s","pin":"1234"}
+                                """.formatted(mintVerificationToken(OtpPurpose.PIN_SETUP).token())))
+                .andExpect(status().isNoContent());
+
+        assertThat(jdbcTemplate.queryForMap(
+                "SELECT revoked_at, revocation_reason FROM refresh_token WHERE customer_id = ?", customerId))
+                .containsEntry("revocation_reason", "pin_set")
+                .extractingByKey("revoked_at").isNotNull();
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT metadata ->> 'sessionsRevoked' FROM audit_event WHERE action = 'pin_set'",
+                String.class))
+                .isEqualTo("1");
+    }
+
+    /** An un-rotated, un-revoked family head, issued an hour before it expires. */
+    private void insertRefreshToken(UUID owner, String tokenHash, Instant expiresAt) {
+        jdbcTemplate.update("""
+                INSERT INTO refresh_token (jti, token_hash, customer_id, family_id, device_hash,
+                                           issued_at, expires_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                UUID.randomUUID(), tokenHash, owner, UUID.randomUUID(), "device-1",
+                Timestamp.from(expiresAt.minusSeconds(3600)), Timestamp.from(expiresAt));
+    }
+
+    private ResultActions login(String pin, String deviceHash) throws Exception {
+        return mockMvc.perform(post("/auth/login")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"msisdn":"0712345678","pin":"%s","deviceHash":"%s"}
+                                """.formatted(pin, deviceHash)))
+                .andExpect(status().isOk());
+    }
+
+    private ResultActions refresh(String refreshToken, String deviceHash) throws Exception {
+        return mockMvc.perform(post("/auth/refresh")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                        {"refreshToken":"%s","deviceHash":"%s"}
+                        """.formatted(refreshToken, deviceHash)));
+    }
+
+    private String refreshTokenFrom(ResultActions result) throws Exception {
+        return objectMapper.readTree(result.andReturn().getResponse().getContentAsString())
+                .get("refreshToken").asText();
     }
 
     @Test

@@ -22,7 +22,6 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
-import zw.co.innbucks.middleware.me.ProfileNotFoundException;
 import zw.co.innbucks.middleware.statement.StatementDocument;
 import zw.co.innbucks.middleware.statement.StatementRequestException;
 import zw.co.innbucks.middleware.statement.StatementService;
@@ -110,13 +109,6 @@ public class StatementController {
     public ResponseEntity<ProblemDetail> unavailable(StatementUnavailableException ex) {
         return problem(HttpStatus.SERVICE_UNAVAILABLE, "Statement unavailable",
                 ex.getMessage(), "statement_unavailable");
-    }
-
-    @ExceptionHandler(ProfileNotFoundException.class)
-    public ResponseEntity<ProblemDetail> notFound(ProfileNotFoundException ex) {
-        return problem(HttpStatus.NOT_FOUND, "Not registered",
-                "We couldn't find a registered account for this login. Please register first.",
-                "customer_not_registered");
     }
 
     private static ResponseEntity<ProblemDetail> problem(HttpStatus status, String title,

@@ -81,6 +81,14 @@ public class LoginController {
 
         RefreshToken rotated = refreshTokenService.rotate(secret, request.deviceHash());
 
+        // Deliberately NO status gate: refresh does not refuse a 'locked'
+        // customer. That lock is driven by wrong PINs, which anyone can type
+        // against a number — gating refresh on it would let an attacker sign a
+        // victim out of every device by guessing wrong 7 times (the default
+        // cap). Ending sessions is the job of explicit actions (a PIN
+        // set/reset revokes every family); a future administrative block must
+        // revoke the customer's families explicitly too, not lean on a check
+        // here.
         Customer customer = customerRepository.findById(rotated.getCustomerId())
                 .orElseThrow(IllegalStateException::new);
 

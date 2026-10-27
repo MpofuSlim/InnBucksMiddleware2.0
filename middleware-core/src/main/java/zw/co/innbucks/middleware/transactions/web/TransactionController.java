@@ -60,6 +60,9 @@ public class TransactionController {
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
             @ApiResponse(responseCode = "403", description = "Account does not belong to the caller",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
+            @ApiResponse(responseCode = "404", description = "No registered customer behind this token "
+                    + "(errorCode customer_not_registered)",
+                    content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
             @ApiResponse(responseCode = "409", description = "An identical request is still in progress",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
             @ApiResponse(responseCode = "422", description = "Key reused with a different body, or the core "
@@ -100,6 +103,9 @@ public class TransactionController {
                                      "errorCode":"step_up_required",
                                      "txnFp":"9f2b4c6d8e0a1b3c5d7e9f0a2b4c6d8e0a1b3c5d7e9f0a2b4c6d8e0a1b3c5d7e"}
                                     """))),
+            @ApiResponse(responseCode = "404", description = "No registered customer behind this token "
+                    + "(errorCode customer_not_registered)",
+                    content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
             @ApiResponse(responseCode = "409", description = "An identical request is still in progress",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
             @ApiResponse(responseCode = "422", description = "Key reused with a different body, or the core "
@@ -141,6 +147,9 @@ public class TransactionController {
                                      "errorCode":"step_up_required",
                                      "txnFp":"9f2b4c6d8e0a1b3c5d7e9f0a2b4c6d8e0a1b3c5d7e9f0a2b4c6d8e0a1b3c5d7e"}
                                     """))),
+            @ApiResponse(responseCode = "404", description = "No registered customer behind this token "
+                    + "(errorCode customer_not_registered)",
+                    content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
             @ApiResponse(responseCode = "409", description = "An identical request is still in progress",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
             @ApiResponse(responseCode = "422", description = "Key reused with a different body, or the core "

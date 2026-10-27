@@ -33,7 +33,8 @@ public class PinController {
     @PostMapping("/set")
     @Operation(summary = "Set the customer's first PIN",
             description = "Consumes a verification token issued for purpose=PIN_SETUP. Flips the customer from "
-                    + "PENDING_VERIFICATION to ACTIVE so they can /auth/login.")
+                    + "PENDING_VERIFICATION to ACTIVE so they can /auth/login. Any existing refresh token is "
+                    + "revoked, as on a reset.")
     @ApiResponses({
             @ApiResponse(responseCode = "204", description = "PIN set; customer is now ACTIVE."),
             @ApiResponse(responseCode = "401", description = "Verification token missing / expired / wrong purpose / wrong audience.",
@@ -49,7 +50,10 @@ public class PinController {
     @PostMapping("/reset")
     @Operation(summary = "Reset a customer's PIN (forgot-PIN flow)",
             description = "Consumes a verification token issued for purpose=PIN_RESET. Updates the PIN, clears any "
-                    + "failed-attempt counters, and unlocks the customer if they were LOCKED.")
+                    + "failed-attempt counters, unlocks the customer if they were LOCKED, and revokes every "
+                    + "refresh token the customer holds when the reset runs (access tokens already issued "
+                    + "lapse at their own short expiry; a refresh or login in flight at that moment can still "
+                    + "complete).")
     @ApiResponses({
             @ApiResponse(responseCode = "204", description = "PIN reset; customer can /auth/login with the new PIN."),
             @ApiResponse(responseCode = "401", description = "Verification token missing / expired / wrong purpose.",

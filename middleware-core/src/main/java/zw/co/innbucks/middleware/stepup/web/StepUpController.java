@@ -138,17 +138,6 @@ public class StepUpController {
         return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(body);
     }
 
-    @ExceptionHandler(ProfileNotFoundException.class)
-    public ResponseEntity<ProblemDetail> notFound(ProfileNotFoundException ex) {
-        ProblemDetail body = ProblemDetail.forStatus(HttpStatus.NOT_FOUND);
-        body.setType(PROBLEM_TYPE);
-        body.setTitle("Not registered");
-        body.setDetail("We couldn't find a registered account for this login. Please register first.");
-        body.setProperty("errorCode", "customer_not_registered");
-        return ResponseEntity.status(HttpStatus.NOT_FOUND)
-                .contentType(MediaType.APPLICATION_PROBLEM_JSON).body(body);
-    }
-
     @Schema(name = "StepUpVerifyPayload")
     public record StepUpVerifyPayload(
 
