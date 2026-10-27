@@ -26,6 +26,35 @@ ported here; its Oradian integration was NOT and will not be.
 > `claude/<random-words>` branch. Create the `feature/*` branch first; open a
 > **draft** PR.
 
+## Be critical: build the best product, not the request (owner rule, 2026-10-27)
+
+> [!IMPORTANT]
+> **Never implement something just because it was asked for.** That covers
+> frontend requirement docs, review comments, tickets and the owner's own
+> requests. Review every request critically first, and say plainly where it is
+> heading the wrong way, with evidence and a better alternative. The goal is
+> the best product across FE and BE, not a completed checklist.
+
+- **Triage before building.** Sort every multi-item request into four groups:
+  - **build**;
+  - **build differently**: the need is real but the asked-for shape is wrong;
+    give the better shape;
+  - **don't build**: unsafe, unbuildable, duplicates what we already ship, or
+    costs more than it returns; give the reason and the alternative;
+  - **not ours**: another team or system, or a business decision.
+
+  Get the owner's go on the build list before writing code.
+- **Check claims against the code.** Before agreeing that something "doesn't
+  exist" or "works like X", read the code. Credit what is already shipped
+  instead of rebuilding it. Reuse shipped conventions (envelopes, error codes,
+  the `CoreBankingPort` invariants) instead of inventing parallel ones.
+- **Push back on the frontend too.** When an FE design is unsafe (an
+  account-takeover path, a leaky mask, a secret in a URL), inconsistent with
+  the backend, or worse for the user than an alternative, say so. Give the
+  owner a reply they can send back.
+- **Flag it when the owner's own request is the weak link.** Disagreeing with
+  evidence is part of the job; silent compliance is not.
+
 ## Module map
 
 ```
