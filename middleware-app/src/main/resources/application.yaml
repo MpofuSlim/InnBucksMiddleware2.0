@@ -197,12 +197,46 @@ innbucks:
       # alert still sends) rather than spill into a second segment.
       max-length: ${TXN_ALERTS_MAX_LENGTH:160}
       max-narrative-length: ${TXN_ALERTS_MAX_NARRATIVE:24}
+  limits:
+    # Per-tier payment limits on app withdrawals/transfers. The VALUES live in
+    # the reviewed policy file packaged into the image —
+    # limits/limits-<iso>.yaml, picked by INNBUCKS_COUNTRY — and NOWHERE else.
+    # Its SHA-256 and effective values are logged (and audited) at every boot.
+    #
+    # What follows is the one runtime lever: EMERGENCY, TIGHTEN-ONLY overrides
+    # (minor units; daily-count is a number of payments). Blank = none. A value
+    # looser than the file refuses boot; any value tightens a kind the file
+    # leaves unlimited. Every active override is logged as a WARN and audited
+    # (LIMITS_OVERRIDE_ACTIVE) on every boot — move it into the file and unset
+    # it. The effective policy must still be coherent (per_payment <= daily <=
+    # monthly; no higher tier stricter than a lower), so tightening a HIGHER
+    # tier usually means tightening the ones below it too.
+    override:
+      basic:
+        per-payment: ${LIMITS_OVERRIDE_BASIC_PER_PAYMENT:}
+        daily: ${LIMITS_OVERRIDE_BASIC_DAILY:}
+        monthly: ${LIMITS_OVERRIDE_BASIC_MONTHLY:}
+        daily-count: ${LIMITS_OVERRIDE_BASIC_DAILY_COUNT:}
+      standard:
+        per-payment: ${LIMITS_OVERRIDE_STANDARD_PER_PAYMENT:}
+        daily: ${LIMITS_OVERRIDE_STANDARD_DAILY:}
+        monthly: ${LIMITS_OVERRIDE_STANDARD_MONTHLY:}
+        daily-count: ${LIMITS_OVERRIDE_STANDARD_DAILY_COUNT:}
+      enhanced:
+        per-payment: ${LIMITS_OVERRIDE_ENHANCED_PER_PAYMENT:}
+        daily: ${LIMITS_OVERRIDE_ENHANCED_DAILY:}
+        monthly: ${LIMITS_OVERRIDE_ENHANCED_MONTHLY:}
+        daily-count: ${LIMITS_OVERRIDE_ENHANCED_DAILY_COUNT:}
   stepup:
     # SMS re-approval of high-value withdrawals/transfers (deposits never step
     # up). A movement >= the caller's KYC-tier threshold (MINOR units of the
     # cell currency) 403s with step_up_required + a txnFp; the app approves it
     # via /auth/step-up/request + /verify and retries with X-Step-Up-Token.
     enabled: ${STEPUP_ENABLED:true}
+    # Still env, unlike the payment limits: the live ZW values are not yet
+    # confirmed, and moving them into the reviewed policy file would change
+    # behaviour silently. At boot, a tier whose threshold sits ABOVE its
+    # per_payment limit is WARNed about (approval could never fire).
     thresholds:
       # Defaults assume 2-decimal minor units: 500.00 / 2,000.00 / 10,000.00.
       basic: ${STEPUP_THRESHOLD_BASIC:50000}
