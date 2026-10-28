@@ -21,7 +21,11 @@ import java.util.Objects;
  * @param source    the classpath resource the values came from, for logs and audit
  * @param sha256    hex SHA-256 of the file's exact bytes — "which limits were in force"
  * @param tiers     EFFECTIVE limits per tier (file, then overrides)
- * @param overrides the overrides that actually changed a value, for logs and audit
+ * @param overrides every value that differs from the file — set by an
+ *                  operator, or derived from one (see {@link AppliedOverride#derivedFrom})
+ *                  — for logs and audit
+ * @param warnings  higher-tier-stricter inversions the overrides left in the
+ *                  effective policy: logged and audited, never a boot refusal
  */
 public record PaymentLimitsPolicy(
         Country country,
@@ -29,7 +33,8 @@ public record PaymentLimitsPolicy(
         String source,
         String sha256,
         Map<KycTier, TierLimits> tiers,
-        List<AppliedOverride> overrides
+        List<AppliedOverride> overrides,
+        List<String> warnings
 ) {
 
     public PaymentLimitsPolicy {
@@ -43,6 +48,13 @@ public record PaymentLimitsPolicy(
         }
         tiers = Collections.unmodifiableMap(copy);
         overrides = List.copyOf(overrides);
+        warnings = List.copyOf(warnings);
+    }
+
+    /** A policy with nothing to warn about — the file as reviewed, or tests. */
+    public PaymentLimitsPolicy(Country country, String currency, String source, String sha256,
+                               Map<KycTier, TierLimits> tiers, List<AppliedOverride> overrides) {
+        this(country, currency, source, sha256, tiers, overrides, List.of());
     }
 
     /** Effective limits for a tier; a null tier gets BASIC's (the tightest). */
@@ -56,15 +68,34 @@ public record PaymentLimitsPolicy(
     }
 
     /**
-     * One emergency override that tightened (or introduced) a value.
+     * One effective value that differs from the file because of the emergency
+     * overrides: either set by the operator, or DERIVED — lowered to a tighter
+     * period limit that an override set, so {@code per_payment <= daily <=
+     * monthly} still holds within the tier.
      *
-     * @param fileValue the packaged value it replaced; {@code null} when the file had none (unlimited)
+     * @param fileValue   the packaged value it replaced; {@code null} when the file had none (unlimited)
+     * @param derivedFrom {@code null} when the operator set this value; otherwise
+     *                    the kind of the same tier whose effective value it was
+     *                    lowered to (itself overridden, or lowered in turn)
      */
-    public record AppliedOverride(KycTier tier, LimitKind kind, Long fileValue, long overrideValue) {
+    public record AppliedOverride(KycTier tier, LimitKind kind, Long fileValue, long overrideValue,
+                                  LimitKind derivedFrom) {
+
+        /** An override the operator set. */
+        public AppliedOverride(KycTier tier, LimitKind kind, Long fileValue, long overrideValue) {
+            this(tier, kind, fileValue, overrideValue, null);
+        }
+
+        public boolean derived() {
+            return derivedFrom != null;
+        }
 
         public String describe() {
             return tier.dbValue() + "." + kind.wireName() + " = " + overrideValue
-                    + " (policy file: " + (fileValue == null ? "none" : fileValue) + ")";
+                    + " (policy file: " + (fileValue == null ? "none" : fileValue)
+                    + (derivedFrom == null ? "" : "; lowered to this tier's effective " + derivedFrom.wireName()
+                            + " so per_payment <= daily <= monthly holds")
+                    + ")";
         }
     }
 }

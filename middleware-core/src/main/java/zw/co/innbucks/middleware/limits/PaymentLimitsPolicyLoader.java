@@ -40,9 +40,32 @@ import java.util.Set;
  *       Absent = unlimited, so once a lower tier is unlimited for a kind every
  *       higher tier must be unlimited for it too.</li>
  *   <li>An override must be &gt; 0 and no looser than the file's value (any
- *       value tightens an absent one). The EFFECTIVE policy must then pass the
- *       two consistency rules above, so an override cannot leave the tiers
- *       or kinds contradicting each other.</li>
+ *       value tightens an absent one). That is the ONLY test an override
+ *       faces: a value that tightens is never refused.</li>
+ * </ul>
+ *
+ * <p>The two consistency rules bind the FILE, which is a reviewed artefact.
+ * They do not refuse the effective (overridden) policy, because the override
+ * is the emergency lever, and a boot refusal at the moment someone clamps a
+ * limit takes the whole cell down — login and statements included — for being
+ * too cautious. Instead:
+ * <ul>
+ *   <li><b>Within a tier, the ordering is restored by LOWERING</b>, never by
+ *       refusing: a present daily above an overridden monthly becomes the
+ *       monthly, and a present per_payment above the (possibly lowered) daily or
+ *       the monthly becomes the smaller of them. Each lowered value is recorded
+ *       as a {@linkplain AppliedOverride#derived() derived} override, so it is
+ *       logged and audited like the operator's own. This changes no payment's
+ *       outcome — a payment above the daily is refused by the daily check
+ *       whatever per_payment says, and a day lies inside its month, so the
+ *       month's usage is never below the day's — only which limit a refusal
+ *       names, and the numbers {@code GET /me/limits} shows, which become true.</li>
+ *   <li><b>A higher tier left stricter than a lower one is a WARNING</b>
+ *       ({@link PaymentLimitsPolicy#warnings()}), never a refusal and never a
+ *       derived change: each tier is enforced on its own, so the only effect is
+ *       that upgrading lowers that limit while the override stands. Lowering the
+ *       lower tiers to match would tighten customers the operator did not
+ *       name.</li>
  * </ul>
  */
 public final class PaymentLimitsPolicyLoader {
@@ -79,7 +102,7 @@ public final class PaymentLimitsPolicyLoader {
         validate(source, file.tiers());
 
         Map<KycTier, TierLimits> effective = new EnumMap<>(file.tiers());
-        List<AppliedOverride> applied = new ArrayList<>();
+        Map<KycTier, Map<LimitKind, AppliedOverride>> applied = new EnumMap<>(KycTier.class);
         overrides.forEach((tier, kinds) -> kinds.forEach((kind, value) -> {
             String name = "innbucks.limits.override." + tier.dbValue() + "." + propertyName(kind);
             if (value == null || value <= 0) {
@@ -98,14 +121,68 @@ public final class PaymentLimitsPolicyLoader {
             }
             if (fileValue == null || value < fileValue) {
                 effective.put(tier, effective.get(tier).with(kind, value));
-                applied.add(new AppliedOverride(tier, kind, fileValue, value));
+                applied.computeIfAbsent(tier, t -> new EnumMap<>(LimitKind.class))
+                        .put(kind, new AppliedOverride(tier, kind, fileValue, value));
             }
         }));
+        List<String> warnings = List.of();
         if (!applied.isEmpty()) {
-            validate(source + " with the emergency overrides applied", effective);
+            for (KycTier tier : KycTier.values()) {
+                restoreOrdering(tier, file.tiers().get(tier), effective, applied);
+            }
+            warnings = tierInversions(effective).stream()
+                    .map(inversion -> inversion.describe(source + " with the emergency overrides applied")
+                            + ". NOT refused: each tier is enforced on its own, so while the override stands "
+                            + "upgrading to '" + inversion.higher().dbValue() + "' lowers this limit. Override "
+                            + "the lower tier(s) too if that was not the intent.")
+                    .toList();
         }
+        List<AppliedOverride> recorded = new ArrayList<>();
+        applied.values().forEach(byKind -> recorded.addAll(byKind.values()));
         return new PaymentLimitsPolicy(cellCountry, file.currency(), source, sha256(bytes),
-                effective, applied);
+                effective, recorded, warnings);
+    }
+
+    /**
+     * Lowers a present daily above the monthly, then a present per_payment
+     * above the daily or monthly, in one tier of the effective policy. Only
+     * PRESENT values are lowered: an absent per_payment stays absent (the daily
+     * already bounds a single payment, and inventing a kind would list a limit
+     * the file never had). Since the file itself is ordered, anything lowered
+     * here was put out of order by an override.
+     */
+    private static void restoreOrdering(KycTier tier, TierLimits fileLimits, Map<KycTier, TierLimits> effective,
+                                        Map<KycTier, Map<LimitKind, AppliedOverride>> applied) {
+        TierLimits t = effective.get(tier);
+        if (t.dailyMinor() != null && t.monthlyMinor() != null && t.dailyMinor() > t.monthlyMinor()) {
+            t = lower(tier, t, LimitKind.DAILY, t.monthlyMinor(), LimitKind.MONTHLY, fileLimits, applied);
+        }
+        if (t.perPaymentMinor() != null) {
+            LimitKind ceilingKind = null;
+            long ceiling = t.perPaymentMinor();
+            if (t.dailyMinor() != null && t.dailyMinor() < ceiling) {
+                ceilingKind = LimitKind.DAILY;
+                ceiling = t.dailyMinor();
+            }
+            if (t.monthlyMinor() != null && t.monthlyMinor() < ceiling) {
+                ceilingKind = LimitKind.MONTHLY;
+                ceiling = t.monthlyMinor();
+            }
+            if (ceilingKind != null) {
+                t = lower(tier, t, LimitKind.PER_PAYMENT, ceiling, ceilingKind, fileLimits, applied);
+            }
+        }
+        effective.put(tier, t);
+    }
+
+    private static TierLimits lower(KycTier tier, TierLimits limits, LimitKind kind, long value,
+                                    LimitKind derivedFrom, TierLimits fileLimits,
+                                    Map<KycTier, Map<LimitKind, AppliedOverride>> applied) {
+        // Replaces an operator entry for the same kind: one record per value,
+        // carrying the value actually enforced.
+        applied.computeIfAbsent(tier, t -> new EnumMap<>(LimitKind.class))
+                .put(kind, new AppliedOverride(tier, kind, fileLimits.get(kind), value, derivedFrom));
+        return limits.with(kind, value);
     }
 
     /** {@code DAILY_COUNT -> daily-count}: the Spring property spelling, for messages. */
@@ -204,9 +281,9 @@ public final class PaymentLimitsPolicyLoader {
     }
 
     /**
-     * The two consistency rules. Shared by the file and the effective
-     * (overridden) policy, so an override can never produce a combination a
-     * reviewer could not have merged.
+     * The two consistency rules, as boot refusals. Applied to the FILE only;
+     * what the overrides do to them is handled in {@link #load} (see the class
+     * comment).
      */
     static void validate(String context, Map<KycTier, TierLimits> tiers) {
         for (KycTier tier : KycTier.values()) {
@@ -215,6 +292,17 @@ public final class PaymentLimitsPolicyLoader {
             requireOrdered(context, tier, LimitKind.DAILY, t.dailyMinor(), LimitKind.MONTHLY, t.monthlyMinor());
             requireOrdered(context, tier, LimitKind.PER_PAYMENT, t.perPaymentMinor(), LimitKind.MONTHLY, t.monthlyMinor());
         }
+        List<TierInversion> inversions = tierInversions(tiers);
+        if (!inversions.isEmpty()) {
+            throw new PaymentLimitsPolicyException(inversions.get(0).describe(context)
+                    + ". A higher tier must never be stricter than a lower one — upgrading "
+                    + "would lower the customer's limits.");
+        }
+    }
+
+    /** Every adjacent pair of tiers where the higher one is stricter for a kind (absent = unlimited). */
+    static List<TierInversion> tierInversions(Map<KycTier, TierLimits> tiers) {
+        List<TierInversion> inversions = new ArrayList<>();
         KycTier[] order = KycTier.values();
         for (int i = 1; i < order.length; i++) {
             KycTier lower = order[i - 1];
@@ -226,13 +314,20 @@ public final class PaymentLimitsPolicyLoader {
                     continue; // unlimited is never stricter
                 }
                 if (low == null || high < low) {
-                    throw new PaymentLimitsPolicyException(context + ": tier '" + higher.dbValue() + "' "
-                            + kind.wireName() + " (" + high + ") is STRICTER than tier '" + lower.dbValue()
-                            + "' " + kind.wireName() + " (" + (low == null ? "none = unlimited" : low)
-                            + "). A higher tier must never be stricter than a lower one — upgrading "
-                            + "would lower the customer's limits.");
+                    inversions.add(new TierInversion(lower, higher, kind, low, high));
                 }
             }
+        }
+        return inversions;
+    }
+
+    /** A higher tier stricter than the tier below it for one kind. */
+    record TierInversion(KycTier lower, KycTier higher, LimitKind kind, Long lowerValue, long higherValue) {
+
+        String describe(String context) {
+            return context + ": tier '" + higher.dbValue() + "' " + kind.wireName() + " (" + higherValue
+                    + ") is STRICTER than tier '" + lower.dbValue() + "' " + kind.wireName() + " ("
+                    + (lowerValue == null ? "none = unlimited" : lowerValue) + ")";
         }
     }
 

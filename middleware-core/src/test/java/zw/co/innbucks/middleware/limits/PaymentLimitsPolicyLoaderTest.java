@@ -11,12 +11,14 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.time.Instant;
 import java.util.EnumMap;
 import java.util.HexFormat;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.tuple;
 
 /**
  * Every boot-refusal rule of the limits policy, without a Spring context. The
@@ -287,19 +289,105 @@ class PaymentLimitsPolicyLoaderTest {
                 .hasMessageContaining("not a positive value");
     }
 
+    /**
+     * The emergency lever must never take the cell down for being too
+     * cautious. Clamping basic's daily below its per_payment lowers per_payment
+     * with it (recorded as derived) instead of refusing boot.
+     */
     @Test
-    void anOverrideThatLeavesTheEffectivePolicyIncoherentRefuses() {
-        // Capping ENHANCED's (unlimited) daily count below STANDARD's 20 makes
-        // the top tier stricter — the operator must cap the lower tiers too.
-        assertThatThrownBy(() -> load(fixtureText(), override(KycTier.ENHANCED, LimitKind.DAILY_COUNT, 15L)))
-                .isInstanceOf(PaymentLimitsPolicyException.class)
-                .hasMessageContaining("with the emergency overrides applied")
-                .hasMessageContaining("tier 'enhanced' daily_count (15) is STRICTER than tier 'standard' "
-                        + "daily_count (20)");
-        // And tightening daily below per_payment breaks per_payment <= daily.
-        assertThatThrownBy(() -> load(fixtureText(), override(KycTier.BASIC, LimitKind.DAILY, 90000L)))
-                .isInstanceOf(PaymentLimitsPolicyException.class)
-                .hasMessageContaining("per_payment (100000) exceeds its daily (90000)");
+    void anOverrideBelowPerPaymentLowersPerPaymentInsteadOfRefusingBoot() {
+        PaymentLimitsPolicy policy = load(fixtureText(), override(KycTier.BASIC, LimitKind.DAILY, 90000L));
+
+        assertThat(policy.limitsFor(KycTier.BASIC)).isEqualTo(new TierLimits(90000L, 90000L, 500000L, 10));
+        assertThat(policy.overrides()).containsExactly(
+                new PaymentLimitsPolicy.AppliedOverride(KycTier.BASIC, LimitKind.PER_PAYMENT, 100000L, 90000L,
+                        LimitKind.DAILY),
+                new PaymentLimitsPolicy.AppliedOverride(KycTier.BASIC, LimitKind.DAILY, 150000L, 90000L));
+        assertThat(policy.overrides().get(0).describe())
+                .contains("basic.per_payment = 90000 (policy file: 100000; lowered to this tier's effective daily");
+        assertThat(policy.warnings()).isEmpty();
+    }
+
+    @Test
+    void anOverrideBelowDailyLowersDailyAndPerPaymentInOrder() {
+        PaymentLimitsPolicy policy = load(fixtureText(), override(KycTier.BASIC, LimitKind.MONTHLY, 80000L));
+
+        assertThat(policy.limitsFor(KycTier.BASIC)).isEqualTo(new TierLimits(80000L, 80000L, 80000L, 10));
+        assertThat(policy.overrides()).extracting(PaymentLimitsPolicy.AppliedOverride::kind,
+                        PaymentLimitsPolicy.AppliedOverride::derivedFrom)
+                .containsExactly(
+                        // per_payment follows the daily it was just lowered to.
+                        tuple(LimitKind.PER_PAYMENT, LimitKind.DAILY),
+                        tuple(LimitKind.DAILY, LimitKind.MONTHLY),
+                        tuple(LimitKind.MONTHLY, null));
+    }
+
+    @Test
+    void anAbsentPerPaymentIsNeverInventedByTheLowering() {
+        String yaml = fixtureText().replace("    per_payment: 100000\n", "")
+                .replace("    per_payment: 200000\n", "").replace("    per_payment: 1000000\n", "");
+        PaymentLimitsPolicy policy = load(yaml, override(KycTier.BASIC, LimitKind.DAILY, 90000L));
+        assertThat(policy.limitsFor(KycTier.BASIC).perPaymentMinor()).isNull();
+        assertThat(policy.overrides()).hasSize(1);
+    }
+
+    /**
+     * Why lowering is safe to do silently-but-logged: it changes no payment's
+     * outcome. Over a grid of usage and amounts, the incoherent limits and the
+     * lowered ones accept exactly the same payments (a day lies inside its
+     * month, so the month's usage is never below the day's).
+     */
+    @Test
+    void theLoweringNeverChangesWhetherAPaymentPasses() {
+        TierLimits lowered = load(fixtureText(), override(KycTier.BASIC, LimitKind.MONTHLY, 90000L))
+                .limitsFor(KycTier.BASIC);
+        assertThat(lowered).isEqualTo(new TierLimits(90000L, 90000L, 90000L, 10));
+        // What enforcing the override WITHOUT the lowering would have meant,
+        // and another out-of-order shape that lowers to the same limits.
+        TierLimits asOverridden = new TierLimits(100000L, 150000L, 90000L, 10);
+        TierLimits incoherent = new TierLimits(100000L, 120000L, 90000L, 10);
+        LimitWindows windows = LimitWindows.at(Instant.parse("2026-10-28T08:00:00Z"),
+                Country.ZW.zoneId());
+        long[] used = {0, 1, 30000, 89999, 90000, 100000, 120000, 160000};
+        long[] amounts = {1, 50000, 89999, 90000, 90001, 100000, 100001, 120001, 150001};
+        for (TierLimits raw : new TierLimits[] {incoherent, asOverridden}) {
+            for (long day : used) {
+                for (long monthExtra : used) {
+                    LimitUsage usage = new LimitUsage(day, 0, 3, day + monthExtra, 0);
+                    for (long amount : amounts) {
+                        assertThat(PaymentLimitService.evaluate(lowered, usage, amount, windows, KycTier.BASIC)
+                                .isPresent())
+                                .as("day=%d month=%d amount=%d", day, day + monthExtra, amount)
+                                .isEqualTo(PaymentLimitService.evaluate(raw, usage, amount, windows,
+                                        KycTier.BASIC).isPresent());
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * The reviewers' scenario: the shipped file is dormant, and during a fraud
+     * wave the operator clamps STANDARD's daily. Basic stays unlimited, so
+     * standard is now "stricter than basic" — a WARNING, not a dead cell.
+     */
+    @Test
+    void anOverrideThatMakesAHigherTierStricterIsAWarningNotARefusal() {
+        PaymentLimitsPolicy policy = load(DORMANT, override(KycTier.STANDARD, LimitKind.DAILY, 100000L));
+
+        assertThat(policy.limitsFor(KycTier.STANDARD).dailyMinor()).isEqualTo(100000L);
+        assertThat(policy.limitsFor(KycTier.BASIC).dailyMinor()).as("never lowered to match").isNull();
+        assertThat(policy.warnings()).singleElement().asString()
+                .contains("with the emergency overrides applied")
+                .contains("tier 'standard' daily (100000) is STRICTER than tier 'basic' daily (none = unlimited)")
+                .contains("NOT refused");
+
+        // And capping only the top tier, against a file that has values.
+        PaymentLimitsPolicy top = load(fixtureText(), override(KycTier.ENHANCED, LimitKind.DAILY_COUNT, 15L));
+        assertThat(top.limitsFor(KycTier.ENHANCED).dailyCount()).isEqualTo(15);
+        assertThat(top.limitsFor(KycTier.STANDARD).dailyCount()).isEqualTo(20);
+        assertThat(top.warnings()).singleElement().asString()
+                .contains("tier 'enhanced' daily_count (15) is STRICTER than tier 'standard' daily_count (20)");
     }
 
     @Test

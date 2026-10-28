@@ -14,7 +14,9 @@ import java.util.Map;
 /**
  * Seals the limits policy this process enforces into the tamper-evident audit
  * chain once per boot: {@code LIMITS_POLICY_LOADED} (file, digest, country,
- * currency), plus one {@code LIMITS_OVERRIDE_ACTIVE} per emergency override.
+ * currency, and any tier inversions the overrides left), plus one
+ * {@code LIMITS_OVERRIDE_ACTIVE} per effective value an override changed —
+ * the operator's own and the ones derived from them.
  *
  * <p>Runs on {@link ApplicationReadyEvent}, i.e. after Flyway has created
  * {@code audit_event} and the context is fully up.
@@ -43,6 +45,9 @@ public class PaymentLimitsPolicyAuditor {
         loaded.put("currency", policy.currency());
         loaded.put("dormant", policy.isDormant());
         loaded.put("overrides", policy.overrides().size());
+        if (!policy.warnings().isEmpty()) {
+            loaded.put("warnings", policy.warnings());
+        }
         auditService.record(AuditAction.LIMITS_POLICY_LOADED, AuditOutcome.SUCCESS, null, null, loaded);
 
         for (PaymentLimitsPolicy.AppliedOverride override : policy.overrides()) {
@@ -51,6 +56,9 @@ public class PaymentLimitsPolicyAuditor {
             metadata.put("kind", override.kind().wireName());
             metadata.put("fileValue", override.fileValue());
             metadata.put("overrideValue", override.overrideValue());
+            if (override.derived()) {
+                metadata.put("derivedFrom", override.derivedFrom().wireName());
+            }
             metadata.put("sha256", policy.sha256());
             auditService.record(AuditAction.LIMITS_OVERRIDE_ACTIVE, AuditOutcome.SUCCESS, null, null, metadata);
         }

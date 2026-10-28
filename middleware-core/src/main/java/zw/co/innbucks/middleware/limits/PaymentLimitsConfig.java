@@ -21,6 +21,9 @@ import java.util.List;
  * {@code INNBUCKS_COUNTRY}) plus any tighten-only overrides. A missing,
  * malformed or inconsistent file, a currency that is not the cell's, or a
  * looser override throws from the bean method — the context does not start.
+ * An override that TIGHTENS never does, whatever it does to the file's
+ * ordering rules (see {@link PaymentLimitsPolicyLoader}): the emergency lever
+ * must not be able to take the cell down.
  *
  * <p>The location is NOT configurable, deliberately: a property naming another
  * file would be an env override of the limit values by another name. Tests
@@ -53,9 +56,17 @@ public class PaymentLimitsConfig {
                     + "step-up approval and the core.", policy.source());
         }
         for (PaymentLimitsPolicy.AppliedOverride override : policy.overrides()) {
-            log.warn("EMERGENCY PAYMENT-LIMIT OVERRIDE ACTIVE: {}. Tighten-only, set from the environment, "
-                    + "NOT from the reviewed policy file — move the value into {} and unset the override.",
-                    override.describe(), policy.source());
+            if (override.derived()) {
+                log.warn("EMERGENCY PAYMENT-LIMIT OVERRIDE ACTIVE (derived): {}. Lowered to follow another "
+                        + "override in this tier, and goes away with it.", override.describe());
+            } else {
+                log.warn("EMERGENCY PAYMENT-LIMIT OVERRIDE ACTIVE: {}. Tighten-only, set from the environment, "
+                        + "NOT from the reviewed policy file — move the value into {} and unset the override.",
+                        override.describe(), policy.source());
+            }
+        }
+        for (String warning : policy.warnings()) {
+            log.warn("PAYMENT-LIMIT OVERRIDES LEAVE THE TIERS INVERTED: {}", warning);
         }
         for (String conflict : stepUpConflicts(policy, stepUpProperties)) {
             log.warn(conflict);

@@ -208,9 +208,11 @@ innbucks:
     # looser than the file refuses boot; any value tightens a kind the file
     # leaves unlimited. Every active override is logged as a WARN and audited
     # (LIMITS_OVERRIDE_ACTIVE) on every boot — move it into the file and unset
-    # it. The effective policy must still be coherent (per_payment <= daily <=
-    # monthly; no higher tier stricter than a lower), so tightening a HIGHER
-    # tier usually means tightening the ones below it too.
+    # it. A value that tightens NEVER refuses boot: a per_payment or daily left
+    # above a tighter period limit in the same tier is lowered to it (logged and
+    # audited as derived; no payment's outcome changes), and a higher tier left
+    # stricter than a lower one is a boot WARN — clamp the lower tiers too only
+    # if that was the intent.
     override:
       basic:
         per-payment: ${LIMITS_OVERRIDE_BASIC_PER_PAYMENT:}
