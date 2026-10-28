@@ -618,10 +618,10 @@ script's WIRING, which the lib cases cannot see: that the write role is given
 the opt-in-filtered grants, that step 5 revokes, that 6e's set and 6b's refusal
 come from the lib, and that 6f follows every role and user write. Each of those
 checks needs a positive match, so rewording one of those lines fails the
-selftest until the check is updated with it. Run it after touching any of the
-three files — a false negative in the violation check is the difference between
-a working customer rail and every deposit parking for an approver who does not
-exist.
+selftest until the check is updated with it. CI runs it on every push; run it
+yourself after touching any of the three files or a cell file — a false
+negative in the violation check is the difference between a working customer
+rail and every deposit parking for an approver who does not exist.
 
 **The script runs under `set -euo pipefail`, so any helper that can legitimately
 "find nothing" must be written to succeed anyway.** A `grep … | head -N | …`

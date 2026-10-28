@@ -917,7 +917,8 @@ one re-provision with nothing new in `deploy/fineract/.env` (exit 0, 6f
    thing that keeps the customer rail moving. Ordering inside 6e is the rest of
    the safety argument: flag the bank's tasks → assert → only then flip the
    global switch. Parsing + set arithmetic are in `provision-lib.sh`, covered
-   by `provision-selftest.sh` (no cell, no network, 123 cases); the
+   by `provision-selftest.sh` (no cell, no network, 123 cases, run by CI on
+   every push so its guards on the committed cell files gate a merge); the
    `_CHECKER`-sibling case there is why the check is `grep -xF` and never a
    substring match — every protected code has a `<CODE>_CHECKER` sibling whose
    flagging is normal and harmless. **The script runs `set -euo pipefail`, so a
