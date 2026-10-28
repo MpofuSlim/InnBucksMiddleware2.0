@@ -68,7 +68,7 @@ class JwtIssuerRs256Test {
     private String mint(AuthProperties properties) {
         return new JwtIssuer(properties, country, clock).issue(new JwtIssuer.IssueRequest(
                 "550e8400-e29b-41d4-a716-446655440000", Country.KE, "basic",
-                Set.of("customer:read", "customer:write"), "device-hash", null));
+                Set.of("customer:read", "customer:write"), "device-hash"));
     }
 
     @Test

@@ -128,9 +128,13 @@ Build: `./mvnw verify` at the root. Run locally:
   mismatch — the refresh token only rotates on the device it was issued to;
   a PIN set or reset revokes EVERY family the customer holds).
   `sub` = customer UUID; claims: `country`, `kyc_tier`, `scopes`, `did`,
-  `nid_hash`, `auth_time`. High-value withdrawals/transfers additionally
-  need a step-up SMS approval bound to the exact transaction
-  (`X-Step-Up-Token`; `innbucks.stepup.*`).
+  `auth_time` — exactly these, pinned by `JwtIssuerClaimsTest`. **No
+  national-ID derivative**: `nid_hash` (the keyed hash) was dropped because
+  nothing server-side read it and the token is readable by whoever holds it,
+  so it was a stable personal identifier on the device and in every log that
+  captures a bearer. Do not add it back; the app must not rely on it.
+  High-value withdrawals/transfers additionally need a step-up SMS approval
+  bound to the exact transaction (`X-Step-Up-Token`; `innbucks.stepup.*`).
 * **SMS/notifications ride the InnBucks notification gateway**
   (`NOTIFY_PROVIDER=innbucks-gateway` + `NOTIFY_API_*` — same platform
   gateway as the ticketing fleet; email surface pinned for later), with an

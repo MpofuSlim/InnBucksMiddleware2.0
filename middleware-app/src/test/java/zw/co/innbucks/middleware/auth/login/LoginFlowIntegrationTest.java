@@ -452,6 +452,40 @@ class LoginFlowIntegrationTest {
                 .isEqualTo(CustomerStatus.ACTIVE.dbValue());
     }
 
+    @Test
+    void neitherLoginNorRefreshPutsANationalIdDerivativeInTheToken() throws Exception {
+        // A registered customer HAS a national_id_hash; the token used to copy
+        // it into nid_hash, readable by anything holding the token.
+        jdbcTemplate.update("UPDATE customer SET national_id_hash = ? WHERE id = ?",
+                "a".repeat(64), customerId);
+
+        MvcResult login = mockMvc.perform(post("/auth/login")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"msisdn":"0712345678","pin":"1234","deviceHash":"test-device-1"}
+                                """))
+                .andExpect(status().isOk())
+                .andReturn();
+        JsonNode loginJson = objectMapper.readTree(login.getResponse().getContentAsString());
+
+        MvcResult refresh = mockMvc.perform(post("/auth/refresh")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"refreshToken":"%s","deviceHash":"test-device-1"}
+                                """.formatted(loginJson.get("refreshToken").asText())))
+                .andExpect(status().isOk())
+                .andReturn();
+        JsonNode refreshJson = objectMapper.readTree(refresh.getResponse().getContentAsString());
+
+        for (String accessToken : new String[]{
+                loginJson.get("accessToken").asText(), refreshJson.get("accessToken").asText()}) {
+            JsonNode claims = objectMapper.readTree(java.util.Base64.getUrlDecoder()
+                    .decode(accessToken.split("\\.")[1]));
+            assertThat(claims.has("nid_hash")).isFalse();
+            assertThat(claims.get("sub").asText()).isEqualTo(customerId.toString());
+        }
+    }
+
     private Integer failedAttempts() {
         return jdbcTemplate.queryForObject(
                 "SELECT failed_pin_attempts FROM customer WHERE id = ?", Integer.class, customerId);

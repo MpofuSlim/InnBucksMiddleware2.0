@@ -89,8 +89,7 @@ public class LoginController {
                 customer.countryEnum(),
                 customer.getKycTier(),
                 CustomerScopes.DEFAULT,
-                request.deviceHash(),
-                customer.getNationalIdHash()
+                request.deviceHash()
         ));
 
         return ResponseEntity.ok(new TokenResponse(

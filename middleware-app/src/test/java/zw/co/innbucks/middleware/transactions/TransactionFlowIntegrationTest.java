@@ -121,7 +121,7 @@ class TransactionFlowIntegrationTest {
                 VALUES (?, 'KE', '+254712000099', 'x', 'basic', 'FINERACT', ?, 'active', 0, ?, ?)
                 """, customerId, customerId.toString(), Timestamp.from(now), Timestamp.from(now));
         bearer = "Bearer " + issuer.issue(new JwtIssuer.IssueRequest(
-                customerId.toString(), Country.KE, "basic", CustomerScopes.DEFAULT, null, null));
+                customerId.toString(), Country.KE, "basic", CustomerScopes.DEFAULT, null));
 
         coreDeposits.set(0);
         smsSender.messages.clear();

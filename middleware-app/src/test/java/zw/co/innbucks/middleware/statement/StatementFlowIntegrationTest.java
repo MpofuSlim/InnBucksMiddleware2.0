@@ -97,7 +97,7 @@ class StatementFlowIntegrationTest {
                 VALUES (?, 'KE', '+254712000099', 'x', 'basic', 'FINERACT', ?, 'active', 0, ?, ?)
                 """, customerId, customerId.toString(), Timestamp.from(now), Timestamp.from(now));
         bearer = "Bearer " + issuer.issue(new JwtIssuer.IssueRequest(
-                customerId.toString(), Country.KE, "basic", CustomerScopes.DEFAULT, null, null));
+                customerId.toString(), Country.KE, "basic", CustomerScopes.DEFAULT, null));
 
         stubPort.onListAccounts = ref -> List.of(new DepositAccountSummary(
                 new AccountRef(wallet), "InnBucks Wallet", "KES", new MinorUnits(150_000L, "KES")));
