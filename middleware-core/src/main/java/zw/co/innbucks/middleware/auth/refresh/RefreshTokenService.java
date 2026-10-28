@@ -79,6 +79,30 @@ public class RefreshTokenService {
     }
 
     /**
+     * Whether the presented token would rotate right now — known, unrevoked,
+     * unexpired, not yet replaced, presented on its own device — and if so,
+     * whose it is. A single read: no lock, no transaction held, NOTHING spent
+     * and nothing revoked. Empty for every other case.
+     *
+     * <p>It exists so {@code /auth/refresh} can ask the core about a bank block
+     * BEFORE the token is spent: a slow core then costs the client a slow
+     * answer, never its session (an unspent token can simply be presented
+     * again; a spent one whose successor never arrived reads as a replay and
+     * kills the family). It decides nothing on its own: {@link #rotate} still
+     * re-checks every condition, under its lock, and is the ONE place a replay
+     * or a device mismatch revokes the family and is audited — so a caller that
+     * gets empty here just calls {@link #rotate} and lets it refuse.
+     */
+    public Optional<UUID> liveSessionCustomer(String presentedSecret, String deviceHash) {
+        return repository.findByTokenHash(sha256HexLower(presentedSecret))
+                .filter(token -> token.getRevokedAt() == null)
+                .filter(token -> !token.getExpiresAt().isBefore(clock.instant()))
+                .filter(token -> token.getReplacedByJti() == null)
+                .filter(token -> sameDevice(token.getDeviceHash(), deviceHash))
+                .map(RefreshToken::getCustomerId);
+    }
+
+    /**
      * The {@code noRollbackFor} is load-bearing: replay detection and device
      * mismatch REVOKE THE WHOLE FAMILY and then throw so the caller 401s.
      * Without it, Spring rolls the revocation back together with the throw and
@@ -119,11 +143,7 @@ public class RefreshTokenService {
         // the legitimate app just routes to a fresh login. Constant-time
         // compare; a NULL stored hash cannot occur (login always binds one)
         // but is treated as a mismatch — fail closed, not open.
-        String storedDeviceHash = current.getDeviceHash();
-        if (storedDeviceHash == null || deviceHash == null
-                || !MessageDigest.isEqual(
-                        storedDeviceHash.getBytes(StandardCharsets.UTF_8),
-                        deviceHash.getBytes(StandardCharsets.UTF_8))) {
+        if (!sameDevice(current.getDeviceHash(), deviceHash)) {
             repository.revokeFamily(current.getFamilyId(), now, "device_mismatch");
             auditService.record(
                     AuditAction.REFRESH_DEVICE_MISMATCH,
@@ -243,6 +263,18 @@ public class RefreshTokenService {
         token.setIssuedAt(now);
         token.setExpiresAt(expiresAt);
         return token;
+    }
+
+    /**
+     * The device binding, in ONE place so {@link #liveSessionCustomer} and
+     * {@link #rotate} can never disagree about it. Constant-time; a null on
+     * either side is a mismatch (fail closed).
+     */
+    private static boolean sameDevice(String storedDeviceHash, String presentedDeviceHash) {
+        return storedDeviceHash != null && presentedDeviceHash != null
+                && MessageDigest.isEqual(
+                        storedDeviceHash.getBytes(StandardCharsets.UTF_8),
+                        presentedDeviceHash.getBytes(StandardCharsets.UTF_8));
     }
 
     /**

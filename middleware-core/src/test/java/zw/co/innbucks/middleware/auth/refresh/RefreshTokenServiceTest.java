@@ -144,6 +144,71 @@ class RefreshTokenServiceTest {
         verify(jdbc, never()).queryForList(anyString(), any(Object[].class));
     }
 
+    // ------------------------------------------------ liveSessionCustomer
+
+    @Test
+    void aLiveTokenNamesItsCustomerAndSpendsNothing() {
+        // /auth/refresh asks the core about a block between this read and
+        // rotate(): the token must still be unspent while it does.
+        assertThat(service.liveSessionCustomer(SECRET, DEVICE)).contains(customerId);
+
+        verify(repository, never()).markReplaced(any(), any());
+        verify(repository, never()).revokeFamily(any(), any(), anyString());
+        verify(repository, never()).revokeAllForCustomer(any(), any(), anyString());
+        verify(repository, never()).save(any());
+        org.mockito.Mockito.verifyNoInteractions(jdbc, audit);
+    }
+
+    @Test
+    void everyTokenRotationWouldRefuseIsNotLiveAndIsNotPunishedHere() {
+        // Revoked, expired, already rotated (a replay), wrong device, unknown:
+        // all empty. None is revoked or audited HERE — rotate() is the one
+        // place that does, and the caller always goes on to call it.
+        RefreshToken revoked = copyOfCurrent();
+        revoked.setRevokedAt(NOW.minusSeconds(1));
+        RefreshToken expired = copyOfCurrent();
+        expired.setExpiresAt(NOW.minusSeconds(1));
+        RefreshToken replayed = copyOfCurrent();
+        replayed.setReplacedByJti(UUID.randomUUID());
+        RefreshToken noDevice = copyOfCurrent();
+        noDevice.setDeviceHash(null);
+
+        for (RefreshToken notLive : java.util.List.of(revoked, expired, replayed, noDevice)) {
+            when(repository.findByTokenHash(sha256(SECRET))).thenReturn(Optional.of(notLive));
+            assertThat(service.liveSessionCustomer(SECRET, DEVICE)).isEmpty();
+        }
+        when(repository.findByTokenHash(sha256(SECRET))).thenReturn(Optional.of(current));
+        assertThat(service.liveSessionCustomer(SECRET, "another-device")).isEmpty();
+        assertThat(service.liveSessionCustomer(SECRET, null)).isEmpty();
+        when(repository.findByTokenHash(sha256(SECRET))).thenReturn(Optional.empty());
+        assertThat(service.liveSessionCustomer(SECRET, DEVICE)).isEmpty();
+
+        verify(repository, never()).revokeFamily(any(), any(), anyString());
+        org.mockito.Mockito.verifyNoInteractions(jdbc, audit);
+    }
+
+    @Test
+    void aTokenExpiringThisInstantIsStillLiveExactlyAsRotationJudgesIt() {
+        // rotate() refuses only expires_at BEFORE now; the two must agree, or
+        // a token could skip the block check and still rotate.
+        current.setExpiresAt(NOW);
+        when(repository.markReplaced(eq(current.getJti()), any())).thenReturn(1);
+
+        assertThat(service.liveSessionCustomer(SECRET, DEVICE)).contains(customerId);
+        assertThat(service.rotate(SECRET, DEVICE)).isNotNull();
+    }
+
+    private RefreshToken copyOfCurrent() {
+        RefreshToken copy = new RefreshToken();
+        copy.setJti(current.getJti());
+        copy.setCustomerId(current.getCustomerId());
+        copy.setFamilyId(current.getFamilyId());
+        copy.setDeviceHash(current.getDeviceHash());
+        copy.setIssuedAt(current.getIssuedAt());
+        copy.setExpiresAt(current.getExpiresAt());
+        return copy;
+    }
+
     private static String sha256(String value) {
         try {
             return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")

@@ -102,6 +102,15 @@ innbucks:
       max-failed-attempts-before-lock: ${AUTH_MAX_FAILED_ATTEMPTS:7}
       lock-duration: ${AUTH_LOCK_DURATION:1h}
       backoff-base: ${AUTH_BACKOFF_BASE:1s}
+    # /auth/refresh reads the wallet's bank block from the core (a FULL block
+    # ends every session). The read runs BEFORE the refresh token is spent and
+    # never holds the request longer than `timeout`; past it, or with every
+    # slot busy (a stalled core holds them), the refresh goes through — the
+    # money is already blocked in the core. Keep `timeout` well under the app's
+    # own HTTP timeout. Watch innbucks.auth.refresh.block_check{outcome}.
+    refresh-block-check:
+      timeout: ${REFRESH_BLOCK_CHECK_TIMEOUT:2s}
+      max-concurrent-reads: ${REFRESH_BLOCK_CHECK_MAX_CONCURRENT:8}
   audit:
     # Keys the tamper-evidence HMAC chain over audit_event. Per-deployment,
     # openssl rand -base64 48. Rotation breaks the chain at the rotation point

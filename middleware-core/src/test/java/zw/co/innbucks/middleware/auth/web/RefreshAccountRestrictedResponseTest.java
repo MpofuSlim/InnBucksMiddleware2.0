@@ -38,9 +38,11 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 /**
  * {@code POST /auth/refresh} and a bank block, through the real controller and
  * the real advice (standalone MockMvc, no Spring context, no Docker): the
- * block check runs only AFTER rotation has proved the session live, a full
- * block is 403 {@code account_restricted} with fixed copy and mints no token,
- * and an invalid token never reaches the check. The Postgres half is
+ * block check runs only once the token has been READ as live and BEFORE
+ * rotation spends it — so a slow core can never cost the client its session —
+ * a full block is 403 {@code account_restricted} with fixed copy, rotates
+ * nothing and mints no token, and a token that is not live never reaches the
+ * check (rotation refuses it, as it always did). The Postgres half is
  * {@code RefreshAccountBlockIntegrationTest}.
  */
 class RefreshAccountRestrictedResponseTest {
@@ -73,6 +75,7 @@ class RefreshAccountRestrictedResponseTest {
         RefreshToken rotated = new RefreshToken();
         rotated.setCustomerId(customer.getId());
         rotated.setSecret(UUID.randomUUID().toString());
+        when(refreshTokenService.liveSessionCustomer(SECRET, "device-1")).thenReturn(Optional.of(customer.getId()));
         when(refreshTokenService.rotate(SECRET, "device-1")).thenReturn(rotated);
         when(customerRepository.findById(customer.getId())).thenReturn(Optional.of(customer));
         when(authProperties.accessTokenTtl()).thenReturn(Duration.ofMinutes(10));
@@ -91,25 +94,39 @@ class RefreshAccountRestrictedResponseTest {
                         "Your account has been restricted and you have been signed out. Please contact support."))
                 .andExpect(jsonPath("$.accessToken").doesNotExist());
 
+        // Nothing is spent or minted: the guard has already revoked every
+        // family, this token's included.
+        verify(refreshTokenService, never()).rotate(anyString(), anyString());
         verify(jwtIssuer, never()).issue(any());
     }
 
     @Test
-    void theBlockCheckRunsAfterRotationHasCommittedAndBeforeAnyTokenIsMinted() throws Exception {
+    void theBlockCheckRunsBeforeTheTokenIsSpent() throws Exception {
+        // The order that keeps a slow core from signing anyone out: while the
+        // core is being read, the presented token is still unspent, so a
+        // client that gives up waiting can present it again. Spent first, its
+        // successor would be lost with the response and the retry would read
+        // as a replay that revokes the family.
         mockMvc.perform(post("/auth/refresh").contentType(MediaType.APPLICATION_JSON).content(BODY))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.accessToken").value("access-token"));
 
         InOrder order = inOrder(refreshTokenService, guard, jwtIssuer);
-        order.verify(refreshTokenService).rotate(SECRET, "device-1");
+        order.verify(refreshTokenService).liveSessionCustomer(SECRET, "device-1");
         order.verify(guard).requireSessionAllowed(customer, "device-1");
+        order.verify(refreshTokenService).rotate(SECRET, "device-1");
         order.verify(jwtIssuer).issue(any());
+        // One customer read serves the check and the claims.
+        verify(customerRepository).findById(customer.getId());
     }
 
     @Test
-    void aTokenRotationRefusesNeverReachesTheCore() throws Exception {
-        // Unknown, revoked, replayed or wrong-device: refused by rotate(), and
-        // the core is never read on its behalf — nor is it told about a block.
+    void aTokenThatIsNotLiveNeverReachesTheCoreAndRotationStillRefusesIt() throws Exception {
+        // Unknown, revoked, expired, replayed or wrong-device: the liveness
+        // read says no, the core is never read on its behalf (nor is it told
+        // about a block), and rotate() refuses it — the one place a replay or
+        // device mismatch revokes the family and is audited.
+        when(refreshTokenService.liveSessionCustomer(anyString(), anyString())).thenReturn(Optional.empty());
         when(refreshTokenService.rotate(anyString(), anyString())).thenThrow(new RefreshTokenInvalidException());
 
         mockMvc.perform(post("/auth/refresh").contentType(MediaType.APPLICATION_JSON).content(BODY))
@@ -117,5 +134,19 @@ class RefreshAccountRestrictedResponseTest {
                 .andExpect(jsonPath("$.errorCode").value("refresh_invalid"));
 
         verifyNoInteractions(guard);
+        verify(refreshTokenService).rotate(SECRET, "device-1");
+    }
+
+    @Test
+    void aRotationThatLosesARaceAfterTheCheckIsStillRefused() throws Exception {
+        // Live when read, spent by a concurrent refresh before this one
+        // rotates: rotate() decides, exactly as before the check existed.
+        when(refreshTokenService.rotate(anyString(), anyString())).thenThrow(new RefreshTokenInvalidException());
+
+        mockMvc.perform(post("/auth/refresh").contentType(MediaType.APPLICATION_JSON).content(BODY))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.errorCode").value("refresh_invalid"));
+
+        verify(jwtIssuer, never()).issue(any());
     }
 }

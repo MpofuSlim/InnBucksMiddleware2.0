@@ -273,28 +273,52 @@ Build: `./mvnw verify` at the root. Run locally:
   lifetime) reads the block from the account listing, revokes EVERY family
   (`revokeAllSessions`, reason `account_blocked`, in its own short
   transaction), audits `REFRESH_BLOCKED_ACCOUNT_RESTRICTED`
-  (`refreshTokensRevoked`) and answers 403 `account_restricted`. **Order is
-  load-bearing: `rotate()` commits FIRST, then the core is read** — so only a
-  live session (not an unknown, revoked, replayed or wrong-device token) ever
-  costs a core read or learns of a block, and the core's HTTP call never runs
-  inside `rotate()`'s transaction (pooled connection + customer `FOR SHARE`).
-  The successor `rotate()` committed was handed to nobody and is revoked with
-  the rest; a rotation on another device is serialised by the same customer
-  lock as a PIN reset. A DEBIT- or CREDIT-only block does NOT end sessions:
-  it is the bank's payment pause, and the customer may still need balances,
-  statements and incoming money — signing out would make a pause a lockout.
-  **Fails OPEN** on every read failure (Fineract down, breaker open, our
-  credential refused, a bad listing): the money is already blocked in the
-  core, and failing closed would sign every active customer out on a blip.
-  Counted on `innbucks.auth.refresh.block_check{outcome}` (all registered at
-  0); a sustained `read_failed` means blocks are not ending sessions. A
-  customer with no core mapping is skipped. **Stated limits:** `/auth/login`
-  is not gated, so a blocked customer can sign in again and keeps one
-  access-token lifetime of read access until that session's first refresh;
-  and an access token already issued lives out its TTL. Pinned by
-  `AccountBlockSessionGuardTest` (incl. no transaction during the core read,
-  one around the revoke), `RefreshAccountRestrictedResponseTest` and
-  `RefreshAccountBlockIntegrationTest`.
+  (`refreshTokensRevoked`) and answers 403 `account_restricted`; nothing is
+  rotated. **Order is load-bearing: read the token, read the core, THEN
+  spend the token.** `RefreshTokenService.liveSessionCustomer` is a single
+  read (no lock, nothing spent) that lets only a live token (known,
+  unrevoked, unexpired, not a replay, on its own device) cost a core read or
+  learn of a block; the core is read with no transaction open; only then does
+  `rotate()` spend the token, re-checking everything under its lock — it stays
+  the ONE place a replay or device mismatch revokes a family. Never move the
+  core read after `rotate()`: rotation has no replay grace, so a client whose
+  response was lost to a slow core (it never got the successor) would present
+  the old token again and be treated as a thief — family revoked,
+  `REFRESH_REPLAY_DETECTED` — i.e. a Fineract slowdown would sign customers
+  out. **Latency is bounded as well as errors**: the read runs on the guard's
+  own pool (`innbucks.auth.refresh-block-check.max-concurrent-reads`, 8, NO
+  queue) and the refresh waits at most `…timeout` (2s) — far under a mobile
+  client's HTTP timeout. Without it, one hung listing (the adapter retries a
+  10 s read three times, and the breaker opens only after calls FINISH) held
+  each refresh's Tomcat thread ~30 s, enough to starve `/auth/login` and every
+  other endpoint during a Fineract stall. A read past the timeout is ABANDONED,
+  never interrupted (an interrupt would count a merely-slow call as a failure
+  on the breaker payments share); with every slot busy a refresh skips the
+  check at once, so the extra load on a struggling core is bounded by the pool.
+  The remaining exposure is the double submit every single-use rotation has: a
+  client whose own timeout is shorter than the budget, and which retries the
+  same token while the first request is still running, is a replay — as
+  before this check existed, only with a window up to the budget wide. A DEBIT- or CREDIT-only block does NOT
+  end sessions: it is the bank's payment pause, and the customer may still
+  need balances, statements and incoming money — signing out would make a
+  pause a lockout. **Fails OPEN** on every read failure (Fineract down,
+  breaker open, our credential refused, a bad listing) and on every slow one:
+  the money is already blocked in the core, and failing closed — or waiting —
+  would sign customers out on a blip. Counted on
+  `innbucks.auth.refresh.block_check{outcome}` (`none`, `debits_blocked`,
+  `credits_blocked`, `fully_blocked`, `unmapped`, `read_failed`,
+  `timed_out`, `busy`; all registered at 0); a sustained `read_failed`,
+  `timed_out` or `busy` means blocks are not ending sessions. A customer with
+  no core mapping is skipped. **Stated limits:** `/auth/login` is not gated,
+  so a blocked customer can sign in again and keeps one access-token lifetime
+  of read access until that session's first refresh; and an access token
+  already issued lives out its TTL. Pinned by `AccountBlockSessionGuardTest`
+  (incl. no transaction during the core read, one around the revoke, the
+  bounded wait, the busy pool, no interrupt, MDC carried),
+  `RefreshTokenServiceTest` (the liveness read spends and revokes nothing),
+  `RefreshAccountRestrictedResponseTest` (the order) and
+  `RefreshAccountBlockIntegrationTest` (the token is unspent while the core is
+  read; a hung core answers within the budget).
 * **Idempotency claim-row**: `IdempotencyService` claims the key with
   `INSERT … ON CONFLICT DO NOTHING` (status 0 sentinel) BEFORE running work —
   concurrent same-key requests can never double-execute. Replays return the

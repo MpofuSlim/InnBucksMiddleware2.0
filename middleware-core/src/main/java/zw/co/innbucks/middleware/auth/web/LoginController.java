@@ -33,6 +33,7 @@ import zw.co.innbucks.middleware.auth.refresh.RefreshTokenService;
 import zw.co.innbucks.middleware.customer.Customer;
 import zw.co.innbucks.middleware.customer.CustomerRepository;
 
+import java.util.Optional;
 import java.util.UUID;
 
 @RestController
@@ -93,22 +94,35 @@ public class LoginController {
     public ResponseEntity<TokenResponse> refresh(@Valid @RequestBody RefreshRequest request) {
         String secret = parseRefreshTokenUuid(request.refreshToken()).toString();
 
-        // Rotate FIRST, then ask the core about a block. rotate() is the
-        // check that this is a live session (known, unrevoked, unexpired, not
-        // a replay, on its own device) — an unknown, revoked, replayed or
-        // wrong-device token must never make us read the core, nor be told
-        // the account is blocked. And rotate() is @Transactional, holding
-        // a pooled connection and the customer-row lock until it commits:
-        // the core read (an HTTP call, ~100 ms or a timeout) must not run
-        // inside it. Once it has committed, its successor exists but has been
-        // handed to nobody, so a full block revokes it with every other family
-        // in a transaction of its own (AccountBlockSessionGuard).
+        // 1. Is this a live session? One read: nothing locked, nothing spent.
+        //    Only a live token (known, unrevoked, unexpired, not a replay, on
+        //    its own device) may cost a core read or learn of a block.
+        Optional<UUID> liveCustomerId = refreshTokenService.liveSessionCustomer(secret, request.deviceHash());
+
+        // 2. The bank's block, read while the presented token is still UNSPENT
+        //    and with no transaction open (rotate() holds a pooled connection
+        //    and the customer-row lock; an HTTP call must not run inside it).
+        //    Spending the token first would let a slow core sign customers out:
+        //    a client that gave up waiting never received the successor, and
+        //    its next refresh with the old token reads as a replay that kills
+        //    the family. The guard also waits at most its timeout and fails
+        //    open. On a full block it revokes every family — this token's
+        //    included — and throws; nothing is rotated.
+        Customer customer = null;
+        if (liveCustomerId.isPresent()) {
+            customer = loadCustomer(liveCustomerId.get());
+            accountBlockSessionGuard.requireSessionAllowed(customer, request.deviceHash());
+        }
+
+        // 3. Spend it. rotate() re-checks everything under its lock and is the
+        //    one place a replay or device mismatch revokes the family — a token
+        //    that was not live in step 1 is refused here, as it always was.
         RefreshToken rotated = refreshTokenService.rotate(secret, request.deviceHash());
-
-        Customer customer = customerRepository.findById(rotated.getCustomerId())
-                .orElseThrow(IllegalStateException::new);
-
-        accountBlockSessionGuard.requireSessionAllowed(customer, request.deviceHash());
+        if (customer == null || !customer.getId().equals(rotated.getCustomerId())) {
+            // Unreachable today (a token that was not live cannot rotate);
+            // kept so claims are never minted from another row.
+            customer = loadCustomer(rotated.getCustomerId());
+        }
 
         String accessToken = jwtIssuer.issue(new JwtIssuer.IssueRequest(
                 customer.getId().toString(),
@@ -138,6 +152,10 @@ public class LoginController {
                 auditService.record(AuditAction.LOGOUT, AuditOutcome.SUCCESS,
                         rt.getCustomerId(), rt.getDeviceHash()));
         return ResponseEntity.noContent().build();
+    }
+
+    private Customer loadCustomer(UUID customerId) {
+        return customerRepository.findById(customerId).orElseThrow(IllegalStateException::new);
     }
 
     /**

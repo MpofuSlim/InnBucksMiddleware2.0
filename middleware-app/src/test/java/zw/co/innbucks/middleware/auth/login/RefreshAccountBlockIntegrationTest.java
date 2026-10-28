@@ -28,9 +28,12 @@ import zw.co.innbucks.middleware.support.PostgresTestContainer;
 import zw.co.innbucks.middleware.support.SettableCorePort;
 
 import java.sql.Timestamp;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -42,11 +45,13 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 /**
  * A FULL bank block on the wallet ends the customer's sessions at the next
  * refresh — every device's, not just the one asking — while a debit-only
- * block, a core outage, and a customer with no core mapping all keep the
- * session. Real Postgres (refresh_token rows, audit chain), real controller
- * and guard; the core is the settable stub.
+ * block, a core outage, a SLOW core and a customer with no core mapping all
+ * keep the session. The core is read while the presented token is still
+ * unspent, so a slow core can never cost a client its session. Real Postgres
+ * (refresh_token rows, audit chain), real controller and guard; the core is
+ * the settable stub. The read budget is shortened so the slow case is quick.
  */
-@SpringBootTest
+@SpringBootTest(properties = "innbucks.auth.refresh-block-check.timeout=300ms")
 @Import({PostgresTestContainer.class, RefreshAccountBlockIntegrationTest.StubConfig.class})
 class RefreshAccountBlockIntegrationTest {
 
@@ -115,9 +120,22 @@ class RefreshAccountBlockIntegrationTest {
                         """.formatted(refreshToken, device)));
     }
 
+    /**
+     * Tokens that would still refresh: unrevoked AND not yet rotated away. A
+     * rotation marks its parent {@code replaced_by_jti} and leaves
+     * {@code revoked_at} NULL, so counting unrevoked rows alone would count a
+     * refreshed session twice.
+     */
     private int liveRows() {
         return jdbcTemplate.queryForObject(
-                "SELECT COUNT(*) FROM refresh_token WHERE customer_id = ? AND revoked_at IS NULL",
+                "SELECT COUNT(*) FROM refresh_token WHERE customer_id = ? AND revoked_at IS NULL "
+                        + "AND replaced_by_jti IS NULL",
+                Integer.class, customerId);
+    }
+
+    private int rotatedRows() {
+        return jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM refresh_token WHERE customer_id = ? AND replaced_by_jti IS NOT NULL",
                 Integer.class, customerId);
     }
 
@@ -138,9 +156,13 @@ class RefreshAccountBlockIntegrationTest {
                         "Your account has been restricted and you have been signed out. Please contact support."))
                 .andExpect(jsonPath("$.accessToken").doesNotExist());
 
-        // Every family — the tablet's too, and the successor rotation minted
-        // for the phone before the check, which nobody was ever handed.
+        // Every family — the tablet's too. Nothing was rotated: the check runs
+        // before the token is spent, so the only rows are the two logins'.
         assertThat(liveRows()).isZero();
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM refresh_token WHERE customer_id = ?", Integer.class, customerId))
+                .isEqualTo(2);
+        assertThat(rotatedRows()).isZero();
         assertThat(jdbcTemplate.queryForList(
                 "SELECT DISTINCT revocation_reason FROM refresh_token WHERE customer_id = ? "
                         + "AND revocation_reason IS NOT NULL", String.class, customerId))
@@ -184,6 +206,60 @@ class RefreshAccountBlockIntegrationTest {
 
         assertThat(liveRows()).isEqualTo(1);
         assertThat(checks("read_failed")).isEqualTo(before + 1);
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM audit_event WHERE action = 'refresh_blocked_account_restricted'",
+                Integer.class)).isZero();
+    }
+
+    @Test
+    void theCoreIsReadWhileThePresentedTokenIsStillUnspent() throws Exception {
+        // The property that keeps a slow core from signing anyone out: if the
+        // client gives up waiting, the token it holds still works. Spent
+        // before the read, its successor would be lost with the response and
+        // the next refresh would read as a replay that revokes the family.
+        String phone = login(PHONE);
+        AtomicInteger rotatedDuringRead = new AtomicInteger(-1);
+        stubPort.onListAccounts = ref -> {
+            rotatedDuringRead.set(rotatedRows());
+            return List.of(new DepositAccountSummary(new AccountRef(ref.externalId() + ":wallet"),
+                    "InnBucks Wallet", "KES", new MinorUnits(150000L, "KES"), AccountRestriction.NONE));
+        };
+
+        refresh(phone, PHONE).andExpect(status().isOk());
+
+        assertThat(rotatedDuringRead).hasValue(0);
+        assertThat(rotatedRows()).isEqualTo(1);
+    }
+
+    @Test
+    void aSlowCoreNeitherHoldsTheRefreshNorSignsAnyoneOut() throws Exception {
+        // Fineract accepting connections but not answering (the adapter would
+        // retry a 10 s read three times). The refresh is answered at the
+        // budget, unblocked; the read is abandoned, not interrupted.
+        String phone = login(PHONE);
+        double before = checks("timed_out");
+        CountDownLatch release = new CountDownLatch(1);
+        stubPort.onListAccounts = ref -> {
+            try {
+                release.await(10, TimeUnit.SECONDS);
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+            }
+            return List.of(new DepositAccountSummary(new AccountRef(ref.externalId() + ":wallet"),
+                    "InnBucks Wallet", "KES", new MinorUnits(150000L, "KES"), AccountRestriction.FULLY_BLOCKED));
+        };
+        try {
+            long started = System.nanoTime();
+            refresh(phone, PHONE)
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.accessToken").isNotEmpty());
+            assertThat(Duration.ofNanos(System.nanoTime() - started)).isLessThan(Duration.ofSeconds(5));
+        } finally {
+            release.countDown();
+        }
+
+        assertThat(checks("timed_out")).isEqualTo(before + 1);
+        assertThat(liveRows()).isEqualTo(1);
         assertThat(jdbcTemplate.queryForObject(
                 "SELECT COUNT(*) FROM audit_event WHERE action = 'refresh_blocked_account_restricted'",
                 Integer.class)).isZero();
