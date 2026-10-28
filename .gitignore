@@ -41,3 +41,14 @@ build/
 
 # Cell TLS material (CA keys, keystores) lives on the box only.
 deploy/fineract/ssl/
+
+# KYC encryption keys never live in the repo (or beside a backup) — runbook
+# "KYC encryption key". Belt and braces in case one is generated here.
+kyc-keys
+kyc-keys.*
+*.kyc-keys
+
+# Per-box compose override: carries this box's mounts (truststore, the KYC key
+# file's host path) and loopback publishing. The runbook has always called it
+# gitignored; now it is.
+docker-compose.override.yml

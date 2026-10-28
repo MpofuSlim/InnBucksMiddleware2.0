@@ -62,7 +62,8 @@ middleware-corebanking-api   The CoreBankingPort + value types + core-neutral
                              exceptions. ZERO framework deps, pure Java.
 middleware-core              Everything core-agnostic: auth (login/PIN/OTP/
                              refresh/JWT), customer, audit chain, idempotency,
-                             rate limiting, country/MSISDN SPI, config.
+                             rate limiting, country/MSISDN SPI, config,
+                             payment limits, KYC intake.
 middleware-adapter-fineract  Fineract implementation of the port (skeleton —
                              client lands in the next slice).
 middleware-app               Boot assembly: application class, yamls, Flyway
@@ -149,6 +150,13 @@ Build: `./mvnw verify` at the root. Run locally:
 * **Low-entropy secrets are HMAC-keyed, never bare-hashed**: OTP codes
   (`OtpHasher`), national IDs (`NationalIdHasher`). PINs: Argon2id
   (`PinHasher`). Refresh tokens: SHA-256 of a high-entropy opaque secret.
+  Anything handed to `IdempotencyService` (whose fingerprint is UNKEYED) carries
+  such an HMAC, never the low-entropy value itself (slice 12).
+* **KYC data is sealed, and its key is kept apart from it** (slice 12): every
+  typed ID, address and photo is an AES-256-GCM envelope (`KycCipher`: key-id
+  prefix, random nonce, row/column AAD) under keys from a key FILE that is
+  never an env value and never in a backup. Guarded only while
+  `KYC_ENABLED=true`.
 * **The two Fineract AppUsers are stored at bcrypt cost 6, `mifos` at 10** —
   the same entropy argument, run the other way. Fineract's
   `DaoAuthenticationProvider` has NO verification cache, so `matches()` runs on
@@ -269,7 +277,9 @@ best-effort attempt.
 * `INNBUCKS_COUNTRY` env var pins each deployment (startup fails without it).
 * SPIs needing a per-country impl: `MsisdnNormalizer` (currently
   `KenyaMsisdnNormalizer`; registry fails startup if the active country has
-  no normalizer).
+  no normalizer), and `NationalIdValidator` (KYC, slice 12: its registry
+  fails startup without one once KYC is on, and a unit test requires one per
+  `Country` so a new market cannot forget it).
 * Every JWT carries `country`; MDC carries it; log pattern is
   `[country,correlationId,traceId,spanId]`.
 
@@ -1302,8 +1312,158 @@ commands, with the exact bytes that were running before. Full procedure
    the binding check alone over five rounds; same-key replay counted once;
    `/me/limits` agreeing with the refusal; FAILED released, PROCESSING counted).
 
+12. **KYC intake — DONE (switched off by default; no decisions yet).** `kyc/`
+   in middleware-core: a customer asks for a higher tier from the app —
+   `GET /me/kyc`, `POST /me/kyc/submissions`, `PUT|POST
+   /me/kyc/submissions/{id}/files/{kind}` (raw `image/jpeg` body), `POST
+   /me/kyc/submissions/{id}/submit`. The typed ID, the typed address (enhanced)
+   and the photos live ENCRYPTED in the middleware's Postgres (V3). Nothing here
+   decides: review, approval, the live tier read and the staff read surface are
+   the next change; `KycDecisionApplier` is its in-process entry point, unit-
+   tested, called by nothing yet. **Approving changes no tier.**
+   - **The switch** `innbucks.kyc.enabled` (`KYC_ENABLED`, default false). Every
+     KYC bean carries `@ConditionalOnKycEnabled`: off, the routes are unmapped
+     (the plain 404 `not_found` of any unknown path) and no key is read.
+     `KycSwitchTest` scans the package so a new KYC bean cannot escape it. On,
+     the key file is boot-required in EVERY profile (`KycConfig`), and
+     `ProductionSecretsGuard` requires `KYC_KEYS_FILE` under a deployment
+     profile — **only while KYC is on**, so a deploy to a box nobody prepared
+     for KYC cannot take payments down.
+   - **Encryption: a versioned AES-256-GCM envelope** (`KycCipher`):
+     `v1:` key-id prefix, a random 96-bit nonce per value, and AAD binding each
+     value to its row and column (`KycAad` — never edit a label; add new ones),
+     so a blob copied into another row does not open. Binary form for photos
+     (`kyc_file.content_ciphertext`), base64 text form for the ID and address.
+   - **Keys come from a FILE, never env** (`KycKeyRing`; `current=vN` plus every
+     `vN=<base64 32 bytes>`, parsed strictly, no message ever carries key
+     material). `backup-cell.sh` copies the root `.env` into every backup next to
+     the dump, so a key there would sit beside its ciphertext. The file is
+     bind-mounted read-only from a host path outside the repo and the backup
+     root; `backup-cell.sh` now refuses to run if `.env` holds a `KYC_*KEY*`
+     value or the mounted file lives inside the repo/backup root, never copies
+     it, skips any volume mounted under `/run/secrets`, and names the host path
+     in the MANIFEST as "not in this backup". Rotation: add `v{n+1}`, point
+     `current` at it, recreate; old rows keep opening with their key, so a key
+     leaves the file only once nothing carries its prefix (no re-seal job yet).
+     Runbook: "KYC encryption key". `.gitignore` now covers key files and the
+     per-box `docker-compose.override.yml` (the runbook always said it did).
+   - **Data model (V3):** `kyc_submission` (target tier, status
+     `draft|pending_review|approved|rejected|expired`, `current_round`, sealed
+     address, `expires_at` exactly while the CUSTOMER owes work), `kyc_round`
+     (sealed canonical ID, its HMAC, mask, `signup_match`, `duplicate_count`,
+     the decision columns), `kyc_file` (one row per upload, sealed bytes,
+     `STORAGE EXTERNAL` — ciphertext does not compress), `kyc_round_evidence`
+     (per round and kind, WHICH file that round shows). INSERTs through
+     `JdbcTemplate` (the client-assigned-id gotcha). **One open submission per
+     customer** is a partial unique index whose predicate also covers a
+     rejection reopened for redo; `JdbcKycStore.OPEN_PREDICATE` must match it
+     (`KycMigrationTest`).
+   - **Rounds (why they exist).** Submit FREEZES the round: its ID and evidence
+     never change again, so whoever decides sees exactly what was sent. A
+     decision names its round and lands only on the current, frozen, undecided
+     round of a `pending_review` submission. A rejection with a redo list opens
+     round N+1: ONLY the redo kinds can be uploaded (`kyc_file_not_needed`
+     otherwise); every other kind is carried forward BY REFERENCE (an evidence
+     row pointing at round N's file — no bytes copied), and the ID is re-sealed
+     to the new round's binding. A rejection with no redo closes the submission
+     (a wrong ID or address is fixed by a new request, not a retake).
+   - **National ID** (`NationalIdValidator` SPI, registry shaped like the MSISDN
+     one, one per `Country` — `NationalIdValidatorRegistryTest`). Canonical =
+     upper-case ASCII, spaces and every dash variant dropped, anything else
+     refused (no folding of non-ASCII letters). **ZW: structure only** — 2
+     digits, 6-7 digits, a letter, 2 digits; the check-letter algorithm is not
+     published and a wrong guess would lock real customers out, and where the
+     customer put the dash cannot be checked. **KE: 5-9 digits**, deliberately
+     loose. 400 `national_id_invalid` never repeats the number.
+     **`signup_match`** compares with the sign-up hash, which was taken over
+     the number AS TYPED (trim only): the canonical form and 54 common ZW
+     spellings are tried before `no_match` (so `no_match` can still be an odd
+     separator). **`duplicate_count`** = other customers holding the number by
+     sign-up hash (any spelling) or by a KYC round's HMAC, computed at FREEZE;
+     never refused, never shown to the customer (`customer.national_id_hash`
+     gained an index for it). Mask: first 2 + last 3 (`63•••••••X18`); a number
+     that would leave fewer than five hidden shows only its last 3.
+   - **The idempotency fingerprint carries HMACs, never the number or the
+     address** (`KycService.CreateFingerprint`): `IdempotencyService`
+     fingerprints with an unkeyed SHA-256 and keeps it a day, and an unkeyed
+     hash of an ID is a brute-force from the ID. Keys are namespaced
+     `kyc-submission:<customer>`.
+   - **Photos** (`KycImageProcessor`): a JPEG by its BYTES, never the
+     Content-Type. `JpegStructure` walks the markers before any decoder sees
+     the bytes: whole (EOI present — the JDK decoder answers truncation with a
+     half-grey image and a warning), one baseline/extended-sequential frame,
+     8-bit, 1 or 3 components, at most one scan per component (progressive is
+     refused: thousands of scans is a CPU bomb), dimensions in the header. The
+     pixel cap (16 MP) and minimum side (200 px) are checked on those declared
+     dimensions — a 30000x30000 header is refused before a pixel is allocated.
+     Decode under a cell-wide semaphore (2; one replica, 768 MB, it moves
+     money; busy → 503 `kyc_upload_busy` + Retry-After), JPEG reader only,
+     in-memory streams plus `ImageIO.setUseCache(false)` (no temp files),
+     subsampled during decode, any decoder warning refused; then scaled (1600
+     documents, 1080 selfie) and re-encoded from pixels at q0.9 with NO
+     metadata — EXIF, ICC, XMP and anything after EOI are gone; EXIF
+     orientation is dropped, not applied. Byte cap 2 MiB: `Content-Length` over
+     it is a JSON 413 `kyc_file_too_large` before the body is touched, a chunked
+     body is read only up to it. `spring.servlet.multipart.enabled=false`
+     app-wide: nothing takes a form, and Tomcat would spool every part to a
+     temp file. nginx's upload location sits just above the cap (runbook); a
+     client must treat ANY 413 as too large.
+   - **Rate limits** per customer AND per address (`ClientIpResolver`) on
+     create/upload/submit (`KycRateLimiter`, `innbucks.kyc.rate-limit.*`), FIRST,
+     through `RateLimiterService` (so `rate-limit.enabled` stays the master
+     switch): 429 `rate_limited` + Retry-After.
+   - **Lifecycle** (`KycLifecycleJob`, daily): drafts and reopened rounds past
+     `draft-ttl` (14 d) expire and lose their unsubmitted files; REJECTED rounds'
+     files go after `rejected-file-retention` (30 d — a placeholder, compliance's
+     call); approved-round files are never deleted (evidence of record). Files
+     are deleted only when no evidence row references them, which is what keeps
+     a file carried into an approved round safe from its rejected round's
+     purge. The write paths also expire a lapsed submission inline, so a
+     customer is never stuck behind one until the sweep. **Unlocked, safely**:
+     one replica, and each item is its own transaction under the submission
+     row lock, re-checked and idempotent — a second runner would find nothing
+     to do. **Deleted bytea is not gone**: it survives as dead tuples until
+     VACUUM and in every earlier backup until those age out.
+   - **Audit** (best-effort, like every customer event):
+     `KYC_SUBMISSION_OPENED`, `KYC_FILE_STORED` (kind, round, size —
+     never content), `KYC_ROUND_SUBMITTED` (with the duplicate count),
+     `KYC_ROUND_DECIDED`, `KYC_SUBMISSION_EXPIRED`, `KYC_FILES_PURGED`. No ID,
+     address or image anywhere in audit or logs; the KYC request record
+     redacts its own `toString`, and an unreadable KYC body is answered without
+     logging Jackson's message (it can quote the token).
+   - **The tier**: read once per request through `KycTierResolver`; a tier that
+     could not be read is 503 `kyc_tier_unavailable`, never a guessed "you can
+     upgrade". A submission is SELF-CONTAINED: it carries everything its
+     target tier needs even when an earlier approved one holds some of it
+     (reusing evidence across submissions is the review step's decision).
+   - **When to move the photos to object storage** (`KycFileStore` is the seam;
+     an S3 + SSE-KMS implementation keeps the `kyc_file` row and moves only the
+     bytes): **before any bulk upgrade, or once `pg_total_relation_size('kyc_file')`
+     passes ~5 GB, whichever comes first.** `backup-cell.sh` STOPS the middleware
+     for the dump and writes every byte twice (hex in the SQL dump, raw in the
+     volume tarball; ciphertext does not compress), wants 3x the data free, and
+     the store shares a 512 MB Postgres container with the ledger — so every GB
+     here is payment downtime on every backup. A re-encoded photo is roughly
+     0.15–0.4 MB, a request 0.5–1.6 MB.
+   - **Go-live gates outside the code**: EBS encryption on the box, encrypted and
+     pruned backups, an offline copy of the key file, compliance's tier
+     requirements and retention.
+   Contract pinned by `KycCipherTest` + `KycKeyRingTest` (envelope, AAD,
+   previous and wrong keys, strict parsing), the national-ID tests (ZW/KE
+   canonicalisation, refusals, spellings, mask, registry), `KycImageProcessorTest`
+   (good JPEG, PNG, truncated, bomb header refused with no decode slot,
+   progressive, EXIF and trailing data gone, downscale, slot released on
+   failure), `KycServiceTest` / `KycRoundsTest` / `KycLifecycleJobTest` over an
+   in-memory store with the SQL's semantics, `KycHttpTest` (standalone MockMvc:
+   statuses, errorCodes, headers, Swagger examples parse with no duplicate
+   keys), `KycSwitchTest` (off = nothing exists; on = key required; on = every
+   bean wires), the guard cases in `ProductionSecretsGuardTest`, and against
+   real Postgres by `KycIntakeIntegrationTest` (full flow storing only
+   ciphertext, the partial unique index, another customer's id 404, the expiry
+   job, rounds and retention in SQL) and `KycSwitchedOffIntegrationTest`.
+
 Next (in order):
-12. **Veengu adapter** behind the same port (`V-Tenant`/`V-Access-Token`
+13. **Veengu adapter** behind the same port (`V-Tenant`/`V-Access-Token`
    headers, consent-then-execute saga, REVERSAL capability).
    **ON HOLD until the full Veengu API spec is in hand (owner's call,
    2026-07-30)** — do NOT start it from the older specs pinned in
@@ -1352,8 +1512,16 @@ restore therefore points at the backup being torn, not at the restore being
 normal. Rotating `AUDIT_HMAC_SECRET` is the other benign cause, and it is
 benign only if you actually rotated it.
 
+**The KYC key file is NOT in any backup, by design** (slice 12): the restored
+`kyc_*` rows open only with the key file that sealed them, kept offline and
+apart. `backup-cell.sh` refuses to run if `.env` holds a KYC key value or the
+mounted key file sits inside the repo or the backup root.
+
 Deferred (documented, not forgotten): KMS/Secrets Manager custody + rotation
-runbook; per-customer namespacing of inbound Idempotency-Keys
+runbook (the KYC key file included, plus a re-seal job so an old KYC key can be
+retired); moving KYC photos to S3 + SSE-KMS behind `KycFileStore` (slice 12 says
+when); whether an expired or rejected round's sealed ID number should be
+dropped like its files (compliance); per-customer namespacing of inbound Idempotency-Keys
 (HMAC(customerUuid ‖ key)) before propagation; the payment-limit VALUES
 (slice 11 ships the mechanism dormant, pending compliance) and moving the
 step-up thresholds into the same policy file; **offsite/automated** backup scheduling (the scripts are manual and write to the
