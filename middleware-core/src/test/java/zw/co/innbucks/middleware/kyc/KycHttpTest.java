@@ -25,6 +25,7 @@ import zw.co.innbucks.middleware.ratelimit.RateLimitExceededException;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.nullValue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
@@ -130,6 +131,13 @@ class KycHttpTest {
 
         mvc.perform(get("/me/kyc"))
                 .andExpect(jsonPath("$.submission.status").value("pending_review"))
+                .andExpect(jsonPath("$.submission.nationalId").value("63" + "•".repeat(7) + "X18"))
+                .andExpect(jsonPath("$.onFile.nationalId").value(nullValue()))
+                .andExpect(jsonPath("$.onFile.selfie").value(false));
+
+        f.applier().approve(UUID.fromString(id), 1);
+        mvc.perform(get("/me/kyc"))
+                .andExpect(jsonPath("$.submission.status").value("approved"))
                 .andExpect(jsonPath("$.onFile.nationalId").value("63" + "•".repeat(7) + "X18"))
                 .andExpect(jsonPath("$.onFile.selfie").value(true));
     }
@@ -257,6 +265,34 @@ class KycHttpTest {
         mvc.perform(get("/me/kyc"))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.errorCode").value("customer_not_registered"));
+    }
+
+    @Test
+    void theStatusExamplesHaveExactlyTheFieldsOfARealResponse() throws Exception {
+        String id = create(standard());
+        mvc.perform(post("/me/kyc/submissions/" + id + "/files/id_front")
+                .contentType(MediaType.IMAGE_JPEG).content(TestImages.jpeg(900, 600))).andExpect(status().isOk());
+        JsonNode real = json.readTree(mvc.perform(get("/me/kyc")).andReturn().getResponse().getContentAsString());
+
+        int examples = 0;
+        for (java.lang.reflect.Field field : KycController.class.getDeclaredFields()) {
+            if (field.getType() == String.class && field.getName().startsWith("STATUS_")) {
+                field.setAccessible(true);
+                JsonNode shown = json.readTree((String) field.get(null));
+                for (String path : new String[]{"", "/nextTier", "/onFile", "/submission"}) {
+                    assertThat(fieldNames(shown.at(path))).as(field.getName() + " at '" + path + "'")
+                            .containsExactlyElementsOf(fieldNames(real.at(path)));
+                }
+                examples++;
+            }
+        }
+        assertThat(examples).isEqualTo(3);
+    }
+
+    private static java.util.List<String> fieldNames(JsonNode node) {
+        java.util.List<String> names = new java.util.ArrayList<>();
+        node.fieldNames().forEachRemaining(names::add);
+        return names;
     }
 
     @Test

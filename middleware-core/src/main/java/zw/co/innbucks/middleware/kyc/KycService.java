@@ -30,13 +30,13 @@ import zw.co.innbucks.middleware.kyc.image.KycImageRejectedException;
 import zw.co.innbucks.middleware.kyc.image.KycUploadBusyException;
 import zw.co.innbucks.middleware.kyc.image.ProcessedImage;
 import zw.co.innbucks.middleware.kyc.nationalid.KycNationalIds;
+import zw.co.innbucks.middleware.kyc.store.EvidenceOnRecord;
 import zw.co.innbucks.middleware.kyc.store.KycEvidence;
 import zw.co.innbucks.middleware.kyc.store.KycFileStore;
 import zw.co.innbucks.middleware.kyc.store.KycFileStore.StoredKycFile;
 import zw.co.innbucks.middleware.kyc.store.KycRoundRecord;
 import zw.co.innbucks.middleware.kyc.store.KycStore;
 import zw.co.innbucks.middleware.kyc.store.KycSubmissionRecord;
-import zw.co.innbucks.middleware.kyc.store.LatestFrozenRound;
 import zw.co.innbucks.middleware.me.ProfileNotFoundException;
 
 import java.io.IOException;
@@ -155,7 +155,10 @@ public class KycService {
 
         KycTier next = tier.next();
         NextTier nextTier = next == null ? null : new NextTier(next.dbValue(), KycRequirements.needs(next));
-        OnFile onFile = store.findLatestFrozenRound(customerId).map(KycService::onFile).orElse(OnFile.NOTHING);
+        // The evidence of RECORD (latest approved round), never what is merely
+        // pending or was rejected: that is `submission`'s to describe, and a
+        // rejected round's files vanish at the end of their retention.
+        OnFile onFile = store.findEvidenceOnRecord(customerId).map(KycService::onFile).orElse(OnFile.NOTHING);
         SubmissionView submission = store.findOpen(customerId)
                 .or(() -> store.findLatest(customerId))
                 .map(s -> view(s, now))
@@ -163,7 +166,7 @@ public class KycService {
         return new KycStatusView(tier.dbValue(), nextTier, onFile, submission);
     }
 
-    private static OnFile onFile(LatestFrozenRound round) {
+    private static OnFile onFile(EvidenceOnRecord round) {
         Set<KycFileKind> kinds = round.kinds();
         return new OnFile(round.maskedId(),
                 kinds.contains(KycFileKind.ID_FRONT),
@@ -190,8 +193,10 @@ public class KycService {
         if (customerCanChange) {
             missing = KycRequirements.codes(missing(s, store.evidence(s.id(), s.currentRound())));
         }
-        return new SubmissionView(s.id().toString(), s.targetTier().dbValue(), shown.dbValue(), s.currentRound(),
-                market(s.submittedAt()), market(s.decidedAt()), rejection, missing,
+        // Every round of a submission carries the same number; its mask is all that ever leaves.
+        String maskedId = store.findRound(s.id(), s.currentRound()).map(KycRoundRecord::maskedId).orElse(null);
+        return new SubmissionView(s.id().toString(), s.targetTier().dbValue(), maskedId, shown.dbValue(),
+                s.currentRound(), market(s.submittedAt()), market(s.decidedAt()), rejection, missing,
                 customerCanChange ? market(s.expiresAt()) : null);
     }
 

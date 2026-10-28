@@ -137,13 +137,13 @@ public class JdbcKycStore implements KycStore {
     }
 
     @Override
-    public Optional<LatestFrozenRound> findLatestFrozenRound(UUID customerId) {
+    public Optional<EvidenceOnRecord> findEvidenceOnRecord(UUID customerId) {
         List<Object[]> rows = jdbc.query("""
                 SELECT r.submission_id, r.round, r.masked_id, s.address_ciphertext IS NOT NULL AS has_address
                   FROM kyc_round r
                   JOIN kyc_submission s ON s.id = r.submission_id
-                 WHERE s.customer_id = ? AND r.frozen_at IS NOT NULL
-                 ORDER BY r.frozen_at DESC, r.round DESC
+                 WHERE s.customer_id = ? AND r.decision = 'approved'
+                 ORDER BY r.decided_at DESC, r.round DESC
                  LIMIT 1
                 """, (rs, n) -> new Object[]{
                 rs.getObject("submission_id", UUID.class), rs.getInt("round"),
@@ -155,7 +155,7 @@ public class JdbcKycStore implements KycStore {
         Set<KycFileKind> kinds = evidence((UUID) row[0], (Integer) row[1]).stream()
                 .map(KycEvidence::kind)
                 .collect(Collectors.toCollection(() -> EnumSet.noneOf(KycFileKind.class)));
-        return Optional.of(new LatestFrozenRound((String) row[2], (Boolean) row[3], kinds));
+        return Optional.of(new EvidenceOnRecord((String) row[2], (Boolean) row[3], kinds));
     }
 
     @Override

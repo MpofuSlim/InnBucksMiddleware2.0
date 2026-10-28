@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import zw.co.innbucks.middleware.audit.AuditAction;
 import zw.co.innbucks.middleware.audit.AuditOutcome;
+import zw.co.innbucks.middleware.customer.KycTier;
 import zw.co.innbucks.middleware.customer.KycTierResolution;
 import zw.co.innbucks.middleware.customer.KycTierUnavailableException;
 import zw.co.innbucks.middleware.kyc.crypto.KycAad;
@@ -25,6 +26,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -510,19 +512,56 @@ class KycServiceTest {
     }
 
     @Test
-    void onFileDescribesWhatWasLastSentForReview_withTheMaskedIdOnly() {
+    void theRequestCarriesTheMaskedIdItWasMadeWith_butNothingIsOnFileUntilApproved() {
         UUID customer = f.customer("basic", null);
         UUID id = f.completeStandard(service, customer);
-        assertThat(service.status(customer).onFile().nationalId()).isNull(); // nothing SENT yet
+        assertThat(service.status(customer).submission().nationalId()).isEqualTo("63" + "•".repeat(7) + "X18");
         service.submit(customer, null, id);
 
         KycStatusView view = service.status(customer);
 
-        assertThat(view.onFile()).isEqualTo(new KycStatusView.OnFile(
-                "63" + "•".repeat(7) + "X18", true, true, true, false, false));
+        // pending: what was SENT is the request's, not the record's
+        assertThat(view.onFile()).isEqualTo(KycStatusView.OnFile.NOTHING);
+        assertThat(view.submission().nationalId()).isEqualTo("63" + "•".repeat(7) + "X18");
         assertThat(view.submission().status()).isEqualTo("pending_review");
         assertThat(view.submission().missing()).isNull();
         assertThat(view.submission().submittedAt()).isEqualTo("2026-10-28T09:40:00+02:00");
+
+        // rejected for a retake: the rejected photos are still not on file
+        f.applier().reject(id, 1, List.of(KycRejectionReason.ID_PHOTO_UNREADABLE), Set.of(KycFileKind.ID_FRONT));
+        assertThat(service.status(customer).onFile()).isEqualTo(KycStatusView.OnFile.NOTHING);
+    }
+
+    @Test
+    void onFileIsTheEvidenceOfRecord_aLaterRejectionOrItsPurgeNeverHidesIt() {
+        UUID customer = f.customer("basic", null);
+        UUID standard = f.completeStandard(service, customer);
+        service.submit(customer, null, standard);
+        f.applier().approve(standard, 1);
+        KycStatusView.OnFile standardOnRecord = new KycStatusView.OnFile(
+                "63" + "•".repeat(7) + "X18", true, true, true, false, false);
+        assertThat(service.status(customer).onFile()).isEqualTo(standardOnRecord);
+
+        // the review step moves the tier; weeks later an enhanced request is refused outright
+        f.customers.get(customer).setKycTier("standard");
+        f.clock.advance(Duration.ofDays(20));
+        UUID enhanced = f.open(service, customer, "enhanced", KycFixture.ID_TYPED, KycFixture.ADDRESS);
+        for (KycFileKind kind : KycRequirements.fileKinds(KycTier.ENHANCED)) {
+            f.upload(service, customer, enhanced, kind);
+        }
+        service.submit(customer, null, enhanced);
+        f.clock.advance(Duration.ofHours(1));
+        f.applier().reject(enhanced, 1, List.of(KycRejectionReason.ADDRESS_UNREADABLE), Set.of());
+
+        KycStatusView view = service.status(customer);
+        assertThat(view.onFile()).isEqualTo(standardOnRecord);
+        assertThat(view.submission().status()).isEqualTo("rejected");
+
+        // the rejected round's photos go at the end of their retention: the record does not move
+        f.clock.advance(Duration.ofDays(31));
+        f.job().run();
+        assertThat(f.store.findRound(enhanced, 1).orElseThrow().filesPurgedAt()).isNotNull();
+        assertThat(service.status(customer).onFile()).isEqualTo(standardOnRecord);
     }
 
     @Test

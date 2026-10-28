@@ -184,8 +184,9 @@ class KycIntakeIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(header().string(HttpHeaders.CACHE_CONTROL, "no-store"))
                 .andExpect(jsonPath("$.submission.status").value("pending_review"))
-                .andExpect(jsonPath("$.onFile.idBack").value(true))
-                .andExpect(jsonPath("$.onFile.nationalId").value("•".repeat(5) + "678"));
+                .andExpect(jsonPath("$.submission.nationalId").value("•".repeat(5) + "678"))
+                // nothing is ON FILE until a request is approved
+                .andExpect(jsonPath("$.onFile.idBack").value(false));
 
         Map<String, Object> round = jdbc.queryForMap("SELECT * FROM kyc_round WHERE submission_id = ?", id);
         assertThat(round.get("frozen_at")).isNotNull();
@@ -218,6 +219,13 @@ class KycIntakeIntegrationTest {
         // nor does the idempotency record
         assertThat(jdbc.queryForList("SELECT request_fingerprint || COALESCE(response_body, '') FROM idempotency_record",
                 String.class)).noneMatch(r -> r.contains("12345678"));
+
+        // once approved, the round is the evidence of record (read in SQL)
+        applier.approve(id, 1);
+        mvc.perform(get("/me/kyc").header(HttpHeaders.AUTHORIZATION, bearer))
+                .andExpect(jsonPath("$.onFile.idBack").value(true))
+                .andExpect(jsonPath("$.onFile.proofOfAddress").value(false))
+                .andExpect(jsonPath("$.onFile.nationalId").value("•".repeat(5) + "678"));
     }
 
     @Test
@@ -336,6 +344,11 @@ class KycIntakeIntegrationTest {
                 .doesNotContain(rejectedFront);
         assertThat(jdbc.queryForObject("SELECT files_purged_at FROM kyc_round WHERE submission_id = ? AND round = 1",
                 Timestamp.class, id)).isNotNull();
+        // the purge of the rejected round leaves the evidence of record whole, carried files included
+        mvc.perform(get("/me/kyc").header(HttpHeaders.AUTHORIZATION, bearer))
+                .andExpect(jsonPath("$.onFile.idFront").value(true))
+                .andExpect(jsonPath("$.onFile.idBack").value(true))
+                .andExpect(jsonPath("$.onFile.selfie").value(true));
     }
 
     @Test

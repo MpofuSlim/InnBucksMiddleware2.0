@@ -4,12 +4,12 @@ import org.springframework.dao.DuplicateKeyException;
 import zw.co.innbucks.middleware.kyc.crypto.KycAad;
 import zw.co.innbucks.middleware.kyc.crypto.KycCipher;
 import zw.co.innbucks.middleware.kyc.image.ProcessedImage;
+import zw.co.innbucks.middleware.kyc.store.EvidenceOnRecord;
 import zw.co.innbucks.middleware.kyc.store.KycEvidence;
 import zw.co.innbucks.middleware.kyc.store.KycFileStore;
 import zw.co.innbucks.middleware.kyc.store.KycRoundRecord;
 import zw.co.innbucks.middleware.kyc.store.KycStore;
 import zw.co.innbucks.middleware.kyc.store.KycSubmissionRecord;
-import zw.co.innbucks.middleware.kyc.store.LatestFrozenRound;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -131,14 +131,15 @@ public class InMemoryKycStore implements KycStore, KycFileStore {
     }
 
     @Override
-    public Optional<LatestFrozenRound> findLatestFrozenRound(UUID customerId) {
+    public Optional<EvidenceOnRecord> findEvidenceOnRecord(UUID customerId) {
         return rounds.values().stream()
-                .filter(r -> r.frozen() && submissions.get(r.submissionId()).customerId().equals(customerId))
-                .max(Comparator.comparing(KycRoundRecord::frozenAt).thenComparingInt(KycRoundRecord::round))
+                .filter(r -> "approved".equals(r.decision())
+                        && submissions.get(r.submissionId()).customerId().equals(customerId))
+                .max(Comparator.comparing(KycRoundRecord::decidedAt).thenComparingInt(KycRoundRecord::round))
                 .map(r -> {
                     Set<KycFileKind> kinds = EnumSet.noneOf(KycFileKind.class);
                     evidence(r.submissionId(), r.round()).forEach(e -> kinds.add(e.kind()));
-                    return new LatestFrozenRound(r.maskedId(),
+                    return new EvidenceOnRecord(r.maskedId(),
                             submissions.get(r.submissionId()).addressCiphertext() != null, kinds);
                 });
     }

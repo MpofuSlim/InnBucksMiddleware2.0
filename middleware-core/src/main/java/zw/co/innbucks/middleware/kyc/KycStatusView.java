@@ -17,8 +17,10 @@ public record KycStatusView(
                 nullable = true)
         NextTier nextTier,
 
-        @Schema(description = "What the customer last sent for review (any request, any decision). All false "
-                + "and nationalId null when nothing was ever submitted.")
+        @Schema(description = "The evidence of record: what the latest APPROVED request holds. All false and "
+                + "nationalId null until a request is approved. A request that is still a draft, pending or "
+                + "rejected is described by `submission`, never here — so this does not change when a later "
+                + "request is rejected or a rejected one's photos are deleted.")
         OnFile onFile,
 
         @Schema(description = "The open request if there is one, else the most recent; null if none was ever "
@@ -55,6 +57,10 @@ public record KycStatusView(
             String id,
             @Schema(example = "standard", allowableValues = {"standard", "enhanced"})
             String targetTier,
+            @Schema(description = "The ID number this request was made with, masked: the first 2 and last 3 "
+                    + "characters (only the last 3 for a short number). The full number never comes back.",
+                    example = "63•••••••X18")
+            String nationalId,
             @Schema(description = "draft: collecting files. pending_review: with staff. rejected: see "
                     + "`rejection`; when `missing` is not null the request was reopened — upload only those "
                     + "files and submit again. approved. expired: not finished in time; start a new one.",

@@ -54,10 +54,10 @@ public class KycController {
     static final String STATUS_REJECTED_EXAMPLE = """
             {"kycTier":"basic",
              "nextTier":{"tier":"standard","needs":["national_id","id_front","id_back","selfie"]},
-             "onFile":{"nationalId":"63•••••••X18","idFront":true,"idBack":true,"selfie":true,
+             "onFile":{"nationalId":null,"idFront":false,"idBack":false,"selfie":false,
                        "proofOfAddress":false,"address":false},
              "submission":{"id":"b1c2d3e4-5f60-4a7b-8c9d-0e1f2a3b4c5d","targetTier":"standard",
-                           "status":"rejected","round":2,
+                           "nationalId":"63•••••••X18","status":"rejected","round":2,
                            "submittedAt":"2026-10-28T09:14:00+02:00","decidedAt":"2026-10-28T15:02:00+02:00",
                            "rejection":{"reasons":["id_photo_unreadable"],"redo":["id_front"]},
                            "missing":["id_front"],"expiresAt":"2026-11-11T15:02:00+02:00"}}
@@ -69,8 +69,21 @@ public class KycController {
              "onFile":{"nationalId":null,"idFront":false,"idBack":false,"selfie":false,
                        "proofOfAddress":false,"address":false},
              "submission":{"id":"b1c2d3e4-5f60-4a7b-8c9d-0e1f2a3b4c5d","targetTier":"standard",
-                           "status":"draft","round":1,"submittedAt":null,"decidedAt":null,"rejection":null,
+                           "nationalId":"63•••••••X18","status":"draft","round":1,"submittedAt":null,
+                           "decidedAt":null,"rejection":null,
                            "missing":["id_back","selfie"],"expiresAt":"2026-11-11T08:40:00+02:00"}}
+            """;
+
+    static final String STATUS_UPGRADING_EXAMPLE = """
+            {"kycTier":"standard",
+             "nextTier":{"tier":"enhanced",
+                         "needs":["national_id","id_front","id_back","selfie","address","proof_of_address"]},
+             "onFile":{"nationalId":"63•••••••X18","idFront":true,"idBack":true,"selfie":true,
+                       "proofOfAddress":false,"address":false},
+             "submission":{"id":"c2d3e4f5-6071-4b8c-9d0e-1f2a3b4c5d6e","targetTier":"enhanced",
+                           "nationalId":"63•••••••X18","status":"pending_review","round":1,
+                           "submittedAt":"2026-12-02T10:05:00+02:00","decidedAt":null,"rejection":null,
+                           "missing":null,"expiresAt":null}}
             """;
 
     static final String CREATED_EXAMPLE = """
@@ -177,10 +190,11 @@ public class KycController {
     @GetMapping
     @Operation(summary = "The caller's KYC tier, what the next tier needs, and the current request",
             description = "kycTier is the tier payments are judged by now. nextTier is null at enhanced. "
-                    + "onFile describes what was last SENT for review (masked ID only). submission is the open "
-                    + "request, else the latest; when its `missing` is not null the customer can still upload "
-                    + "(`missing` lists what is left) until `expiresAt`. Timestamps are at the market offset; "
-                    + "show them as they are.")
+                    + "onFile is the evidence of RECORD — what the latest approved request holds (masked ID "
+                    + "only) — and stays all false until one is approved. submission is the open request, else "
+                    + "the latest, with the masked ID it was made with; when its `missing` is not null the "
+                    + "customer can still upload (`missing` lists what is left) until `expiresAt`. Resume an "
+                    + "open request from here. Timestamps are at the market offset; show them as they are.")
     @ApiResponses({
             @ApiResponse(responseCode = "200", description = "Status returned",
                     content = @Content(mediaType = MediaType.APPLICATION_JSON_VALUE,
@@ -188,7 +202,9 @@ public class KycController {
                             examples = {
                                     @ExampleObject(name = "Rejected, reopened for one retake",
                                             value = STATUS_REJECTED_EXAMPLE),
-                                    @ExampleObject(name = "Draft in progress", value = STATUS_DRAFT_EXAMPLE)})),
+                                    @ExampleObject(name = "Draft in progress", value = STATUS_DRAFT_EXAMPLE),
+                                    @ExampleObject(name = "Standard on record, enhanced with staff",
+                                            value = STATUS_UPGRADING_EXAMPLE)})),
             @ApiResponse(responseCode = "401", description = "Missing or invalid Bearer token",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
             @ApiResponse(responseCode = "404", description = "No registered customer behind this token "

@@ -1466,6 +1466,18 @@ commands, with the exact bytes that were running before. Full procedure
      address or image anywhere in audit or logs; the KYC request record
      redacts its own `toString`, and an unreadable KYC body is answered without
      logging Jackson's message (it can quote the token).
+   - **`onFile` is the evidence of RECORD** — the latest APPROVED round's masked
+     ID, files and address; all false until one is approved. It used to be the
+     latest FROZEN round of any outcome, which flipped photos to false when a
+     rejected round's retention purged them (masked ID still shown), let a later
+     rejected request hide approved evidence kept forever, and showed a photo
+     rejected as unreadable as "on file" while `redo` asked for it. Approved
+     files are never deleted, so the record never moves under the customer. What
+     a pending or rejected request carries is `submission`'s to say, including
+     the masked ID it was made with (`submission.nationalId`). This departs from
+     the app's example, where a basic customer's rejected request showed a
+     masked `onFile.nationalId`: that number is on the submission now, not
+     claimed as on file.
    - **The tier**: read once per request through `KycTierResolver`; a tier that
      could not be read is 503 `kyc_tier_unavailable`, never a guessed "you can
      upgrade". A submission is SELF-CONTAINED: it carries everything its
@@ -1493,7 +1505,7 @@ commands, with the exact bytes that were running before. Full procedure
    downscale, slot released on failure), `KycServiceTest` / `KycRoundsTest` / `KycLifecycleJobTest` over an
    in-memory store with the SQL's semantics, `KycHttpTest` (standalone MockMvc:
    statuses, errorCodes, headers, Swagger examples parse with no duplicate
-   keys), `KycSwitchTest` (off = nothing exists; on = key required; on = every
+   keys and carry exactly a real response's fields), `KycSwitchTest` (off = nothing exists; on = key required; on = every
    bean wires), the guard cases in `ProductionSecretsGuardTest`, and against
    real Postgres by `KycIntakeIntegrationTest` (full flow storing only
    ciphertext, the partial unique index, another customer's id 404, the expiry

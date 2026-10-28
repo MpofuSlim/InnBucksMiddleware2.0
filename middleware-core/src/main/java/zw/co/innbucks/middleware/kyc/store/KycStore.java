@@ -48,8 +48,11 @@ public interface KycStore {
     /** The most recent round of the submission that carries a decision. */
     Optional<KycRoundRecord> findLatestDecidedRound(UUID submissionId);
 
-    /** The customer's most recently FROZEN round across all submissions, with its evidence. */
-    Optional<LatestFrozenRound> findLatestFrozenRound(UUID customerId);
+    /**
+     * The customer's evidence of record: their most recently APPROVED round
+     * across all submissions, with its evidence. Empty until one is approved.
+     */
+    Optional<EvidenceOnRecord> findEvidenceOnRecord(UUID customerId);
 
     void freezeRound(UUID submissionId, int round, Instant frozenAt, int duplicateCount);
 
