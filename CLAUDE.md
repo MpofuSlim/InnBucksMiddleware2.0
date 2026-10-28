@@ -403,9 +403,13 @@ Fineract does NOT mean "not authorised."** `PlatformDataIntegrityExceptionMapper
 and `PlatformDomainRuleExceptionMapper:53` both map to `Status.FORBIDDEN`, so a
 SQL failure and a business-rule veto are indistinguishable from a real permission
 denial by status alone — read `errors[].userMessageGlobalisationCode` from the
-body instead. (This is why `FineractErrorMapper` already splits Fineract's 403
-into `CoreClientException` for domain vetoes vs auth; the same care is owed
-anywhere else a 403 is interpreted.) Report parameters ride a `R_<variable>`
+body instead. (`FineractErrorMapper` splits Fineract's 403 on exactly that:
+the permission-denial code `error.msg.not.authorized` is auth, everything else
+a domain veto. It used to look for the words "permission"/"authorization",
+which Fineract's real denial body never contains — "User has no authority to:
+X" — so every permission denial read as a veto and reached the customer as
+`422 core_rejected` naming the permission. The same care is owed anywhere else
+a 403 is interpreted.) Report parameters ride a `R_<variable>`
 prefix that `AbstractReportingProcessService:36-47` strips — anything unprefixed
 is silently ignored — and `ReportParameterData` does NOT expose
 `parameter_variable`, so the name→variable map has to come from
@@ -551,8 +555,12 @@ commands, with the exact bytes that were running before. Full procedure
    (the taxonomy: write 5xx / HTTP 425 / read-timeout-mid-write →
    `CoreUnknownOutcomeException` because the command reached the core; only
    connect-phase failures → `CoreTransientException`; Fineract's 403
-   domain-rule vetoes → `CoreClientException`, permission-flavoured 403 →
-   auth), `FineractResilience` (breaker both ways, retry READS ONLY),
+   domain-rule vetoes → `CoreClientException`, a 403 carrying
+   `error.msg.not.authorized` (our AppUser lacks a permission) →
+   `CoreAuthException`: an ops fault, 502 generic to the customer, ledger
+   `FAILED`/`core_auth_failed`, and a same-key replay of that row shows a
+   generic message, never the stored operator detail), `FineractResilience`
+   (breaker both ways, retry READS ONLY),
    `FineractAdapter` (capabilities SERVER_SIDE_DEDUP +
    CLIENT_ASSIGNED_EXTERNAL_ID; savings saga create→approve→activate with
    per-leg keys `<key>:create|approve|activate`, every leg resumable by

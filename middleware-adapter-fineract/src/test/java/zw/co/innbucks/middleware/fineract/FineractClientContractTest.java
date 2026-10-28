@@ -192,6 +192,62 @@ class FineractClientContractTest {
                 .hasMessageContaining("insufficient.account.balance");
     }
 
+    /**
+     * Fineract refusing OUR AppUser a permission. Not observed on a cell; read
+     * out of the fork, field by field:
+     * {@code AppUser.validateHasPermissionTo} throws
+     * {@code NoAuthorizationException("User has no authority to: " + code)},
+     * {@code NoAuthorizationExceptionMapper} answers 403 with
+     * {@code ApiGlobalErrorResponse.unAuthorized(message)} (top-level code,
+     * developer and user messages verbatim), whose single error is
+     * {@code ApiParameterError.generalError} (parameterName "id", no args),
+     * written by Jersey's Jackson writer, which drops the null value.
+     *
+     * <p>This is the shape a customer deposit gets on a cell provisioned
+     * without {@code MIDDLEWARE_CUSTOMER_DEPOSITS=1} while the middleware's own
+     * deposit switch is wrongly on. The check runs in {@code logCommandSource}
+     * before the command executes, so nothing applied.
+     */
+    private static final String PERMISSION_DENIED_BODY = """
+            {"developerMessage":"The user associated with credentials passed on this request does not have sufficient privileges to perform this action.",
+             "httpStatusCode":"403",
+             "defaultUserMessage":"Insufficient privileges to perform this action.",
+             "userMessageGlobalisationCode":"error.msg.not.authorized",
+             "errors":[{"developerMessage":"User has no authority to: DEPOSIT_SAVINGSACCOUNT",
+                        "defaultUserMessage":"User has no authority to: DEPOSIT_SAVINGSACCOUNT",
+                        "userMessageGlobalisationCode":"error.msg.not.authorized",
+                        "parameterName":"id","args":[]}]}
+            """;
+
+    @Test
+    void aPermissionTheWriteUserLacksIsAnAuthFailureNeverAVeto() {
+        wireMock.stubFor(post(urlPathEqualTo("/v1/savingsaccounts/external-id/acct-1/transactions"))
+                .willReturn(aResponse().withStatus(403).withBody(PERMISSION_DENIED_BODY)));
+
+        // Auth, not client: it is our provisioning, not the customer's request.
+        // As a CoreClientException it reached the customer as 422 core_rejected
+        // with "User has no authority to: DEPOSIT_SAVINGSACCOUNT" as the reason.
+        // Either way the write provably did not apply, so the ledger row is
+        // FAILED, never parked UNKNOWN.
+        assertThatThrownBy(() -> client.deposit("acct-1", new BigDecimal("10.00"), "ref-perm", "key-perm"))
+                .isInstanceOf(CoreAuthException.class)
+                .hasMessageContaining("error.msg.not.authorized")
+                .hasMessageContaining("DEPOSIT_SAVINGSACCOUNT");
+        // Sent once and never retried: a write is never re-driven.
+        wireMock.verify(1, postRequestedFor(urlPathEqualTo("/v1/savingsaccounts/external-id/acct-1/transactions")));
+    }
+
+    @Test
+    void aPermissionTheReadUserLacksIsAnAuthFailureToo() {
+        wireMock.stubFor(get(urlEqualTo("/v1/clients/external-id/x"))
+                .willReturn(aResponse().withStatus(403).withBody(
+                        PERMISSION_DENIED_BODY.replace("DEPOSIT_SAVINGSACCOUNT", "READ_CLIENT"))));
+
+        assertThatThrownBy(() -> client.findClientByExternalId("x"))
+                .isInstanceOf(CoreAuthException.class)
+                .hasMessageContaining("READ_CLIENT");
+    }
+
     @Test
     void validationErrorEnvelopeMapsToCoreClient() {
         wireMock.stubFor(post(urlEqualTo("/v1/clients"))

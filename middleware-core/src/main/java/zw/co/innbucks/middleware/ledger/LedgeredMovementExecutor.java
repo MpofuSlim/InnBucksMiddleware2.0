@@ -91,11 +91,30 @@ public class LedgeredMovementExecutor {
         };
     }
 
+    private static final String CORE_REJECTED = "core_rejected";
+    private static final String CORE_AUTH_FAILED = "core_auth_failed";
+    private static final String CORE_UNREACHABLE = "core_unreachable";
+    private static final String CORE_SERVER_ERROR = "core_server_error";
+
     private static String failureCode(RuntimeException ex) {
-        if (ex instanceof CoreClientException) return "core_rejected";
-        if (ex instanceof CoreAuthException) return "core_auth_failed";
-        if (ex instanceof CoreTransientException) return "core_unreachable";
-        return "core_server_error";
+        if (ex instanceof CoreClientException) return CORE_REJECTED;
+        if (ex instanceof CoreAuthException) return CORE_AUTH_FAILED;
+        if (ex instanceof CoreTransientException) return CORE_UNREACHABLE;
+        return CORE_SERVER_ERROR;
+    }
+
+    /**
+     * True for a failure code this executor records when the failure was OURS
+     * (credentials or permissions refused, core unreachable, core erroring),
+     * not a refusal of the customer's request. The row's failure message then
+     * holds operator detail (Fineract's error codes, a permission name), which
+     * the web layer keeps in the logs, so a replay of the row must not hand it
+     * to the customer either.
+     */
+    public static boolean isOperationalFailure(String failureCode) {
+        return CORE_AUTH_FAILED.equals(failureCode)
+                || CORE_UNREACHABLE.equals(failureCode)
+                || CORE_SERVER_ERROR.equals(failureCode);
     }
 
     private static String safeMessage(Throwable ex) {

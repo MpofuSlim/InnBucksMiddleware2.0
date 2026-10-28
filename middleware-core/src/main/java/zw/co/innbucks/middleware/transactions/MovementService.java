@@ -177,9 +177,14 @@ public class MovementService {
                 row.getId(), row.getExternalRef(), status);
         return switch (status) {
             case COMPLETED -> TransactionResponse.success(row.getId(), row.getCoreTxRef());
+            // The stored detail is shown only for a refusal of the request
+            // itself. For our own failures (credentials or permissions refused,
+            // core down) it is operator detail, which the first answer kept in
+            // the logs behind a generic 502/503, so the replay does too.
             case FAILED -> TransactionResponse.failed(row.getId(),
                     row.getFailureCode() == null ? "core_reported_failed" : row.getFailureCode(),
                     row.getFailureMessage() == null
+                            || LedgeredMovementExecutor.isOperationalFailure(row.getFailureCode())
                             ? "The movement did not apply. Use a new Idempotency-Key for a fresh attempt."
                             : row.getFailureMessage());
             default -> TransactionResponse.processing(row.getId(), row.getCoreTxRef());
