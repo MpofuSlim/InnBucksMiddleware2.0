@@ -289,6 +289,20 @@ innbucks:
     customer-lookup:
       capacity: ${RATE_LIMIT_CUSTOMER_LOOKUP_CAPACITY:15}
       refill-period: ${RATE_LIMIT_CUSTOMER_LOOKUP_WINDOW:1m}
+    # Per-CUSTOMER budget on step-up approval SMS (POST /auth/step-up/request).
+    # Its OWN allowance — NOT msisdn-otp-request, which anyone who knows the
+    # number can spend through the public PIN-reset request (and so block the
+    # owner's high-value payments). Still a cap: every approval is a billed SMS.
+    customer-step-up-request:
+      capacity: ${RATE_LIMIT_CUSTOMER_STEPUP_REQUEST_CAPACITY:5}
+      refill-period: ${RATE_LIMIT_CUSTOMER_STEPUP_REQUEST_WINDOW:15m}
+    # Per-CUSTOMER request budget on POST /transactions/* (deposit, withdraw,
+    # transfer). The payment limits are not a rate limit — refused attempts are
+    # free — so this is what bounds how fast one token can hit the money path.
+    # The app's step-up flow sends each high-value payment twice; retries count.
+    customer-payment:
+      capacity: ${RATE_LIMIT_CUSTOMER_PAYMENT_CAPACITY:10}
+      refill-period: ${RATE_LIMIT_CUSTOMER_PAYMENT_WINDOW:1m}
   security:
     # Credential-spray detection: the brute-force shape the per-account lockout
     # and the per-IP buckets both miss — one source trying a few PINs against

@@ -28,6 +28,7 @@ import zw.co.innbucks.middleware.ledger.LedgeredMovementExecutor;
 import zw.co.innbucks.middleware.ledger.PendingReservationGuard;
 import zw.co.innbucks.middleware.limits.PaymentLimitService;
 import zw.co.innbucks.middleware.me.ProfileNotFoundException;
+import zw.co.innbucks.middleware.ratelimit.RateLimiterService;
 import zw.co.innbucks.middleware.stepup.StepUpRequiredException;
 import zw.co.innbucks.middleware.stepup.StepUpService;
 import zw.co.innbucks.middleware.transactions.MovementRequests.DepositRequest;
@@ -43,6 +44,9 @@ import java.util.function.Function;
  * Customer money movement. The full guard stack, in order:
  *
  * <ol>
+ *   <li><b>Request rate:</b> a per-customer budget on {@code /transactions/*}
+ *       (429 {@code rate_limited}), FIRST — refused attempts are free, so the
+ *       count limit below is not a rate limit.</li>
  *   <li><b>Tier:</b> resolved ONCE ({@link KycTierResolver}) and threaded into
  *       step-up and both limit checks; never re-read, never from the token.</li>
  *   <li><b>Limits, advisory (withdraw/transfer):</b> the per-tier payment
@@ -86,9 +90,11 @@ public class MovementService {
     private final StepUpService stepUpService;
     private final KycTierResolver tierResolver;
     private final PaymentLimitService limitService;
+    private final RateLimiterService rateLimiter;
 
     public IdempotencyService.Result<TransactionResponse> deposit(UUID customerId, String rawKey,
                                                                   DepositRequest request) {
+        rateLimiter.enforceCustomerPayment(customerId);
         Customer customer = requireMappedCustomer(customerId);
         requireOwnership(customer, request.accountId());
         String key = IdempotencyKeys.namespaced(customerId.toString(), rawKey);
@@ -109,6 +115,7 @@ public class MovementService {
 
     public IdempotencyService.Result<TransactionResponse> withdraw(UUID customerId, String rawKey,
                                                                    WithdrawRequest request, String stepUpToken) {
+        rateLimiter.enforceCustomerPayment(customerId);
         Customer customer = requireMappedCustomer(customerId);
         KycTierResolution tier = tierResolver.resolve(customer);
         String key = IdempotencyKeys.namespaced(customerId.toString(), rawKey);
@@ -143,6 +150,7 @@ public class MovementService {
 
     public IdempotencyService.Result<TransactionResponse> transfer(UUID customerId, String rawKey,
                                                                    TransferRequest request, String stepUpToken) {
+        rateLimiter.enforceCustomerPayment(customerId);
         Customer customer = requireMappedCustomer(customerId);
         KycTierResolution tier = tierResolver.resolve(customer);
         String key = IdempotencyKeys.namespaced(customerId.toString(), rawKey);

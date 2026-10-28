@@ -76,6 +76,12 @@ public class TransactionController {
              "detail":"Insufficient account balance.","errorCode":"core_rejected"}
             """;
 
+    private static final String RATE_LIMITED_EXAMPLE = """
+            {"type":"about:blank","title":"Too many requests","status":429,
+             "detail":"You've made too many requests in a short time. Please wait a moment and try again.",
+             "errorCode":"rate_limited","retryAfterSeconds":12}
+            """;
+
     private static final String LIMITS_422_DESCRIPTION = "Refused before anything was written. "
             + "errorCode limit_exceeded: the payment would break the caller's per-tier limit (fields "
             + "limit, limitMinor/limitCount, remainingMinor/remainingCount, resetsAt, kycTier, nextTier; "
@@ -102,6 +108,10 @@ public class TransactionController {
                     + "rejected the movement (e.g. insufficient balance, wrong currency). Deposits are not "
                     + "subject to the per-tier payment limits.",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
+            @ApiResponse(responseCode = "429", description = "Too many /transactions/* requests from this "
+                    + "customer (errorCode rate_limited); retry after Retry-After seconds",
+                    content = @Content(schema = @Schema(implementation = ProblemDetail.class),
+                            examples = @ExampleObject(name = "Rate limited", value = RATE_LIMITED_EXAMPLE))),
             @ApiResponse(responseCode = "503", description = "Core banking system unreachable",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class)))
     })
@@ -149,6 +159,10 @@ public class TransactionController {
                                     @ExampleObject(name = "Payments per day", value = LIMIT_COUNT_EXAMPLE),
                                     @ExampleObject(name = "Core rejected", value = CORE_REJECTED_EXAMPLE)
                             })),
+            @ApiResponse(responseCode = "429", description = "Too many /transactions/* requests from this "
+                    + "customer (errorCode rate_limited); retry after Retry-After seconds",
+                    content = @Content(schema = @Schema(implementation = ProblemDetail.class),
+                            examples = @ExampleObject(name = "Rate limited", value = RATE_LIMITED_EXAMPLE))),
             @ApiResponse(responseCode = "503", description = "Core banking system unreachable "
                     + "(core_banking_unavailable), or the caller's KYC tier could not be read for a decision "
                     + "that would refuse (kyc_tier_unavailable). Retry unchanged.",
@@ -199,6 +213,10 @@ public class TransactionController {
                                     @ExampleObject(name = "Payments per day", value = LIMIT_COUNT_EXAMPLE),
                                     @ExampleObject(name = "Core rejected", value = CORE_REJECTED_EXAMPLE)
                             })),
+            @ApiResponse(responseCode = "429", description = "Too many /transactions/* requests from this "
+                    + "customer (errorCode rate_limited); retry after Retry-After seconds",
+                    content = @Content(schema = @Schema(implementation = ProblemDetail.class),
+                            examples = @ExampleObject(name = "Rate limited", value = RATE_LIMITED_EXAMPLE))),
             @ApiResponse(responseCode = "503", description = "Core banking system unreachable "
                     + "(core_banking_unavailable), or the caller's KYC tier could not be read for a decision "
                     + "that would refuse (kyc_tier_unavailable). Retry unchanged.",

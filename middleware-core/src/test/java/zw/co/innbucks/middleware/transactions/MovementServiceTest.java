@@ -35,6 +35,10 @@ import zw.co.innbucks.middleware.limits.PaymentLimitsPolicy;
 import zw.co.innbucks.middleware.limits.TierLimits;
 import zw.co.innbucks.middleware.otp.ConsumedVerificationTokenStore;
 import zw.co.innbucks.middleware.otp.VerificationTokenVerifier;
+import zw.co.innbucks.middleware.ratelimit.RateLimitExceededException;
+import zw.co.innbucks.middleware.ratelimit.RateLimitProperties;
+import zw.co.innbucks.middleware.ratelimit.RateLimitProperties.Limit;
+import zw.co.innbucks.middleware.ratelimit.RateLimiterService;
 import zw.co.innbucks.middleware.stepup.StepUpProperties;
 import zw.co.innbucks.middleware.stepup.StepUpRequiredException;
 import zw.co.innbucks.middleware.stepup.StepUpService;
@@ -43,6 +47,7 @@ import zw.co.innbucks.middleware.transactions.MovementRequests.TransferRequest;
 import zw.co.innbucks.middleware.transactions.MovementRequests.WithdrawRequest;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
@@ -66,7 +71,8 @@ import static org.mockito.Mockito.when;
 
 /**
  * The ORDER of the money path's guards, which is where the limits' promises
- * live: the limits before the step-up answer, a replay answered from its ledger row instead of being
+ * live: the payment request budget before anything, the limits before the
+ * step-up answer, a replay answered from its ledger row instead of being
  * counted again, and the binding check handed to the ledger for withdrawals
  * and transfers only.
  */
@@ -111,21 +117,40 @@ class MovementServiceTest {
                 .thenReturn(new LedgerOutcome(UUID.randomUUID(), LedgerStatus.COMPLETED, "CORE-1"));
     }
 
-    private MovementService service(TierLimits basic, KycTierResolver resolver) {
+    private MovementService service(TierLimits basic, KycTierResolver resolver, int paymentCapacity) {
         PaymentLimitsPolicy policy = new PaymentLimitsPolicy(Country.ZW, "USD", "limits/limits-zw.yaml",
                 "0".repeat(64), Map.of(KycTier.BASIC, basic, KycTier.STANDARD, TierLimits.none(),
                 KycTier.ENHANCED, TierLimits.none()), List.of());
         PaymentLimitService limits = new PaymentLimitService(policy, usage, ledger, customers, resolver, stepUp,
                 new CountryProperties(Country.ZW), Clock.fixed(NOW, ZoneOffset.UTC), meters);
-        return new MovementService(customers, port, idempotency, executor, ledger, stepUp, resolver, limits);
+        Limit generous = new Limit(1000, Duration.ofMinutes(1));
+        RateLimitProperties rateLimits = new RateLimitProperties(true, false, 0,
+                generous, generous, generous, generous, generous, generous, generous, generous, generous,
+                new Limit(paymentCapacity, Duration.ofMinutes(1)));
+        return new MovementService(customers, port, idempotency, executor, ledger, stepUp, resolver, limits,
+                new RateLimiterService(rateLimits));
     }
 
     private MovementService service() {
-        return service(BASIC, new CustomerRecordKycTierResolver(meters));
+        return service(BASIC, new CustomerRecordKycTierResolver(meters), 1000);
     }
 
     private static TransferRequest transfer(long amount) {
         return new TransferRequest(WALLET, "other:wallet", amount, "USD", "rent");
+    }
+
+    @Test
+    void thePaymentRequestBudgetIsSpentBeforeAnythingElse() {
+        MovementService service = service(BASIC, new CustomerRecordKycTierResolver(meters), 2);
+
+        service.transfer(CUSTOMER, "k1", transfer(1000), null);
+        service.deposit(CUSTOMER, "k2", new DepositRequest(WALLET, 1000, "USD", null));
+        // One budget for all three endpoints: the third request is refused
+        // before the customer is even loaded.
+        assertThatThrownBy(() -> service.withdraw(CUSTOMER, "k3",
+                new WithdrawRequest(WALLET, 1000, "USD", null), null))
+                .isInstanceOf(RateLimitExceededException.class);
+        verify(customers, times(2)).findById(CUSTOMER);
     }
 
     /** "Check the limits before answering step_up_required, so nobody is sent a code." */
@@ -183,7 +208,7 @@ class MovementServiceTest {
     @Test
     void aStepUpRefusalOnAnUnreadableTierIs503() {
         KycTierResolver unreadable = c -> KycTierResolution.unavailable();
-        MovementService service = service(TierLimits.none(), unreadable);
+        MovementService service = service(TierLimits.none(), unreadable, 1000);
 
         assertThatThrownBy(() -> service.transfer(CUSTOMER, "k1", transfer(60000), null))
                 .isInstanceOf(KycTierUnavailableException.class);
