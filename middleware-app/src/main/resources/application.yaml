@@ -49,6 +49,15 @@ spring:
     locations: classpath:db/migration
     baseline-on-migrate: true
     fail-on-missing-locations: true
+  servlet:
+    multipart:
+      # No endpoint takes a multipart form (KYC photos are RAW image/jpeg
+      # bodies). Left on, Spring would parse any multipart request before a
+      # controller runs, and Tomcat spools every part to a temp file on disk
+      # (threshold 0) — a plaintext copy of whatever was uploaded, KYC photos
+      # included, outside every control we have. Off: such a body reaches the
+      # handler as raw bytes and is refused there.
+      enabled: false
 
 server:
   port: ${SERVER_PORT:8090}
@@ -229,6 +238,69 @@ innbucks:
         daily: ${LIMITS_OVERRIDE_ENHANCED_DAILY:}
         monthly: ${LIMITS_OVERRIDE_ENHANCED_MONTHLY:}
         daily-count: ${LIMITS_OVERRIDE_ENHANCED_DAILY_COUNT:}
+  kyc:
+    # KYC intake (slice 12): GET /me/kyc and the /me/kyc/submissions writes.
+    # OFF by default. Off = those paths are unmapped (plain 404 not_found) and
+    # no KYC key is read or required, so a box nobody prepared for KYC boots
+    # and takes payments exactly as before. On = the key file below is
+    # boot-required in every profile.
+    enabled: ${KYC_ENABLED:false}
+    # The AES-256 key FILE (as the container sees it), mounted read-only from
+    # a host path OUTSIDE the repo and outside any backup target — never a key
+    # in .env, which backup-cell.sh copies beside the ciphertext. Format and
+    # rotation: KycKeyRing; mount and runbook: docs/fineract-cell-runbook.md.
+    keys-file: ${KYC_KEYS_FILE:}
+    # A draft — or a round a rejection reopened — not submitted within this
+    # expires, and the files uploaded into it are deleted.
+    draft-ttl: ${KYC_DRAFT_TTL:14d}
+    # How long a REJECTED round's files are kept after the decision. A
+    # placeholder pending compliance's retention schedule. Approved rounds'
+    # files are never deleted by the middleware.
+    rejected-file-retention: ${KYC_REJECTED_FILE_RETENTION:30d}
+    # Expiry + purge sweep (server time is UTC). Single replica, no lock: see
+    # KycLifecycleJob for why it is safe anyway.
+    lifecycle-cron: ${KYC_LIFECYCLE_CRON:0 25 3 * * *}
+    address-max-length: 500
+    image:
+      # Byte cap, checked from Content-Length BEFORE reading and enforced
+      # while reading a chunked body (413 kyc_file_too_large). nginx's
+      # client_max_body_size on the upload location sits just above it.
+      max-bytes: ${KYC_IMAGE_MAX_BYTES:2097152}
+      # Declared width x height cap, checked from the JPEG header before any
+      # pixel is decoded (the decompression-bomb guard).
+      max-pixels: 16000000
+      # Shorter side below this cannot show an ID card's small print.
+      min-side: 200
+      document-max-side: 1600
+      selfie-max-side: 1080
+      jpeg-quality: 0.9
+      # Decodes at once, cell-wide: one replica, 768 MB, and it moves money.
+      max-concurrent-decodes: ${KYC_IMAGE_MAX_CONCURRENT_DECODES:2}
+      decode-wait: 5s
+    # Per customer AND per client address, on top of rate-limit.enabled
+    # (the master switch). 429 rate_limited + Retry-After.
+    rate-limit:
+      create:
+        per-customer:
+          capacity: 5
+          refill-period: 1d
+        per-ip:
+          capacity: 30
+          refill-period: 1h
+      upload:
+        per-customer:
+          capacity: 30
+          refill-period: 15m
+        per-ip:
+          capacity: 120
+          refill-period: 15m
+      submit:
+        per-customer:
+          capacity: 10
+          refill-period: 15m
+        per-ip:
+          capacity: 60
+          refill-period: 15m
   stepup:
     # SMS re-approval of high-value withdrawals/transfers (deposits never step
     # up). A movement >= the caller's KYC-tier threshold (MINOR units of the

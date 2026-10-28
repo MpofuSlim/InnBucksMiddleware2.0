@@ -92,6 +92,36 @@ class ProductionSecretsGuardTest {
                 .withMessageContaining("EQUAL");
     }
 
+    /**
+     * The KYC key is guarded only while KYC is on: a deploy to a box whose
+     * .env was never prepared for KYC must not refuse to boot — that would
+     * take payments down over a feature that is switched off.
+     */
+    @Test
+    void kycOff_noKycKeyIsRequired() {
+        MockEnvironment env = envWithAllSecrets();
+        assertThatCode(() -> run(env, "prod")).doesNotThrowAnyException();
+        env.setProperty("innbucks.kyc.enabled", "false");
+        assertThatCode(() -> run(env, "prod")).doesNotThrowAnyException();
+    }
+
+    @Test
+    void kycOnInADeployment_theKeyFileIsRequired() {
+        MockEnvironment env = envWithAllSecrets();
+        env.setProperty("innbucks.kyc.enabled", "true");
+        assertThatIllegalStateException()
+                .isThrownBy(() -> run(env, "prod"))
+                .withMessageContaining("KYC_KEYS_FILE");
+
+        env.setProperty("innbucks.kyc.keys-file", "/run/secrets/change-me");
+        assertThatIllegalStateException()
+                .isThrownBy(() -> run(env, "prod"))
+                .withMessageContaining("placeholder");
+
+        env.setProperty("innbucks.kyc.keys-file", "/run/secrets/innbucks-kyc-keys");
+        assertThatCode(() -> run(env, "prod")).doesNotThrowAnyException();
+    }
+
     @Test
     void mixedProfileWithTestIsNotADeployment() {
         MockEnvironment env = new MockEnvironment();

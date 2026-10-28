@@ -53,7 +53,21 @@ public enum AuditAction {
      * daily <= monthly} after another override. Written per value, every boot,
      * so an override left set for months stays visible in the trail.
      */
-    LIMITS_OVERRIDE_ACTIVE;
+    LIMITS_OVERRIDE_ACTIVE,
+    // KYC intake (slice 12). Metadata names submissions, rounds, kinds and
+    // sizes — NEVER an ID number, an address or image content.
+    /** A customer opened a KYC submission: target tier, round 1, the sign-up match signal. */
+    KYC_SUBMISSION_OPENED,
+    /** An image was stored in the open round: kind, round, byte size, dimensions, whether it replaced one. */
+    KYC_FILE_STORED,
+    /** The customer submitted a round; it is now frozen. Carries the duplicate count the reviewer sees. */
+    KYC_ROUND_SUBMITTED,
+    /** A reviewer decision was applied to a round (approve, or reject with reasons and redo). */
+    KYC_ROUND_DECIDED,
+    /** An unfinished round passed its deadline; its unsubmitted files were deleted. */
+    KYC_SUBMISSION_EXPIRED,
+    /** A rejected round's files were deleted at the end of their retention. */
+    KYC_FILES_PURGED;
 
     public String dbValue() {
         return name().toLowerCase();
