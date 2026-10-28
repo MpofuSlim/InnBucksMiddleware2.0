@@ -18,6 +18,7 @@ import zw.co.innbucks.middleware.auth.CustomerScopes;
 import zw.co.innbucks.middleware.auth.jwt.JwtIssuer;
 import zw.co.innbucks.middleware.common.country.Country;
 import zw.co.innbucks.middleware.corebanking.value.AccountRef;
+import zw.co.innbucks.middleware.corebanking.value.AccountRestriction;
 import zw.co.innbucks.middleware.corebanking.value.CoreCustomerRef;
 import zw.co.innbucks.middleware.corebanking.value.CustomerProfile;
 import zw.co.innbucks.middleware.corebanking.value.DepositAccountSummary;
@@ -100,7 +101,8 @@ class StatementFlowIntegrationTest {
                 customerId.toString(), Country.KE, "basic", CustomerScopes.DEFAULT, null));
 
         stubPort.onListAccounts = ref -> List.of(new DepositAccountSummary(
-                new AccountRef(wallet), "InnBucks Wallet", "KES", new MinorUnits(150_000L, "KES")));
+                new AccountRef(wallet), "InnBucks Wallet", "KES", new MinorUnits(150_000L, "KES"),
+                AccountRestriction.NONE));
         stubPort.onGetProfile = ref -> new CustomerProfile(
                 new CoreCustomerRef(ref.externalId()), "Tariro", "Moyo", "ACTIVE");
         stubPort.onListTransactions = this::respondToStatementQueries;

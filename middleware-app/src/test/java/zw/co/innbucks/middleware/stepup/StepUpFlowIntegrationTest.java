@@ -21,6 +21,7 @@ import zw.co.innbucks.middleware.auth.CustomerScopes;
 import zw.co.innbucks.middleware.auth.jwt.JwtIssuer;
 import zw.co.innbucks.middleware.common.country.Country;
 import zw.co.innbucks.middleware.corebanking.value.AccountRef;
+import zw.co.innbucks.middleware.corebanking.value.AccountRestriction;
 import zw.co.innbucks.middleware.corebanking.value.DepositAccountSummary;
 import zw.co.innbucks.middleware.corebanking.value.MinorUnits;
 import zw.co.innbucks.middleware.corebanking.value.TransactionResult;
@@ -107,7 +108,7 @@ class StepUpFlowIntegrationTest {
         stubPort.onListAccounts = ref -> {
             coreAccountListings.incrementAndGet();
             return List.of(new DepositAccountSummary(
-                    new AccountRef(wallet), "InnBucks Wallet", "KES", new MinorUnits(500000L, "KES")));
+                    new AccountRef(wallet), "InnBucks Wallet", "KES", new MinorUnits(500000L, "KES"), AccountRestriction.NONE));
         };
         stubPort.onTransfer = (cmd, key) -> {
             coreTransfers.incrementAndGet();

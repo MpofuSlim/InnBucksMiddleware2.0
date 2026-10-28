@@ -2,6 +2,7 @@ package zw.co.innbucks.middleware.auth.web;
 
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.media.Content;
+import io.swagger.v3.oas.annotations.media.ExampleObject;
 import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
@@ -26,6 +27,7 @@ import zw.co.innbucks.middleware.auth.config.AuthProperties;
 import zw.co.innbucks.middleware.auth.jwt.JwtIssuer;
 import zw.co.innbucks.middleware.auth.login.LoginResult;
 import zw.co.innbucks.middleware.auth.login.LoginService;
+import zw.co.innbucks.middleware.auth.refresh.AccountBlockSessionGuard;
 import zw.co.innbucks.middleware.auth.refresh.RefreshToken;
 import zw.co.innbucks.middleware.auth.refresh.RefreshTokenService;
 import zw.co.innbucks.middleware.customer.Customer;
@@ -46,6 +48,7 @@ public class LoginController {
     private final JwtIssuer jwtIssuer;
     private final AuthProperties authProperties;
     private final AuditService auditService;
+    private final AccountBlockSessionGuard accountBlockSessionGuard;
 
     @PostMapping("/login")
     @Operation(
@@ -69,20 +72,43 @@ public class LoginController {
     @PostMapping("/refresh")
     @Operation(
             summary = "Rotate the refresh token, issuing a fresh access + refresh pair",
-            description = "Each refresh token is single-use. Re-presenting an already-rotated refresh token is treated as theft and revokes the whole token family."
+            description = "Each refresh token is single-use. Re-presenting an already-rotated refresh token is treated as theft and revokes the whole token family. "
+                    + "If the bank has fully blocked the customer's account, the refresh is refused with 403 account_restricted and EVERY session the customer "
+                    + "holds is ended: show the detail and return to the signed-out screen — retrying cannot succeed while the block stands. A debit-only "
+                    + "block does not end sessions (payments answer account_restricted instead)."
     )
     @ApiResponses({
             @ApiResponse(responseCode = "200", description = "Tokens rotated"),
             @ApiResponse(responseCode = "401", description = "Invalid, expired, or replay-detected refresh token",
-                    content = @Content(schema = @Schema(implementation = ProblemDetail.class)))
+                    content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
+            @ApiResponse(responseCode = "403", description = "The bank has fully blocked the customer's account; every "
+                    + "session has been ended (errorCode account_restricted)",
+                    content = @Content(schema = @Schema(implementation = ProblemDetail.class),
+                            examples = @ExampleObject(name = "Account restricted", value = """
+                                    {"type":"about:blank","title":"Account restricted","status":403,
+                                     "detail":"Your account has been restricted and you have been signed out. Please contact support.",
+                                     "errorCode":"account_restricted"}
+                                    """)))
     })
     public ResponseEntity<TokenResponse> refresh(@Valid @RequestBody RefreshRequest request) {
         String secret = parseRefreshTokenUuid(request.refreshToken()).toString();
 
+        // Rotate FIRST, then ask the core about a block. rotate() is the
+        // check that this is a live session (known, unrevoked, unexpired, not
+        // a replay, on its own device) — an unknown, revoked, replayed or
+        // wrong-device token must never make us read the core, nor be told
+        // the account is blocked. And rotate() is @Transactional, holding
+        // a pooled connection and the customer-row lock until it commits:
+        // the core read (an HTTP call, ~100 ms or a timeout) must not run
+        // inside it. Once it has committed, its successor exists but has been
+        // handed to nobody, so a full block revokes it with every other family
+        // in a transaction of its own (AccountBlockSessionGuard).
         RefreshToken rotated = refreshTokenService.rotate(secret, request.deviceHash());
 
         Customer customer = customerRepository.findById(rotated.getCustomerId())
                 .orElseThrow(IllegalStateException::new);
+
+        accountBlockSessionGuard.requireSessionAllowed(customer, request.deviceHash());
 
         String accessToken = jwtIssuer.issue(new JwtIssuer.IssueRequest(
                 customer.getId().toString(),

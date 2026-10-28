@@ -2,6 +2,7 @@ package zw.co.innbucks.middleware.fineract;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.web.client.RestClientResponseException;
 import zw.co.innbucks.middleware.corebanking.CoreBankingPort;
 import zw.co.innbucks.middleware.corebanking.CoreCapability;
 import zw.co.innbucks.middleware.corebanking.CoreProvider;
@@ -13,6 +14,7 @@ import zw.co.innbucks.middleware.corebanking.exception.CoreServerException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreUnknownOutcomeException;
 import zw.co.innbucks.middleware.corebanking.value.AccountBalance;
 import zw.co.innbucks.middleware.corebanking.value.AccountRef;
+import zw.co.innbucks.middleware.corebanking.value.AccountRestriction;
 import zw.co.innbucks.middleware.corebanking.value.CoreCustomerRef;
 import zw.co.innbucks.middleware.corebanking.value.CustomerProfile;
 import zw.co.innbucks.middleware.corebanking.value.DepositAccountRef;
@@ -188,9 +190,38 @@ public class FineractAdapter implements CoreBankingPort {
             }
             AccountBalance balance = getBalance(new AccountRef(summary.externalId()));
             result.add(new DepositAccountSummary(balance.account(), summary.productName(),
-                    balance.current().currencyCode(), balance.available()));
+                    balance.current().currencyCode(), balance.available(),
+                    restrictionOf(summary.subStatus())));
         }
         return result;
+    }
+
+    /**
+     * The savings sub-status as a core-neutral restriction. Read from the fork
+     * (SavingsAccountSubStatusEnum / SavingsEnumerations.subStatus): ONE value
+     * per account — 400 block, 500 blockCredit, 600 blockDebit, everything
+     * else (none, inactive, dormant, escheat) blocks nothing — and blocking the
+     * second direction of a half-blocked account stores 400, so "both
+     * directions" always arrives as a full block. The flag OR the id decides,
+     * so a serializer that drops either still reports the block; absent means
+     * NONE, which only forgoes the early answer — Fineract still refuses every
+     * write the block covers.
+     */
+    static AccountRestriction restrictionOf(FineractDtos.SubStatus subStatus) {
+        if (subStatus == null) {
+            return AccountRestriction.NONE;
+        }
+        long id = subStatus.id() == null ? -1L : subStatus.id();
+        if (Boolean.TRUE.equals(subStatus.block()) || id == 400L) {
+            return AccountRestriction.FULLY_BLOCKED;
+        }
+        if (Boolean.TRUE.equals(subStatus.blockDebit()) || id == 600L) {
+            return AccountRestriction.DEBITS_BLOCKED;
+        }
+        if (Boolean.TRUE.equals(subStatus.blockCredit()) || id == 500L) {
+            return AccountRestriction.CREDITS_BLOCKED;
+        }
+        return AccountRestriction.NONE;
     }
 
     /**
@@ -232,6 +263,11 @@ public class FineractAdapter implements CoreBankingPort {
      * {@link #getBalance} uses, and is NOT an optimisation candidate: this list
      * feeds pre-write ownership checks, so dropping it would let a
      * wrong-currency account pass a route the balance path refuses.
+     *
+     * <p>Each ref carries the account's bank block from the same payload
+     * ({@link #restrictionOf}), which is what lets a payment from a blocked
+     * wallet, and a blocked customer's session refresh, be answered without a
+     * second Fineract call.
      */
     @Override
     public List<DepositAccountRef> listDepositAccountRefs(CoreCustomerRef ref) {
@@ -249,7 +285,8 @@ public class FineractAdapter implements CoreBankingPort {
             String currency = summary.currency() == null ? null : summary.currency().code();
             requireCellCurrencyOn(summary.externalId(), currency);
             result.add(new DepositAccountRef(new AccountRef(summary.externalId()),
-                    summary.productName(), currency, summary.accountNo()));
+                    summary.productName(), currency, summary.accountNo(),
+                    restrictionOf(summary.subStatus())));
         }
         return result;
     }
@@ -291,14 +328,50 @@ public class FineractAdapter implements CoreBankingPort {
         return new TransactionResult(coreRef(response, cmd.externalRef()), TransactionState.COMPLETED);
     }
 
+    /**
+     * Every client refusal on this path is FIXED copy — the write's own (see
+     * {@code FineractErrorMapper.transferRefusal}) and the two account reads'
+     * ({@link #transferSide}) — because a transfer names someone else's
+     * account and the refusal's message is all the sender is ever shown.
+     */
     @Override
     public TransactionResult transfer(TransferCommand cmd, IdempotencyKey key) {
         requireCellCurrency(cmd.amount());
-        SavingsAccountResponse from = requireSavings(cmd.from());
-        SavingsAccountResponse to = requireSavings(cmd.to());
+        SavingsAccountResponse from = transferSide(cmd.from(), FineractErrorMapper.TRANSFER_DECLINED,
+                cmd.externalRef());
+        SavingsAccountResponse to = transferSide(cmd.to(), FineractErrorMapper.RECIPIENT_CANNOT_RECEIVE,
+                cmd.externalRef());
         CommandResponse response = client.transfer(from.clientId(), from.id(),
                 to.clientId(), to.id(), cmd.amount().toMajor(), cmd.narrative(), key.value());
         return new TransactionResult(coreRef(response, cmd.externalRef()), TransactionState.COMPLETED);
+    }
+
+    /**
+     * One side of a transfer, read by externalId. A missing account or a
+     * refused read becomes {@code copy} — the receiving side reads exactly
+     * like a recipient that cannot take the payment (no "does not exist" to
+     * probe account ids with, no externalId echoed back), the sending side
+     * like the generic decline (ownership already proved it exists). Auth,
+     * server and transient failures pass through untouched: the customer sees
+     * generic copy for those at the edge. Ops get Fineract's code, never the
+     * account, in one INFO line.
+     */
+    private SavingsAccountResponse transferSide(AccountRef account, String copy, TxRef ref) {
+        SavingsAccountResponse response;
+        try {
+            response = client.findSavingsByExternalId(account.externalId());
+        } catch (CoreClientException ex) {
+            String code = ex.getCause() instanceof RestClientResponseException upstream
+                    ? FineractErrorMapper.fineractCode(upstream) : "";
+            log.info("Fineract refused a transfer account read (code={}, ref={}); answered with fixed copy",
+                    code.isEmpty() ? "none" : code, ref.reference());
+            throw new CoreClientException(CoreProvider.FINERACT, copy, ex);
+        }
+        if (response == null) {
+            log.info("A transfer account is not in Fineract (ref={}); answered with fixed copy", ref.reference());
+            throw new CoreClientException(CoreProvider.FINERACT, copy, null);
+        }
+        return response;
     }
 
     @Override
@@ -332,15 +405,6 @@ public class FineractAdapter implements CoreBankingPort {
         // The transfer create body cannot carry our ref, so absence proves
         // nothing — the row stays parked for the operator. Never guess.
         return new TransactionResult(ref, TransactionState.UNKNOWN);
-    }
-
-    private SavingsAccountResponse requireSavings(AccountRef account) {
-        SavingsAccountResponse response = client.findSavingsByExternalId(account.externalId());
-        if (response == null) {
-            throw new CoreClientException(CoreProvider.FINERACT,
-                    "No Fineract savings account with externalId " + account.externalId(), null);
-        }
-        return response;
     }
 
     private void requireCellCurrency(MinorUnits amount) {

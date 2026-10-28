@@ -42,6 +42,16 @@ import java.util.function.Function;
 @RequiredArgsConstructor
 public class LedgeredMovementExecutor {
 
+    /*
+     * failure_code values for the infrastructure failures below. Their
+     * failure_message is the adapter's ops detail (it can quote the core's
+     * reply), which the first answer never showed the customer — a same-key
+     * replay must not either (MovementService).
+     */
+    public static final String CORE_AUTH_FAILED = "core_auth_failed";
+    public static final String CORE_UNREACHABLE = "core_unreachable";
+    public static final String CORE_SERVER_ERROR = "core_server_error";
+
     private final LedgerService ledgerService;
 
     public LedgerOutcome execute(LedgerDraft draft,
@@ -98,9 +108,9 @@ public class LedgeredMovementExecutor {
         // replay answers from this code.
         if (ex instanceof CoreAccountRestrictedException) return "account_restricted";
         if (ex instanceof CoreClientException) return "core_rejected";
-        if (ex instanceof CoreAuthException) return "core_auth_failed";
-        if (ex instanceof CoreTransientException) return "core_unreachable";
-        return "core_server_error";
+        if (ex instanceof CoreAuthException) return CORE_AUTH_FAILED;
+        if (ex instanceof CoreTransientException) return CORE_UNREACHABLE;
+        return CORE_SERVER_ERROR;
     }
 
     private static String safeMessage(Throwable ex) {

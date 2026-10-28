@@ -23,10 +23,15 @@ import java.net.URI;
  * Precedence sits above the global catch-all so a core failure never comes
  * out dressed as a bare 500.
  *
- * <p>Only {@link CoreClientException} carries upstream wording to the caller
- * (it is the "your request was refused" case — insufficient balance, unknown
- * account). Auth/server/transient failures are OUR ops problem; the customer
- * gets a generic retryable message and the detail goes to the logs.
+ * <p>Only {@link CoreClientException} carries its message to the caller (it is
+ * the "your request was refused" case — insufficient balance, unknown
+ * account), and this handler repeats that message as it is: it cannot tell a
+ * safe sentence from a leaky one. So adapters own the wording. On a deposit or
+ * withdrawal it may be the core's own (it concerns the caller's own account);
+ * on a TRANSFER it is always fixed copy, because the core's sentences there
+ * can name the recipient's account and state. Auth/server/transient failures
+ * are OUR ops problem; the customer gets a generic retryable message and the
+ * detail goes to the logs.
  *
  * <p>{@link CoreAccountRestrictedException} — the bank has blocked the
  * account the movement debits — is the one client refusal that carries NO

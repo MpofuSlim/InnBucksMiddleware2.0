@@ -10,6 +10,12 @@ public enum AuditAction {
     REFRESH_REPLAY_DETECTED,
     REFRESH_DEVICE_MISMATCH,
     REFRESH_INVALID,
+    /**
+     * A refresh refused because the core reports the customer's account FULLY
+     * blocked; every refresh family was revoked with it (count in the
+     * metadata as {@code refreshTokensRevoked}).
+     */
+    REFRESH_BLOCKED_ACCOUNT_RESTRICTED,
     LOGOUT,
     REGISTER_SUCCESS,
     REGISTER_FAILURE,

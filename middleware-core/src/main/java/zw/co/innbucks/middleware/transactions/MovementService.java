@@ -1,14 +1,17 @@
 package zw.co.innbucks.middleware.transactions;
 
-import lombok.RequiredArgsConstructor;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import zw.co.innbucks.middleware.config.CoreBankingExceptionHandler;
 import zw.co.innbucks.middleware.corebanking.CoreBankingPort;
 import zw.co.innbucks.middleware.corebanking.command.MoneyMovementCommand;
 import zw.co.innbucks.middleware.corebanking.command.TransferCommand;
+import zw.co.innbucks.middleware.corebanking.exception.CoreAccountRestrictedException;
 import zw.co.innbucks.middleware.corebanking.value.AccountRef;
 import zw.co.innbucks.middleware.corebanking.value.CoreCustomerRef;
+import zw.co.innbucks.middleware.corebanking.value.DepositAccountRef;
 import zw.co.innbucks.middleware.corebanking.value.IdempotencyKey;
 import zw.co.innbucks.middleware.corebanking.value.MinorUnits;
 import zw.co.innbucks.middleware.corebanking.value.TxRef;
@@ -30,7 +33,9 @@ import zw.co.innbucks.middleware.transactions.MovementRequests.TransferRequest;
 import zw.co.innbucks.middleware.transactions.MovementRequests.WithdrawRequest;
 
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -42,6 +47,12 @@ import java.util.UUID;
  *       against the core's own account list BEFORE anything is claimed or
  *       written. The middleware's write credential can move anyone's money;
  *       this check is the containment.</li>
+ *   <li><b>Bank block (withdraw/transfer):</b> the same listing reports the
+ *       source account's restriction; a full or debit block is refused here,
+ *       403 {@code account_restricted}, with no ledger row and no core write —
+ *       unless the key already has a ledger row, whose recorded outcome stays
+ *       the answer. The core's own refusal stays the backstop for a block the
+ *       listing has not caught up with.</li>
  *   <li><b>Step-up (withdraw/transfer):</b> at or above the caller's KYC-tier
  *       threshold, the movement needs a fresh OTP-backed approval bound to
  *       exactly this transaction ({@link StepUpService}) — checked BEFORE the
@@ -61,8 +72,21 @@ import java.util.UUID;
  */
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class MovementService {
+
+    /**
+     * What a same-key replay says for a movement that FAILED because the core
+     * could not be reached or refused our credential: the first answer was a
+     * generic 503/502, and the row's failure_message is the adapter's ops
+     * detail, which can quote the core's reply.
+     */
+    static final String NOT_APPLIED_CORE_UNAVAILABLE = "The banking system could not be reached, so the "
+            + "movement did not apply. Use a new Idempotency-Key for a fresh attempt.";
+
+    private static final Set<String> CORE_UNAVAILABLE_CODES = Set.of(
+            LedgeredMovementExecutor.CORE_AUTH_FAILED,
+            LedgeredMovementExecutor.CORE_UNREACHABLE,
+            LedgeredMovementExecutor.CORE_SERVER_ERROR);
 
     private final CustomerRepository customerRepository;
     private final CoreBankingPort corePort;
@@ -70,6 +94,35 @@ public class MovementService {
     private final LedgeredMovementExecutor executor;
     private final LedgerTransactionRepository ledgerRepository;
     private final StepUpService stepUpService;
+    private final Counter withdrawalsRefusedRestricted;
+    private final Counter transfersRefusedRestricted;
+
+    public MovementService(CustomerRepository customerRepository,
+                           CoreBankingPort corePort,
+                           IdempotencyService idempotencyService,
+                           LedgeredMovementExecutor executor,
+                           LedgerTransactionRepository ledgerRepository,
+                           StepUpService stepUpService,
+                           MeterRegistry meterRegistry) {
+        this.customerRepository = customerRepository;
+        this.corePort = corePort;
+        this.idempotencyService = idempotencyService;
+        this.executor = executor;
+        this.ledgerRepository = ledgerRepository;
+        this.stepUpService = stepUpService;
+        // An early refusal leaves no ledger row (that is the point), so the
+        // "which failures were blocked accounts" question the ledger's
+        // account_restricted code answers for core refusals needs this.
+        this.withdrawalsRefusedRestricted = restrictedRefusals(meterRegistry, LedgerTransactionType.WITHDRAWAL);
+        this.transfersRefusedRestricted = restrictedRefusals(meterRegistry, LedgerTransactionType.TRANSFER);
+    }
+
+    private static Counter restrictedRefusals(MeterRegistry registry, LedgerTransactionType type) {
+        return Counter.builder("innbucks.transactions.restricted_refusals")
+                .description("Debits refused before any write because the core lists the source account as blocked")
+                .tag("type", type.name().toLowerCase(Locale.ROOT))
+                .register(registry);
+    }
 
     public IdempotencyService.Result<TransactionResponse> deposit(UUID customerId, String rawKey,
                                                                   DepositRequest request) {
@@ -100,10 +153,10 @@ public class MovementService {
         stepUpService.requireApprovalToken(customerId, customer.kycTierEnum(),
                 LedgerTransactionType.WITHDRAWAL, request.accountId(), null,
                 request.amountMinor(), request.currency(), stepUpToken);
-        requireOwnership(customer, request.accountId());
+        String key = IdempotencyKeys.namespaced(customerId.toString(), rawKey);
+        requireDebitableSource(customer, request.accountId(), key, withdrawalsRefusedRestricted);
         stepUpService.enforce(customerId, customer.kycTierEnum(), LedgerTransactionType.WITHDRAWAL,
                 request.accountId(), null, request.amountMinor(), request.currency(), stepUpToken);
-        String key = IdempotencyKeys.namespaced(customerId.toString(), rawKey);
         return idempotencyService.execute(key, "POST", "/transactions/withdraw", request,
                 TransactionResponse.class, () -> run(key, new LedgerDraft(
                                 customerId, LedgerTransactionType.WITHDRAWAL,
@@ -126,11 +179,11 @@ public class MovementService {
                 request.amountMinor(), request.currency(), stepUpToken);
         // Only the SOURCE must be the caller's — the destination may be any
         // account in the cell (that's what a transfer is).
-        requireOwnership(customer, request.fromAccountId());
+        String key = IdempotencyKeys.namespaced(customerId.toString(), rawKey);
+        requireDebitableSource(customer, request.fromAccountId(), key, transfersRefusedRestricted);
         stepUpService.enforce(customerId, customer.kycTierEnum(), LedgerTransactionType.TRANSFER,
                 request.fromAccountId(), request.toAccountId(), request.amountMinor(),
                 request.currency(), stepUpToken);
-        String key = IdempotencyKeys.namespaced(customerId.toString(), rawKey);
         return idempotencyService.execute(key, "POST", "/transactions/transfer", request,
                 TransactionResponse.class, () -> run(key, new LedgerDraft(
                                 customerId, LedgerTransactionType.TRANSFER,
@@ -177,13 +230,24 @@ public class MovementService {
         };
     }
 
-    private static String replayedFailureMessage(LedgerTransaction row) {
+    static String replayedFailureMessage(LedgerTransaction row) {
         // A restriction replays the SAME fixed copy its first 403 carried: the
         // row's failure_message is ops detail (the core's code) that the first
         // answer withheld, so a same-key retry must not hand it out either.
         if (CoreBankingExceptionHandler.ACCOUNT_RESTRICTED.equals(row.getFailureCode())) {
             return CoreBankingExceptionHandler.ACCOUNT_RESTRICTED_DETAIL;
         }
+        // Same rule for an unreachable core or a refused credential: the first
+        // answer was generic, and the stored message is the adapter's detail
+        // (on a transfer it can quote the core's reply about another account).
+        // (Null-checked first: Set.of(...).contains(null) throws.)
+        if (row.getFailureCode() != null && CORE_UNAVAILABLE_CODES.contains(row.getFailureCode())) {
+            return NOT_APPLIED_CORE_UNAVAILABLE;
+        }
+        // core_rejected: the first 422's own detail. The adapter words every
+        // TRANSFER refusal as fixed copy at the source, so this repeats
+        // nothing of the core's; deposit/withdraw refusals concern the
+        // caller's own account and keep the core's wording.
         return row.getFailureMessage() == null
                 ? "The movement did not apply. Use a new Idempotency-Key for a fresh attempt."
                 : row.getFailureMessage();
@@ -198,17 +262,49 @@ public class MovementService {
         return customer;
     }
 
-    /** Ownership by the CORE's account list — the source of truth, not a local cache. */
-    private void requireOwnership(Customer customer, String accountId) {
+    /**
+     * Ownership by the CORE's account list — the source of truth, not a local
+     * cache. Returns the owned account as listed, restriction included.
+     */
+    private DepositAccountRef requireOwnership(Customer customer, String accountId) {
         // Refs, not balances: this only asks WHICH accounts are the
         // customer's. Fetching every balance to answer that cost 1+N core
         // calls per movement, all of it discarded.
-        List<String> owned = corePort
-                .listDepositAccountRefs(new CoreCustomerRef(customer.getCoreExternalId()))
-                .stream().map(a -> a.account().externalId()).toList();
-        if (!owned.contains(accountId)) {
-            log.warn("Ownership check refused account={} for customer={}", accountId, customer.getId());
-            throw new AccountOwnershipException(accountId);
+        List<DepositAccountRef> owned = corePort
+                .listDepositAccountRefs(new CoreCustomerRef(customer.getCoreExternalId()));
+        return owned.stream()
+                .filter(a -> a.account().externalId().equals(accountId))
+                .findFirst()
+                .orElseThrow(() -> {
+                    log.warn("Ownership check refused account={} for customer={}", accountId, customer.getId());
+                    return new AccountOwnershipException(accountId);
+                });
+    }
+
+    /**
+     * Ownership, then the bank's block on the account about to be DEBITED —
+     * from the same listing, so no second core call. A full or debit block is
+     * refused before the step-up token is spent, before the idempotency claim
+     * and before any ledger row: the core would refuse the write anyway, and
+     * refusing here leaves nothing to reconcile. Same 403
+     * {@code account_restricted} and fixed copy as the core's own refusal
+     * ({@link CoreAccountRestrictedException}).
+     *
+     * <p>Skipped when this key already has a ledger row: a same-key retry is
+     * asking what happened to a movement that ran BEFORE the block, and its
+     * recorded outcome — a completed payment included — is the only true
+     * answer. Telling it "account restricted" would read as "your payment
+     * failed" for one that may have succeeded.
+     */
+    private void requireDebitableSource(Customer customer, String accountId, String key, Counter refusals) {
+        DepositAccountRef source = requireOwnership(customer, accountId);
+        if (!source.restriction().blocksDebits() || ledgerRepository.findByExternalRef(key).isPresent()) {
+            return;
         }
+        refusals.increment();
+        log.info("Refused a debit from account={} for customer={}: the core lists it {} (no ledger row, no core write)",
+                accountId, customer.getId(), source.restriction());
+        throw new CoreAccountRestrictedException(corePort.provider(),
+                "The core lists the source account " + source.restriction() + "; refused before any write", null);
     }
 }

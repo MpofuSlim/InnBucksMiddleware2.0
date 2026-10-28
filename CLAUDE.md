@@ -114,6 +114,47 @@ Build: `./mvnw verify` at the root. Run locally:
   recipient cannot receive) is the owner's call. Pinned by the restriction
   cases in `FineractClientContractTest`, `AccountRestrictedResponseTest` and
   `TransactionFlowIntegrationTest`.
+* **Every client refusal of a TRANSFER is fixed copy, not just a block's.**
+  A transfer is the one write that touches someone else's account, and
+  Fineract's sentences on that path name accounts by internal id and state
+  ("Savings account with identifier 12 does not exist", "Trying to transfer
+  from USD to ZWG"). `FineractErrorMapper.transferRefusal` (codes read from
+  the fork) answers insufficient balance — raised only by the SOURCE's
+  withdrawal leg, `handleDeposit` has no balance check — with "There is not
+  enough money in your account for this payment.", different currencies
+  (about the destination) with the recipient copy above, and EVERYTHING else
+  with "The banking system refused this payment." — including "account is
+  not active", which both legs raise with the same code and args, so it can
+  never be called the sender's. The two account reads before the write
+  (`FineractAdapter.transferSide`) follow the same rule: a destination
+  Fineract does not know reads exactly like one that cannot receive (no
+  existence probe, no id echoed). Ops get the Fineract code — never an
+  account id or sentence — in one INFO line keyed by ref. Deposits and
+  withdrawals touch only the caller's own account and keep Fineract's
+  wording. A same-key replay of a `core_auth_failed` / `core_unreachable` /
+  `core_server_error` row answers fixed copy too
+  (`MovementService.replayedFailureMessage`): the stored message is adapter
+  detail the first (generic 502/503) answer never showed. Pinned by
+  `FineractTransferRefusalContractTest` and `MovementServiceRestrictionTest`.
+* **The account listing carries the bank's block**, so nothing pays a second
+  call to learn it. `DepositAccountRef` / `DepositAccountSummary` carry an
+  `AccountRestriction` (`NONE` / `DEBITS_BLOCKED` / `CREDITS_BLOCKED` /
+  `FULLY_BLOCKED`, never null). Fineract: the listing's savings `subStatus`
+  (read from the fork — ONE value, 400 block / 500 blockCredit / 600
+  blockDebit, everything else blocks nothing; blocking the second direction of
+  a half-blocked account stores 400, so "both directions" always arrives as a
+  full block; Gson writes the id AND the derived booleans, and either decides).
+  It is ADVISORY: a missing value is `NONE`, and the core still refuses every
+  write the block covers. `MovementService` refuses a withdraw/transfer whose
+  SOURCE the ownership listing shows debit- or fully blocked with the same
+  403 `account_restricted` — before the step-up token is spent, the
+  idempotency claim, any ledger row or core write — EXCEPT when the key
+  already has a ledger row: a same-key retry of a payment that ran before the
+  block must get its recorded outcome, not a "restricted" that reads as
+  "failed". No ledger row records these, so they are counted on
+  `innbucks.transactions.restricted_refusals{type}`. Pinned by the
+  sub-status cases in `FineractAccountListingContractTest`,
+  `MovementServiceRestrictionTest` and `TransactionFlowIntegrationTest`.
 * **A maker-checker-PARKED command is UNKNOWN, never a success.** Fineract
   answers a parked command with a success-shaped
   `200 {"commandId":N,"rollbackTransaction":true}` and no resourceId/echo —
@@ -135,7 +176,8 @@ Build: `./mvnw verify` at the root. Run locally:
   `POST /auth/login` (MSISDN + Argon2id PIN → 10-min access + 30-day
   rotating opaque refresh, family revocation on replay AND on device
   mismatch — the refresh token only rotates on the device it was issued to;
-  a PIN set or reset revokes EVERY family the customer holds).
+  a PIN set or reset revokes EVERY family the customer holds, and so does a
+  FULL bank block on the wallet, at the next refresh).
   `sub` = customer UUID; claims: `country`, `kyc_tier`, `scopes`, `did`,
   `auth_time` — exactly these, pinned by `JwtIssuerClaimsTest`. **No
   national-ID derivative**: `nid_hash` (the keyed hash) was dropped because
@@ -224,6 +266,35 @@ Build: `./mvnw verify` at the root. Run locally:
   committed revocation (logout included). Access tokens are NOT revoked —
   see the deferred list. Pinned by `PinResetSignOutIntegrationTest` (both
   interleavings, forced with an open transaction) and `RefreshTokenServiceTest`.
+* **A FULL bank block ends the customer's sessions at their next refresh**
+  (`AccountBlockSessionGuard`, from `LoginController.refresh`). Staff
+  restrict a customer by blocking the wallet in the back office; the core
+  stops the money at once, and the next refresh (about one access-token
+  lifetime) reads the block from the account listing, revokes EVERY family
+  (`revokeAllSessions`, reason `account_blocked`, in its own short
+  transaction), audits `REFRESH_BLOCKED_ACCOUNT_RESTRICTED`
+  (`refreshTokensRevoked`) and answers 403 `account_restricted`. **Order is
+  load-bearing: `rotate()` commits FIRST, then the core is read** — so only a
+  live session (not an unknown, revoked, replayed or wrong-device token) ever
+  costs a core read or learns of a block, and the core's HTTP call never runs
+  inside `rotate()`'s transaction (pooled connection + customer `FOR SHARE`).
+  The successor `rotate()` committed was handed to nobody and is revoked with
+  the rest; a rotation on another device is serialised by the same customer
+  lock as a PIN reset. A DEBIT- or CREDIT-only block does NOT end sessions:
+  it is the bank's payment pause, and the customer may still need balances,
+  statements and incoming money — signing out would make a pause a lockout.
+  **Fails OPEN** on every read failure (Fineract down, breaker open, our
+  credential refused, a bad listing): the money is already blocked in the
+  core, and failing closed would sign every active customer out on a blip.
+  Counted on `innbucks.auth.refresh.block_check{outcome}` (all registered at
+  0); a sustained `read_failed` means blocks are not ending sessions. A
+  customer with no core mapping is skipped. **Stated limits:** `/auth/login`
+  is not gated, so a blocked customer can sign in again and keeps one
+  access-token lifetime of read access until that session's first refresh;
+  and an access token already issued lives out its TTL. Pinned by
+  `AccountBlockSessionGuardTest` (incl. no transaction during the core read,
+  one around the revoke), `RefreshAccountRestrictedResponseTest` and
+  `RefreshAccountBlockIntegrationTest`.
 * **Idempotency claim-row**: `IdempotencyService` claims the key with
   `INSERT … ON CONFLICT DO NOTHING` (status 0 sentinel) BEFORE running work —
   concurrent same-key requests can never double-execute. Replays return the
@@ -650,7 +721,10 @@ commands, with the exact bytes that were running before. Full procedure
    ARRAYS from the legacy Gson serializer (ISO strings also accepted).
    `CoreBankingExceptionHandler`:
    `CoreClientException` → 422
-   `core_rejected` (upstream wording allowed) except its
+   `core_rejected`, carrying the adapter's message verbatim — the core's own
+   wording on a deposit or withdrawal (the caller's own account), ALWAYS fixed
+   copy on a transfer (see "Every client refusal of a TRANSFER is fixed copy"
+   above) — except its
    `CoreAccountRestrictedException` refinement → 403 `account_restricted`
    (fixed copy), auth/server/transient → 502/503
    generic (ops detail stays in logs). Amounts cross the API in MINOR units.
@@ -1202,7 +1276,14 @@ Deferred (documented, not forgotten): **revocable access tokens** — a PIN
 reset ends every refresh family, but an access token already issued is a
 self-contained JWT and keeps working until it expires (`JWT_ACCESS_TTL`, 10
 minutes); cutting it short needs a per-customer `token_version` claim checked
-on every request. KMS/Secrets Manager custody + rotation
+on every request. **Gating `/auth/login` on a full bank block** — today only
+refresh reads it, so a blocked customer can sign in for one access-token
+lifetime of read access; gating login costs a core read per sign-in and a new
+403 the app must handle (owner's call). The Fineract 403 permission denial
+(`error.msg.not.authorized`, "User has no authority to: …") does not match
+`FineractErrorMapper.forbidden`'s wording heuristic, so a missing AppUser
+permission reads as a client refusal (422, ledger `core_rejected`) rather than
+an auth incident — match the code. KMS/Secrets Manager custody + rotation
 runbook; per-customer namespacing of inbound Idempotency-Keys
 (HMAC(customerUuid ‖ key)) before propagation; velocity/amount limit tables;
 **offsite/automated** backup scheduling (the scripts are manual and write to the

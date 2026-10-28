@@ -7,8 +7,10 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import zw.co.innbucks.middleware.corebanking.exception.CoreServerException;
+import zw.co.innbucks.middleware.corebanking.value.AccountRestriction;
 import zw.co.innbucks.middleware.corebanking.value.CoreCustomerRef;
 import zw.co.innbucks.middleware.corebanking.value.DepositAccountRef;
+import zw.co.innbucks.middleware.corebanking.value.DepositAccountSummary;
 
 import java.util.List;
 
@@ -198,6 +200,135 @@ class FineractAccountListingContractTest {
 
         assertThatThrownBy(() -> adapter.listDepositAccountRefs(new CoreCustomerRef(CUSTOMER)))
                 .isInstanceOf(CoreServerException.class);
+    }
+
+    // ------------------------------------------------- the bank's block
+
+    /**
+     * {@code subStatus} EXACTLY as the fork serialises it on this listing:
+     * {@code SavingsAccountSummaryDataMapper} reads {@code sa.sub_status_enum}
+     * and passes it through {@code SavingsEnumerations.subStatus}, which builds
+     * {@code SavingsAccountSubStatusEnumData(id, code, value, none, inactive,
+     * dormant, escheat, block, blockCredit, blockDebit)} — primitive booleans,
+     * so Gson writes all seven, in field order. The id/code pairs are
+     * {@code SavingsAccountSubStatusEnum}'s (fineract-core .../savings/domain/).
+     * Note NONE is built with a literal {@code none = true}; every other value
+     * carries {@code none: false}.
+     */
+    private static String subStatus(long id, String code, String value, String trueFlag) {
+        StringBuilder flags = new StringBuilder();
+        for (String flag : new String[]{"none", "inactive", "dormant", "escheat", "block", "blockCredit", "blockDebit"}) {
+            flags.append(",\"").append(flag).append("\":").append(flag.equals(trueFlag));
+        }
+        return "{\"id\":" + id + ",\"code\":\"SavingsAccountSubStatusEnum." + code + "\",\"value\":\""
+                + value + "\"" + flags + "}";
+    }
+
+    private void walletWithSubStatus(String subStatusJson) {
+        wireMock.stubFor(get(urlEqualTo(ACCOUNTS_URL)).willReturn(okJson("""
+                {"savingsAccounts":[
+                  {"id":10,"accountNo":"000000010","externalId":"%s:wallet",
+                   "productId":1,"productName":"InnBucks Wallet","shortProductName":"IBW",
+                   "status":{"id":300,"code":"savingsAccountStatusType.active","value":"Active",
+                             "submittedAndPendingApproval":false,"approved":false,"active":true},
+                   "currency":{"code":"KES","name":"Kenyan Shilling","decimalPlaces":2,
+                               "displaySymbol":"KSh","nameCode":"currency.KES"},
+                   "accountType":{"id":1,"code":"accountType.individual","value":"Individual"},
+                   "subStatus":%s,
+                   "depositType":{"id":100,"code":"depositAccountType.savingsDeposit","value":"Savings"}}
+                ]}
+                """.formatted(CUSTOMER, subStatusJson))));
+    }
+
+    private AccountRestriction walletRestriction() {
+        List<DepositAccountRef> refs = adapter.listDepositAccountRefs(new CoreCustomerRef(CUSTOMER));
+        assertThat(refs).hasSize(1);
+        return refs.get(0).restriction();
+    }
+
+    @Test
+    void aFullBlockIsReportedFromTheListingAlone() {
+        // BLOCK (400): staff froze the wallet in the console. The session check
+        // and the payment path both read it from THIS one call.
+        walletWithSubStatus(subStatus(400, "block", "Block", "block"));
+
+        assertThat(walletRestriction()).isEqualTo(AccountRestriction.FULLY_BLOCKED);
+        wireMock.verify(0, getRequestedFor(urlMatching("/v1/savingsaccounts/.*")));
+    }
+
+    @Test
+    void aDebitBlockIsReported() {
+        walletWithSubStatus(subStatus(600, "blockDebit", "BlockDebit", "blockDebit"));
+
+        assertThat(walletRestriction()).isEqualTo(AccountRestriction.DEBITS_BLOCKED);
+    }
+
+    @Test
+    void aCreditBlockIsReported() {
+        walletWithSubStatus(subStatus(500, "blockCredit", "BlockCredit", "blockCredit"));
+
+        assertThat(walletRestriction()).isEqualTo(AccountRestriction.CREDITS_BLOCKED);
+    }
+
+    @Test
+    void noSubStatusIsNoBlock() {
+        walletWithSubStatus(subStatus(0, "none", "None", "none"));
+
+        assertThat(walletRestriction()).isEqualTo(AccountRestriction.NONE);
+    }
+
+    @Test
+    void dormantAndInactiveBlockNothing() {
+        // Sub-statuses Fineract never checks on a transaction
+        // (validateFor{Account,Debit,Credit}Block test only 400/600/500).
+        walletWithSubStatus(subStatus(200, "dormant", "Dormant", "dormant"));
+        assertThat(walletRestriction()).isEqualTo(AccountRestriction.NONE);
+
+        wireMock.resetAll();
+        walletWithSubStatus(subStatus(100, "inactive", "Inactive", "inactive"));
+        assertThat(walletRestriction()).isEqualTo(AccountRestriction.NONE);
+    }
+
+    @Test
+    void theIdAloneStillReportsABlockIfTheFlagsAreEverDropped() {
+        // Defensive: a writer that omitted the derived booleans must not turn a
+        // frozen wallet into an unblocked one. Only the id is left here.
+        walletWithSubStatus("{\"id\":400,\"code\":\"SavingsAccountSubStatusEnum.block\",\"value\":\"Block\"}");
+
+        assertThat(walletRestriction()).isEqualTo(AccountRestriction.FULLY_BLOCKED);
+    }
+
+    @Test
+    void anAbsentSubStatusIsNoBlockNotAFailure() {
+        // Every stub above this section omits the key — the listing still
+        // answers, and the core keeps refusing whatever the block covers.
+        wireMock.stubFor(get(urlEqualTo(ACCOUNTS_URL)).willReturn(okJson("""
+                {"savingsAccounts":[
+                  {"id":10,"accountNo":"000000010","externalId":"%s:wallet",
+                   "productName":"InnBucks Wallet","currency":{"code":"KES"}}
+                ]}
+                """.formatted(CUSTOMER))));
+
+        assertThat(walletRestriction()).isEqualTo(AccountRestriction.NONE);
+    }
+
+    @Test
+    void theBalanceListingCarriesTheSameRestriction() {
+        // listDepositAccounts (GET /me/accounts) reads the same summary, then
+        // one balance read per account; the restriction comes from the summary.
+        walletWithSubStatus(subStatus(600, "blockDebit", "BlockDebit", "blockDebit"));
+        // The colon reaches the wire percent-encoded (CLAUDE.md, slice 3a).
+        wireMock.stubFor(get(urlEqualTo("/v1/savingsaccounts/external-id/" + CUSTOMER + "%3Awallet"))
+                .willReturn(okJson("""
+                        {"id":10,"externalId":"%s:wallet","accountNo":"000000010","clientId":7,
+                         "status":{"active":true},"currency":{"code":"KES"},
+                         "summary":{"accountBalance":12.50,"availableBalance":12.50}}
+                        """.formatted(CUSTOMER))));
+
+        List<DepositAccountSummary> accounts = adapter.listDepositAccounts(new CoreCustomerRef(CUSTOMER));
+
+        assertThat(accounts).hasSize(1);
+        assertThat(accounts.get(0).restriction()).isEqualTo(AccountRestriction.DEBITS_BLOCKED);
     }
 
     @Test
