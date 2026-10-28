@@ -239,7 +239,7 @@ class KycServiceTest {
         assertThat(stored.missing()).containsExactly("id_back", "selfie");
         InMemoryKycStore.FileRow row = f.store.files.values().iterator().next();
         assertThat(new String(row.ciphertext(), 0, 3, StandardCharsets.US_ASCII)).isEqualTo("v1:");
-        assertThat(f.store.read(row.id())[0] & 0xFF).isEqualTo(0xFF); // opens to a JPEG
+        assertThat(f.store.read(id, f.store.evidence(id, 1).get(0))[0] & 0xFF).isEqualTo(0xFF); // opens to a JPEG
         verify(f.audit).record(eq(AuditAction.KYC_FILE_STORED), eq(AuditOutcome.SUCCESS), eq(customer), isNull(),
                 any());
     }

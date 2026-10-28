@@ -32,14 +32,14 @@ class KycCipherTest {
         byte[] plaintext = "a jpeg, really".getBytes(StandardCharsets.UTF_8);
         UUID fileId = UUID.randomUUID();
 
-        byte[] envelope = cipher.seal(plaintext, KycAad.file(fileId));
+        byte[] envelope = cipher.seal(plaintext, KycAad.file(SUBMISSION, 1, "selfie", fileId));
 
         assertThat(new String(envelope, 0, 3, StandardCharsets.US_ASCII)).isEqualTo("v1:");
         assertThat(KycCipher.keyIdOf(envelope)).isEqualTo("v1");
         // prefix + 12-byte nonce + ciphertext + 16-byte tag
         assertThat(envelope).hasSize(3 + 12 + plaintext.length + 16);
         assertThat(new String(envelope, StandardCharsets.ISO_8859_1)).doesNotContain("a jpeg");
-        assertThat(cipher.open(envelope, KycAad.file(fileId))).isEqualTo(plaintext);
+        assertThat(cipher.open(envelope, KycAad.file(SUBMISSION, 1, "selfie", fileId))).isEqualTo(plaintext);
     }
 
     @Test
@@ -73,10 +73,28 @@ class KycCipherTest {
                 .isInstanceOf(KycCryptoException.class);
 
         UUID fileA = UUID.randomUUID();
-        byte[] photo = cipher.seal(new byte[]{1, 2, 3}, KycAad.file(fileA));
-        assertThatThrownBy(() -> cipher.open(photo, KycAad.file(UUID.randomUUID())))
+        byte[] photo = cipher.seal(new byte[]{1, 2, 3}, KycAad.file(SUBMISSION, 1, "id_front", fileA));
+        assertThatThrownBy(() -> cipher.open(photo, KycAad.file(SUBMISSION, 1, "id_front", UUID.randomUUID())))
                 .isInstanceOf(KycCryptoException.class)
                 .hasMessageContaining("does not open");
+    }
+
+    @Test
+    void aFileOpensOnlyAsTheSubmissionRoundAndKindItWasUploadedAs() {
+        // A round shows a file by reference, so the seal must reach past the
+        // file's own id: re-pointing an evidence row at another customer's
+        // approved photo, or relabelling a selfie as an ID front, must not open.
+        KycCipher cipher = cipher("current=v1\nv1=" + v1);
+        UUID fileId = UUID.randomUUID();
+        byte[] photo = cipher.seal(new byte[]{9, 8, 7}, KycAad.file(SUBMISSION, 2, "id_front", fileId));
+
+        assertThat(cipher.open(photo, KycAad.file(SUBMISSION, 2, "id_front", fileId))).containsExactly(9, 8, 7);
+        assertThatThrownBy(() -> cipher.open(photo, KycAad.file(OTHER_SUBMISSION, 2, "id_front", fileId)))
+                .isInstanceOf(KycCryptoException.class);
+        assertThatThrownBy(() -> cipher.open(photo, KycAad.file(SUBMISSION, 1, "id_front", fileId)))
+                .isInstanceOf(KycCryptoException.class);
+        assertThatThrownBy(() -> cipher.open(photo, KycAad.file(SUBMISSION, 2, "selfie", fileId)))
+                .isInstanceOf(KycCryptoException.class);
     }
 
     @Test
@@ -115,21 +133,23 @@ class KycCipherTest {
     void alteredBytesDoNotOpen() {
         KycCipher cipher = cipher("current=v1\nv1=" + v1);
         UUID fileId = UUID.randomUUID();
-        byte[] envelope = cipher.seal("pixels".getBytes(StandardCharsets.UTF_8), KycAad.file(fileId));
+        byte[] envelope = cipher.seal("pixels".getBytes(StandardCharsets.UTF_8),
+                KycAad.file(SUBMISSION, 1, "selfie", fileId));
         byte[] flipped = Arrays.copyOf(envelope, envelope.length);
         flipped[flipped.length - 20] ^= 0x01;
 
-        assertThatThrownBy(() -> cipher.open(flipped, KycAad.file(fileId))).isInstanceOf(KycCryptoException.class);
+        assertThatThrownBy(() -> cipher.open(flipped, KycAad.file(SUBMISSION, 1, "selfie", fileId)))
+                .isInstanceOf(KycCryptoException.class);
     }
 
     @Test
     void somethingThatIsNotAnEnvelopeIsRefused() {
         KycCipher cipher = cipher("current=v1\nv1=" + v1);
         assertThatThrownBy(() -> cipher.open("plain bytes".getBytes(StandardCharsets.UTF_8),
-                KycAad.file(UUID.randomUUID()))).isInstanceOf(KycCryptoException.class);
+                KycAad.file(SUBMISSION, 1, "selfie", UUID.randomUUID()))).isInstanceOf(KycCryptoException.class);
         assertThatThrownBy(() -> cipher.openText("631234567X18", KycAad.nationalId(SUBMISSION, 1)))
                 .isInstanceOf(KycCryptoException.class);
         assertThatThrownBy(() -> cipher.open("v1:short".getBytes(StandardCharsets.UTF_8),
-                KycAad.file(UUID.randomUUID()))).isInstanceOf(KycCryptoException.class);
+                KycAad.file(SUBMISSION, 1, "selfie", UUID.randomUUID()))).isInstanceOf(KycCryptoException.class);
     }
 }

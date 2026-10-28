@@ -1334,6 +1334,17 @@ commands, with the exact bytes that were running before. Full procedure
      value to its row and column (`KycAad` — never edit a label; add new ones),
      so a blob copied into another row does not open. Binary form for photos
      (`kyc_file.content_ciphertext`), base64 text form for the ID and address.
+     **A photo's AAD reaches past its own row**: a round SHOWS a file by
+     reference, so a database writer swapping in another customer's approved
+     ID photo re-points `kyc_round_evidence`, never moves a blob — binding the
+     file id alone stopped nothing. A file is sealed to (submission, upload
+     round, kind, id), and `KycFileStore.read(submissionId, evidence)` rebuilds
+     that from what the reader EXPECTS (the submission it shows, the evidence
+     row's kind), never from the file row; carry-forward still opens because a
+     file never leaves its submission or kind. In SQL the same rule is a
+     composite FK (`fk_kyc_round_evidence_file` → `uq_kyc_file_owner`), so the
+     re-point is refused outright and the seal is the backstop for a writer
+     who can drop constraints.
    - **Keys come from a FILE, never env** (`KycKeyRing`; `current=vN` plus every
      `vN=<base64 32 bytes>`, parsed strictly, no message ever carries key
      material). `backup-cell.sh` copies the root `.env` into every backup next to
@@ -1465,8 +1476,9 @@ commands, with the exact bytes that were running before. Full procedure
    - **Go-live gates outside the code**: EBS encryption on the box, encrypted and
      pruned backups, an offline copy of the key file, compliance's tier
      requirements and retention.
-   Contract pinned by `KycCipherTest` + `KycKeyRingTest` (envelope, AAD,
-   previous and wrong keys, strict parsing), the national-ID tests (ZW/KE
+   Contract pinned by `KycCipherTest` + `KycKeyRingTest` (envelope, AAD incl.
+   a file opening only as its own submission/round/kind, previous and wrong
+   keys, strict parsing), the national-ID tests (ZW/KE
    canonicalisation, refusals, spellings, mask, registry), `KycImageProcessorTest`
    (good JPEG, PNG, truncated, bomb header refused with no decode slot,
    progressive, one scan per component refused with no decode slot beside the
@@ -1478,7 +1490,9 @@ commands, with the exact bytes that were running before. Full procedure
    bean wires), the guard cases in `ProductionSecretsGuardTest`, and against
    real Postgres by `KycIntakeIntegrationTest` (full flow storing only
    ciphertext, the partial unique index, another customer's id 404, the expiry
-   job, rounds and retention in SQL) and `KycSwitchedOffIntegrationTest`.
+   job, rounds and retention in SQL, the composite FK refusing a re-pointed
+   evidence row and the seal refusing it with the FK dropped) and
+   `KycSwitchedOffIntegrationTest`.
 
 Next (in order):
 13. **Veengu adapter** behind the same port (`V-Tenant`/`V-Access-Token`

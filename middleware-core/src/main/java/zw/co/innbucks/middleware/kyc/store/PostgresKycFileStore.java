@@ -17,9 +17,10 @@ import java.util.UUID;
 
 /**
  * KYC images in the middleware's own Postgres, each sealed with
- * {@link KycCipher} under a binding to its own file id — so the database, its
- * dumps and its volume tarballs hold only ciphertext, and a blob moved onto
- * another row does not open.
+ * {@link KycCipher} under a binding to the submission, round and kind it was
+ * uploaded as — so the database, its dumps and its volume tarballs hold only
+ * ciphertext, and neither a blob moved onto another row nor an evidence row
+ * re-pointed at another customer's file opens.
  *
  * <p>The cost of this choice is volume in the stop-the-world backup:
  * {@code backup-cell.sh} stops the middleware for the dump, and every
@@ -43,7 +44,7 @@ public class PostgresKycFileStore implements KycFileStore {
     @Override
     public StoredKycFile store(UUID fileId, UUID submissionId, int round, KycFileKind kind,
                                ProcessedImage image, Instant at) {
-        byte[] sealed = cipher.seal(image.jpeg(), KycAad.file(fileId));
+        byte[] sealed = cipher.seal(image.jpeg(), KycAad.file(submissionId, round, kind.code(), fileId));
         jdbc.update("""
                 INSERT INTO kyc_file
                     (id, submission_id, round, kind, content_ciphertext, width, height, byte_size, created_at)
@@ -54,13 +55,16 @@ public class PostgresKycFileStore implements KycFileStore {
     }
 
     @Override
-    public byte[] read(UUID fileId) {
+    public byte[] read(UUID submissionId, KycEvidence evidence) {
         List<byte[]> rows = jdbc.query("SELECT content_ciphertext FROM kyc_file WHERE id = ?",
-                (rs, n) -> rs.getBytes("content_ciphertext"), fileId);
+                (rs, n) -> rs.getBytes("content_ciphertext"), evidence.fileId());
         if (rows.isEmpty()) {
-            throw new IllegalArgumentException("no kyc_file " + fileId);
+            throw new IllegalArgumentException("no kyc_file " + evidence.fileId());
         }
-        return cipher.open(rows.get(0), KycAad.file(fileId));
+        // The binding comes from what the caller expects, not from the row:
+        // a row re-labelled or re-pointed by a database writer does not open.
+        return cipher.open(rows.get(0), KycAad.file(submissionId, evidence.fileRound(), evidence.kind().code(),
+                evidence.fileId()));
     }
 
     @Override

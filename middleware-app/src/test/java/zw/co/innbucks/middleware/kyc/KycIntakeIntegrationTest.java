@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -15,6 +16,8 @@ import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.context.WebApplicationContext;
 import zw.co.innbucks.middleware.auth.CustomerScopes;
 import zw.co.innbucks.middleware.auth.jwt.JwtIssuer;
@@ -23,6 +26,8 @@ import zw.co.innbucks.middleware.customer.KycTier;
 import zw.co.innbucks.middleware.customer.NationalIdHasher;
 import zw.co.innbucks.middleware.kyc.crypto.KycAad;
 import zw.co.innbucks.middleware.kyc.crypto.KycCipher;
+import zw.co.innbucks.middleware.kyc.crypto.KycCryptoException;
+import zw.co.innbucks.middleware.kyc.store.KycEvidence;
 import zw.co.innbucks.middleware.kyc.store.KycFileStore;
 import zw.co.innbucks.middleware.kyc.store.KycStore;
 import zw.co.innbucks.middleware.kyc.store.KycSubmissionRecord;
@@ -101,6 +106,7 @@ class KycIntakeIntegrationTest {
     @Autowired KycDecisionApplier applier;
     @Autowired KycLifecycleJob job;
     @Autowired NationalIdHasher hasher;
+    @Autowired PlatformTransactionManager transactionManager;
 
     final ObjectMapper json = new ObjectMapper();
     MockMvc mvc;
@@ -195,9 +201,9 @@ class KycIntakeIntegrationTest {
             assertThat(new String(bytes, 0, 3, StandardCharsets.US_ASCII)).isEqualTo("v1:");
             assertThat(bytes[0] & 0xFF).isNotEqualTo(0xFF);
         });
-        UUID fileId = jdbc.queryForObject("SELECT id FROM kyc_file WHERE submission_id = ? AND kind = 'selfie'",
-                UUID.class, id);
-        byte[] plain = fileStore.read(fileId);
+        KycEvidence selfie = store.evidence(id, 1).stream().filter(e -> e.kind() == KycFileKind.SELFIE)
+                .findFirst().orElseThrow();
+        byte[] plain = fileStore.read(id, selfie);
         assertThat(plain[0] & 0xFF).isEqualTo(0xFF);
         assertThat(plain[1] & 0xFF).isEqualTo(0xD8);
 
@@ -330,6 +336,51 @@ class KycIntakeIntegrationTest {
                 .doesNotContain(rejectedFront);
         assertThat(jdbc.queryForObject("SELECT files_purged_at FROM kyc_round WHERE submission_id = ? AND round = 1",
                 Timestamp.class, id)).isNotNull();
+    }
+
+    @Test
+    void aRoundShowsOnlyItsOwnFiles_theForeignKeyRefusesARepoint_andTheSealRefusesItWithoutTheKey()
+            throws Exception {
+        UUID victim = create(bearer, standard("12345678"));
+        upload(bearer, victim, "id_front");
+        upload(bearer, victim, "id_back");
+        upload(bearer, victim, "selfie");
+        submit(bearer, victim);
+        UUID victimFront = fileOf(victim, 1, "id_front");
+        String other = bearerFor(insertCustomer("+254712000504", null));
+        UUID own = create(other, standard("23456789"));
+        upload(other, own, "id_front");
+
+        // the composite foreign key: evidence cannot point at another submission's file
+        assertThatThrownBy(() -> jdbc.update("UPDATE kyc_round_evidence SET file_id = ? "
+                + "WHERE submission_id = ? AND kind = 'id_front'", victimFront, own))
+                .isInstanceOf(DataIntegrityViolationException.class);
+        // ...nor at a file of its own submission under another kind
+        UUID victimSelfie = fileOf(victim, 1, "selfie");
+        assertThatThrownBy(() -> jdbc.update("UPDATE kyc_round_evidence SET file_id = ? "
+                + "WHERE submission_id = ? AND round = 1 AND kind = 'id_front'", victimSelfie, victim))
+                .isInstanceOf(DataIntegrityViolationException.class);
+
+        // A writer who can also drop the constraint still gets a file that does
+        // not open as the other submission's evidence. Rolled back: DDL is
+        // transactional in Postgres, and the schema must stay intact.
+        TransactionTemplate tx = new TransactionTemplate(transactionManager);
+        tx.executeWithoutResult(status -> {
+            jdbc.execute("ALTER TABLE kyc_round_evidence DROP CONSTRAINT fk_kyc_round_evidence_file");
+            jdbc.update("UPDATE kyc_round_evidence SET file_id = ? WHERE submission_id = ? AND kind = 'id_front'",
+                    victimFront, own);
+            KycEvidence repointed = store.evidence(own, 1).stream()
+                    .filter(e -> e.kind() == KycFileKind.ID_FRONT).findFirst().orElseThrow();
+            assertThat(repointed.fileId()).isEqualTo(victimFront);
+            assertThatThrownBy(() -> fileStore.read(own, repointed)).isInstanceOf(KycCryptoException.class);
+            // the victim's own round still opens it
+            KycEvidence genuine = store.evidence(victim, 1).stream()
+                    .filter(e -> e.kind() == KycFileKind.ID_FRONT).findFirst().orElseThrow();
+            assertThat(fileStore.read(victim, genuine)[0] & 0xFF).isEqualTo(0xFF);
+            status.setRollbackOnly();
+        });
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM pg_constraint WHERE conname = "
+                + "'fk_kyc_round_evidence_file'", Integer.class)).isEqualTo(1);
     }
 
     private UUID fileOf(UUID id, int round, String kind) {

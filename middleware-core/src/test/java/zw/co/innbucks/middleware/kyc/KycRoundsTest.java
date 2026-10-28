@@ -6,6 +6,7 @@ import zw.co.innbucks.middleware.audit.AuditOutcome;
 import zw.co.innbucks.middleware.kyc.KycDecisionApplier.Decision;
 import zw.co.innbucks.middleware.kyc.KycDecisionApplier.KycDecisionException;
 import zw.co.innbucks.middleware.kyc.crypto.KycAad;
+import zw.co.innbucks.middleware.kyc.crypto.KycCryptoException;
 import zw.co.innbucks.middleware.kyc.store.KycEvidence;
 import zw.co.innbucks.middleware.kyc.store.KycRoundRecord;
 
@@ -118,6 +119,36 @@ class KycRoundsTest {
         // round 1's rejected front is still there (until its retention), untouched by round 2
         assertThat(f.store.files).containsKey(oldFront);
         assertThat(evidence(id, 1).get(KycFileKind.ID_FRONT).fileId()).isEqualTo(oldFront);
+    }
+
+    @Test
+    void everyFileARoundShowsOpens_carriedOnesIncluded_butNeverAsAnotherRequestsOrAnotherKind() {
+        UUID customer = f.customer("basic", null);
+        UUID id = submittedStandard(customer);
+        applier.reject(id, 1, List.of(KycRejectionReason.ID_PHOTO_UNREADABLE), Set.of(KycFileKind.ID_FRONT));
+        f.upload(service, customer, id, KycFileKind.ID_FRONT);
+        service.submit(customer, null, id);
+
+        // round 2 shows a new front plus round 1's back and selfie, by reference: all open
+        for (KycEvidence e : f.store.evidence(id, 2)) {
+            byte[] jpeg = f.store.read(id, e);
+            assertThat(jpeg[0] & 0xFF).isEqualTo(0xFF);
+            assertThat(jpeg[1] & 0xFF).isEqualTo(0xD8);
+        }
+
+        // another customer's request, pointing at this customer's approved-looking back
+        UUID other = f.customer("basic", null);
+        UUID otherId = submittedStandard(other);
+        KycEvidence back = evidence(id, 2).get(KycFileKind.ID_BACK);
+        assertThatThrownBy(() -> f.store.read(otherId, back))
+                .isInstanceOf(KycCryptoException.class);
+        // the store refuses the re-pointing itself (the composite foreign key)...
+        assertThatThrownBy(() -> f.store.putEvidence(otherId, 1, KycFileKind.ID_BACK, back.fileId()))
+                .isInstanceOf(IllegalStateException.class);
+        // ...and a selfie relabelled as an ID front does not open either
+        KycEvidence selfie = evidence(id, 2).get(KycFileKind.SELFIE);
+        assertThatThrownBy(() -> f.store.read(id, new KycEvidence(KycFileKind.ID_FRONT, selfie.fileId(),
+                selfie.fileRound()))).isInstanceOf(KycCryptoException.class);
     }
 
     @Test

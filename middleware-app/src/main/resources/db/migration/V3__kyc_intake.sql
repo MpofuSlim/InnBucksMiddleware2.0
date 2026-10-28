@@ -117,7 +117,10 @@ CREATE TABLE kyc_file (
     created_at          TIMESTAMP WITH TIME ZONE NOT NULL,
     FOREIGN KEY (submission_id, round) REFERENCES kyc_round (submission_id, round),
     CONSTRAINT chk_kyc_file_kind CHECK (kind IN ('id_front', 'id_back', 'selfie', 'proof_of_address')),
-    CONSTRAINT chk_kyc_file_dimensions CHECK (width > 0 AND height > 0 AND byte_size > 0)
+    CONSTRAINT chk_kyc_file_dimensions CHECK (width > 0 AND height > 0 AND byte_size > 0),
+    -- The target of kyc_round_evidence's composite foreign key: a round can
+    -- only show a file of its OWN submission, as the kind it was uploaded as.
+    CONSTRAINT uq_kyc_file_owner UNIQUE (id, submission_id, kind)
 );
 
 CREATE INDEX idx_kyc_file_submission ON kyc_file (submission_id, round);
@@ -130,13 +133,21 @@ ALTER TABLE kyc_file ALTER COLUMN content_ciphertext SET STORAGE EXTERNAL;
 -- non-redo rows into the next round (same file ids). Files are deleted only
 -- when no row here references them, which is what keeps an approved round's
 -- evidence — carried-forward files included — out of reach of every purge.
+--
+-- The foreign key to the file is COMPOSITE: a row can only point at a file of
+-- its own submission uploaded as the same kind, never at another customer's
+-- photo or at a selfie labelled id_front. The file's seal (KycAad.file) binds
+-- the same three values, so a writer who drops this constraint still gets a
+-- file that does not open.
 CREATE TABLE kyc_round_evidence (
     submission_id  UUID         NOT NULL,
     round          INTEGER      NOT NULL,
     kind           VARCHAR(24)  NOT NULL,
-    file_id        UUID         NOT NULL REFERENCES kyc_file (id),
+    file_id        UUID         NOT NULL,
     PRIMARY KEY (submission_id, round, kind),
     FOREIGN KEY (submission_id, round) REFERENCES kyc_round (submission_id, round),
+    CONSTRAINT fk_kyc_round_evidence_file
+        FOREIGN KEY (file_id, submission_id, kind) REFERENCES kyc_file (id, submission_id, kind),
     CONSTRAINT chk_kyc_round_evidence_kind
         CHECK (kind IN ('id_front', 'id_back', 'selfie', 'proof_of_address'))
 );

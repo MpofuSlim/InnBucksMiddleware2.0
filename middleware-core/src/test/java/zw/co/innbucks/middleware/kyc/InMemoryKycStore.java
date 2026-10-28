@@ -176,8 +176,10 @@ public class InMemoryKycStore implements KycStore, KycFileStore {
 
     @Override
     public Optional<UUID> putEvidence(UUID submissionId, int round, KycFileKind kind, UUID fileId) {
-        if (!files.containsKey(fileId)) {
-            throw new IllegalStateException("FK: no kyc_file " + fileId);
+        FileRow file = files.get(fileId);
+        // the composite FK: evidence names a file of ITS submission and kind
+        if (file == null || !file.submissionId().equals(submissionId) || file.kind() != kind) {
+            throw new IllegalStateException("FK: no kyc_file " + fileId + " of " + submissionId + "/" + kind.code());
         }
         return Optional.ofNullable(evidence.put(new EvidenceKey(submissionId, round, kind), fileId));
     }
@@ -262,14 +264,16 @@ public class InMemoryKycStore implements KycStore, KycFileStore {
         if (!rounds.containsKey(new RoundKey(submissionId, round))) {
             throw new IllegalStateException("FK: no kyc_round " + submissionId + "/" + round);
         }
-        files.put(fileId, new FileRow(fileId, submissionId, round, kind, cipher.seal(image.jpeg(), KycAad.file(fileId)),
+        files.put(fileId, new FileRow(fileId, submissionId, round, kind,
+                cipher.seal(image.jpeg(), KycAad.file(submissionId, round, kind.code(), fileId)),
                 image.width(), image.height(), image.byteSize()));
         return new StoredKycFile(fileId, kind, round, image.width(), image.height(), image.byteSize());
     }
 
     @Override
-    public byte[] read(UUID fileId) {
-        return cipher.open(files.get(fileId).ciphertext(), KycAad.file(fileId));
+    public byte[] read(UUID submissionId, KycEvidence evidence) {
+        return cipher.open(files.get(evidence.fileId()).ciphertext(),
+                KycAad.file(submissionId, evidence.fileRound(), evidence.kind().code(), evidence.fileId()));
     }
 
     @Override
