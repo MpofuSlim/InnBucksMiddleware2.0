@@ -161,12 +161,15 @@ public class TransactionController {
                             })),
             @ApiResponse(responseCode = "409", description = "An identical request is still in progress",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
-            @ApiResponse(responseCode = "422", description = "Key reused with a different body, or the core "
-                    + "refused the transfer (errorCode core_rejected). A transfer's detail is ALWAYS one of three "
-                    + "fixed sentences, never the core's wording: not enough money in the sender's account; the "
-                    + "receiving account cannot accept this payment (any block on the recipient's side, a recipient "
-                    + "the core does not know, or one in another currency — deliberately indistinguishable); or "
-                    + "the generic decline for everything else. Show the detail; do not parse it",
+            @ApiResponse(responseCode = "422", description = "Key reused with a different body, or the transfer "
+                    + "was refused (errorCode core_rejected). When the core refuses it, the detail is ALWAYS one of "
+                    + "three fixed sentences, never the core's wording: not enough money in the sender's account; "
+                    + "the receiving account cannot accept this payment (any block on the recipient's side, a "
+                    + "recipient the core does not know, or one in another currency — deliberately "
+                    + "indistinguishable); or the generic decline for everything else. One more refusal never "
+                    + "reaches the core: a request whose currency is not this cell's currency is refused with its "
+                    + "own detail naming both currencies (a client error — send the cell's currency). Show the "
+                    + "detail; do not parse it",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class),
                             examples = {
                                     @ExampleObject(name = "Not enough money", value = """
@@ -182,6 +185,11 @@ public class TransactionController {
                                     @ExampleObject(name = "Declined", value = """
                                             {"type":"about:blank","title":"Request refused","status":422,
                                              "detail":"The banking system refused this payment.",
+                                             "errorCode":"core_rejected"}
+                                            """),
+                                    @ExampleObject(name = "Not the cell's currency", value = """
+                                            {"type":"about:blank","title":"Request refused","status":422,
+                                             "detail":"Amount currency KES does not match the cell currency USD",
                                              "errorCode":"core_rejected"}
                                             """)
                             })),

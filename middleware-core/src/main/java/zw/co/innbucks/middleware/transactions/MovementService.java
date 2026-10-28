@@ -42,6 +42,19 @@ import java.util.UUID;
  * Customer money movement. The full guard stack, in order:
  *
  * <ol>
+ *   <li><b>Step-up presence (withdraw/transfer):</b> at or above the caller's
+ *       KYC-tier threshold, a movement with NO approval token is refused 403
+ *       {@code step_up_required} from local data alone — before any core
+ *       call, because the app sends every high-value movement once without a
+ *       token to collect the fingerprint (PR #53; pinned by
+ *       {@code StepUpFlowIntegrationTest.theRefusedFirstAttemptCostsNoCoreCallAtAll}).
+ *       <b>Accepted trade-off:</b> a customer whose source account is blocked
+ *       learns it only on the token-bearing retry, after one SMS approval
+ *       (bounded by the per-number OTP allowance). Checking the block first
+ *       would cost every high-value payment a second account listing to spare
+ *       a rare blocked customer one SMS; a full block also signs the customer
+ *       out at the next refresh, which leaves debit-only blocks as the case
+ *       that pays it.</li>
  *   <li><b>Ownership:</b> the authenticated customer must OWN the source
  *       account (withdraw/transfer) or target account (deposit) — checked
  *       against the core's own account list BEFORE anything is claimed or
@@ -53,10 +66,11 @@ import java.util.UUID;
  *       unless the key already has a ledger row, whose recorded outcome stays
  *       the answer. The core's own refusal stays the backstop for a block the
  *       listing has not caught up with.</li>
- *   <li><b>Step-up (withdraw/transfer):</b> at or above the caller's KYC-tier
- *       threshold, the movement needs a fresh OTP-backed approval bound to
- *       exactly this transaction ({@link StepUpService}) — checked BEFORE the
- *       idempotency claim so a refused movement leaves no state.</li>
+ *   <li><b>Step-up approval (withdraw/transfer):</b> the token is verified and
+ *       consumed — a fresh OTP-backed approval bound to exactly this
+ *       transaction ({@link StepUpService}) — AFTER ownership and the block
+ *       (neither burns it) and BEFORE the idempotency claim, so a refused
+ *       movement leaves no state.</li>
  *   <li><b>Idempotency:</b> the caller's key is namespaced per customer
  *       (nobody can collide with or replay another customer's key) and
  *       claim-locked — concurrent duplicates can never double-execute.</li>
@@ -149,7 +163,9 @@ public class MovementService {
         // costs: the app's flow sends every high-value movement once WITHOUT a
         // token to collect the fingerprint, and that attempt was always going
         // to be refused. Presence only — the token is verified and consumed by
-        // enforce() below, after ownership.
+        // enforce() below, after ownership. The price, accepted (class
+        // javadoc): a blocked source above the threshold is told so only on
+        // the token-bearing retry, after one SMS approval.
         stepUpService.requireApprovalToken(customerId, customer.kycTierEnum(),
                 LedgerTransactionType.WITHDRAWAL, request.accountId(), null,
                 request.amountMinor(), request.currency(), stepUpToken);

@@ -16,6 +16,8 @@ import zw.co.innbucks.middleware.corebanking.value.MinorUnits;
 import zw.co.innbucks.middleware.corebanking.value.TxRef;
 
 import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
+import static com.github.tomakehurst.wiremock.client.WireMock.anyRequestedFor;
+import static com.github.tomakehurst.wiremock.client.WireMock.anyUrl;
 import static com.github.tomakehurst.wiremock.client.WireMock.equalTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.get;
 import static com.github.tomakehurst.wiremock.client.WireMock.okJson;
@@ -262,6 +264,22 @@ class FineractTransferRefusalContractTest {
                 .hasMessage("The receiving account cannot accept this payment.")
                 .hasMessageNotContaining("dst-uuid");
         wireMock.verify(0, postRequestedFor(urlEqualTo("/v1/accounttransfers")));
+    }
+
+    @Test
+    void aTransferNotInTheCellsCurrencyIsRefusedInOurOwnWordsBeforeFineractIsAsked() {
+        // The one transfer refusal that is not fixed copy: the adapter's own
+        // sentence, naming only the two currencies (no account, nothing of
+        // Fineract's), raised before any read or write. The transfer 422's
+        // Swagger documents it as the fourth detail.
+        bothSidesExist();
+
+        assertThatThrownBy(() -> adapter.transfer(new TransferCommand(new AccountRef(FROM), new AccountRef(TO),
+                        new MinorUnits(500L, "USD"), "rent", new TxRef("ref-t2")), new IdempotencyKey("key-t2")))
+                .isInstanceOf(CoreClientException.class)
+                .isNotInstanceOf(CoreAccountRestrictedException.class)
+                .hasMessage("Amount currency USD does not match the cell currency KES");
+        wireMock.verify(0, anyRequestedFor(anyUrl()));
     }
 
     @Test

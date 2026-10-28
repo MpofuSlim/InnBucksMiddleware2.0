@@ -28,8 +28,11 @@ import java.net.URI;
  * account), and this handler repeats that message as it is: it cannot tell a
  * safe sentence from a leaky one. So adapters own the wording. On a deposit or
  * withdrawal it may be the core's own (it concerns the caller's own account);
- * on a TRANSFER it is always fixed copy, because the core's sentences there
- * can name the recipient's account and state. Auth/server/transient failures
+ * on a TRANSFER it is never the core's — fixed copy, because the core's
+ * sentences there can name the recipient's account and state — save the one
+ * refusal the adapter makes before asking the core (an amount not in the
+ * cell's currency), which is our own sentence naming only the two currencies.
+ * Auth/server/transient failures
  * are OUR ops problem; the customer gets a generic retryable message and the
  * detail goes to the logs.
  *

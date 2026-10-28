@@ -131,7 +131,10 @@ Build: `./mvnw verify` at the root. Run locally:
   existence probe, no id echoed). Ops get the Fineract code — never an
   account id or sentence — in one INFO line keyed by ref. Deposits and
   withdrawals touch only the caller's own account and keep Fineract's
-  wording. A same-key replay of a `core_auth_failed` / `core_unreachable` /
+  wording. The one transfer refusal that is not fixed copy never reaches
+  Fineract: an amount not in the cell's currency is refused by the adapter in
+  its own words, naming only the two currencies (documented as the transfer
+  422's fourth detail). A same-key replay of a `core_auth_failed` / `core_unreachable` /
   `core_server_error` row answers fixed copy too
   (`MovementService.replayedFailureMessage`): the stored message is adapter
   detail the first (generic 502/503) answer never showed. Pinned by
@@ -152,7 +155,14 @@ Build: `./mvnw verify` at the root. Run locally:
   already has a ledger row: a same-key retry of a payment that ran before the
   block must get its recorded outcome, not a "restricted" that reads as
   "failed". No ledger row records these, so they are counted on
-  `innbucks.transactions.restricted_refusals{type}`. Pinned by the
+  `innbucks.transactions.restricted_refusals{type}`. **Accepted trade-off:**
+  the step-up PRESENCE check still runs first (PR #53: a tokenless
+  high-value attempt costs no core call), so a blocked source at or above the
+  threshold is told `account_restricted` only on the token-bearing retry,
+  after one SMS approval (bounded by the per-number OTP allowance). Checking
+  the block first would cost every high-value payment a second listing to
+  spare a rare blocked customer one SMS, and a full block signs the customer
+  out anyway. Pinned by the
   sub-status cases in `FineractAccountListingContractTest`,
   `MovementServiceRestrictionTest` and `TransactionFlowIntegrationTest`.
 * **A maker-checker-PARKED command is UNKNOWN, never a success.** Fineract
@@ -746,9 +756,10 @@ commands, with the exact bytes that were running before. Full procedure
    `CoreBankingExceptionHandler`:
    `CoreClientException` → 422
    `core_rejected`, carrying the adapter's message verbatim — the core's own
-   wording on a deposit or withdrawal (the caller's own account), ALWAYS fixed
-   copy on a transfer (see "Every client refusal of a TRANSFER is fixed copy"
-   above) — except its
+   wording on a deposit or withdrawal (the caller's own account), NEVER the
+   core's on a transfer (fixed copy, or the adapter's own cell-currency
+   refusal; see "Every client refusal of a TRANSFER is fixed copy" above) —
+   except its
    `CoreAccountRestrictedException` refinement → 403 `account_restricted`
    (fixed copy), auth/server/transient → 502/503
    generic (ops detail stays in logs). Amounts cross the API in MINOR units.
