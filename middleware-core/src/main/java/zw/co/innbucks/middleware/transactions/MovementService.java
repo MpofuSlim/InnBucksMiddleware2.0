@@ -36,6 +36,9 @@ import java.util.UUID;
  * Customer money movement. The full guard stack, in order:
  *
  * <ol>
+ *   <li><b>Cell switch (deposit only):</b> deposits are an unfunded cash-in
+ *       and are refused outright unless the cell opts in
+ *       ({@link DepositGate}) — before anything is read, asked or written.</li>
  *   <li><b>Ownership:</b> the authenticated customer must OWN the source
  *       account (withdraw/transfer) or target account (deposit) — checked
  *       against the core's own account list BEFORE anything is claimed or
@@ -69,9 +72,14 @@ public class MovementService {
     private final LedgeredMovementExecutor executor;
     private final LedgerTransactionRepository ledgerRepository;
     private final StepUpService stepUpService;
+    private final DepositGate depositGate;
 
     public IdempotencyService.Result<TransactionResponse> deposit(UUID customerId, String rawKey,
                                                                   DepositRequest request) {
+        // First, ahead of every read: a switched-off cell must not spend a
+        // database read or a core round trip on a request it always refuses,
+        // and must leave no idempotency claim or ledger row behind.
+        depositGate.requireEnabled(customerId);
         Customer customer = requireMappedCustomer(customerId);
         requireOwnership(customer, request.accountId());
         String key = IdempotencyKeys.namespaced(customerId.toString(), rawKey);

@@ -170,6 +170,28 @@ Build: `./mvnw verify` at the root. Run locally:
   concurrent same-key requests can never double-execute. Replays return the
   ORIGINAL stored status. Same key + different body → 422; fresh claim in
   flight → 409; stale claim (>60s) taken over.
+* **`POST /transactions/deposit` is an unfunded cash-in, OFF by default**
+  (`innbucks.transactions.deposit.enabled` / `TRANSACTIONS_DEPOSIT_ENABLED`,
+  `DepositGate`). Every customer token carries `customer:write`, and the
+  endpoint books a core "cash" deposit of any amount into the caller's own
+  wallet: no source of funds, no step-up, no maximum, and the wallet product's
+  accounting rule is None, so no GL trail. Open, any customer mints money and
+  then spends it, and no outgoing limit means anything. Off, it answers
+  `403 deposit_disabled` as the FIRST statement of `MovementService.deposit`,
+  ahead of the customer read, the ownership call, the idempotency claim, the
+  ledger row and the core. Like `step_up_required`, a refusal is a counter
+  (`innbucks.transactions.deposit.refused`, registered at 0) and an INFO line,
+  never an audit row. The property is a primitive `boolean`, so a cell whose
+  config never names it is OFF. **Never on where real money is held.** Staging
+  turns it on (testers fund wallets; the runbook smoke deposits), and every
+  boot under a deployment profile then logs a WARN banner
+  (`ProductionSecretsGuard.isDeployment`, the guard's own notion, empty set
+  included). Production stays off until a FUNDED cash-in rail exists, and that
+  rail is a new design, never this flag flipped. The test suite turns it on in
+  `middleware-app/src/test/resources/application.yaml`, which REPLACES the
+  main file on the test classpath. Pinned by `DepositGateTest`,
+  `TransactionControllerDepositSwitchTest` and
+  `DepositDisabledFlowIntegrationTest`.
 * **Credential-spray detection** (`anomaly/AuthAnomalyDetector`): the
   brute-force shape the other two controls are blind to — one source trying a
   FEW PINs against MANY accounts. Per-account lockout fires at 7 failures (so
@@ -427,6 +449,11 @@ reason to copy the rule rather than fork it.
 * Containers pin `-Duser.timezone=UTC` in the Dockerfile ENTRYPOINT.
 * Single-replica per cell assumption (in-memory rate limits, unlocked
   `@Scheduled` jobs) — wrap with ShedLock before ever scaling horizontally.
+* **The deposit switch is per environment.** Staging's `.env` carries
+  `TRANSACTIONS_DEPOSIT_ENABLED=true`; production's never does, and its boot
+  must log `Customer deposits: OFF`. On a cell rolling to the first image with
+  the switch, add the staging line BEFORE the roll, or staging stops taking
+  deposits on that roll. Runbook §5.
 
 ## Environments (EC2, af-south-1)
 
@@ -562,6 +589,8 @@ commands, with the exact bytes that were running before. Full procedure
    /me/profile` + `GET /me/accounts` (local identity merged with core
    names/balances; missing core mapping → 404 customer_not_registered),
    `POST /transactions/{deposit|withdraw|transfer}` (JWT `customer:write`;
+   deposit is now OFF by default, an unfunded cash-in — see Security
+   invariants;
    ownership checked against the CORE's account list BEFORE any claim/write —
    source for withdraw/transfer, target for deposit; key namespaced per
    customer → becomes idempotency_record key, ledger external_ref AND the

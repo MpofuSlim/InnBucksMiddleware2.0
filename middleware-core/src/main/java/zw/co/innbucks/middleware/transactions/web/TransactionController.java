@@ -50,7 +50,12 @@ public class TransactionController {
     private final MovementService movementService;
 
     @PostMapping("/deposit")
-    @Operation(summary = "Deposit into the caller's own account")
+    @Operation(summary = "Deposit into the caller's own account",
+            description = "A test cash-in: it credits the wallet with no source of funds behind it, so it "
+                    + "is OFF unless the deployment switches it on (staging does; production does not). "
+                    + "Off, every call answers 403 deposit_disabled before anything is read or written — "
+                    + "no idempotency record, no ledger row, no core call. Fund a production wallet "
+                    + "through a real cash-in channel, not this endpoint.")
     @ApiResponses({
             @ApiResponse(responseCode = "200", description = "Movement outcome (SUCCESS / PROCESSING / FAILED)",
                     content = @Content(mediaType = MediaType.APPLICATION_JSON_VALUE,
@@ -58,8 +63,21 @@ public class TransactionController {
                             examples = @ExampleObject(value = COMMON_RESPONSES))),
             @ApiResponse(responseCode = "401", description = "Missing or invalid Bearer token",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
-            @ApiResponse(responseCode = "403", description = "Account does not belong to the caller",
-                    content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
+            @ApiResponse(responseCode = "403", description = "Deposits are switched off in this deployment "
+                    + "(errorCode deposit_disabled — permanent for the deployment, do not retry), or the "
+                    + "account does not belong to the caller (errorCode account_ownership_mismatch)",
+                    content = @Content(schema = @Schema(implementation = ProblemDetail.class),
+                            examples = {
+                                    @ExampleObject(name = "Deposits disabled", value = """
+                                            {"type":"about:blank","title":"Deposits unavailable","status":403,
+                                             "detail":"Deposits are not available in this deployment.",
+                                             "errorCode":"deposit_disabled"}
+                                            """),
+                                    @ExampleObject(name = "Not your account", value = """
+                                            {"type":"about:blank","title":"Not your account","status":403,
+                                             "detail":"You can only access accounts that belong to you.",
+                                             "errorCode":"account_ownership_mismatch"}
+                                            """)})),
             @ApiResponse(responseCode = "409", description = "An identical request is still in progress",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
             @ApiResponse(responseCode = "422", description = "Key reused with a different body, or the core "

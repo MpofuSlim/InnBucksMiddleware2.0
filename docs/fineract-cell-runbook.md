@@ -638,6 +638,22 @@ EOF
 `NOTIFY_API_*` values while leaving `console` selected keeps OTP codes in the
 logs and sends nothing. Gateway mode makes all four boot-required.
 
+**Staging only — customer deposits.** `POST /transactions/deposit` is an
+unfunded cash-in: any signed-in customer credits their own wallet with any
+amount, with no source of funds and no GL trail (the wallet product's
+accounting rule is None). It is off unless the cell says otherwise. A staging
+cell, where testers have to fund wallets and the smoke below deposits, adds:
+
+```sh
+echo "TRANSACTIONS_DEPOSIT_ENABLED=true" >> .env   # STAGING ONLY
+```
+
+**Never on a cell that holds real money.** Production leaves it unset, and
+funds wallets through a real cash-in channel, such as a teller deposit
+recorded in Fineract. On an existing staging cell, add the line **before**
+rolling the image that introduced the flag; otherwise deposits stop on that
+roll.
+
 ### The compose override (truststore, loopback, forwarded headers)
 
 ```yaml
@@ -725,6 +741,10 @@ Three lines confirm a good boot: `Started MiddlewareApplication`,
 `ProductionSecretsGuard: all 5 guarded secrets pass`, and
 `SmsSender: InnBucks notification gateway at <url>` (not the console stub).
 
+A fourth says which posture the deposit switch is in. Production must show
+`Customer deposits: OFF`. Staging shows the `CUSTOMER DEPOSITS ARE ON` WARN
+banner on every boot. That is expected there, and a page anywhere else.
+
 ### The edge
 
 The middleware must not be published directly — plain 8090 puts customer PINs
@@ -784,9 +804,18 @@ curl -s https://<host>/middleware/v3/api-docs | jq '.servers'
    page-worthy ERROR at boot.
 3. `/auth/otp/verify` → `POST /auth/pin/set` → `POST /auth/login` → Bearer token.
 4. `GET /me/accounts` → the wallet with balance 0.
-5. `POST /transactions/deposit` then `/transfer` — watch
+5. Fund the wallet, then `POST /transactions/transfer` — watch
    `ledger_transaction` land COMPLETED and, for anything parked,
-   `innbucks.ledger.parked_overdue` stay at zero.
+   `innbucks.ledger.parked_overdue` stay at zero. How you fund it depends on
+   the cell:
+   - **Staging** (`TRANSACTIONS_DEPOSIT_ENABLED=true`, section 5):
+     `POST /transactions/deposit`. The endpoint credits money from nothing,
+     which is exactly why only staging has it on.
+   - **Production** (flag unset): `POST /transactions/deposit` must answer
+     **403 `deposit_disabled`**, and that refusal is itself the check: it
+     proves the go-live posture. Fund the wallet with a teller deposit in
+     Fineract instead. With `FINERACT_CORE_EVENTS_TOKEN` provisioned, that
+     also exercises the core-event alert (the customer gets the SMS).
 
 Tell the FE team three things or they will lose a day each: **amounts cross
 the API in MINOR units** (cents), **every state-changing call needs an

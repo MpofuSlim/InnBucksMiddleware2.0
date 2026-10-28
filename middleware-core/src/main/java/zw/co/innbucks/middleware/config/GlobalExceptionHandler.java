@@ -145,6 +145,23 @@ public class GlobalExceptionHandler {
     }
 
     /**
+     * The cell has customer deposits switched off (DepositGate). 403, not 404
+     * or 503: the request is understood and authenticated, and the answer is a
+     * standing policy refusal that no retry changes — the same family as
+     * {@code account_ownership_mismatch} and {@code step_up_required}. A 404
+     * would read as a wrong URL; a 503 would invite retries. Logged and counted
+     * by the gate, so nothing more here.
+     */
+    @ExceptionHandler(zw.co.innbucks.middleware.transactions.DepositDisabledException.class)
+    public ResponseEntity<ProblemDetail> depositDisabled(
+            zw.co.innbucks.middleware.transactions.DepositDisabledException ex) {
+        return problem(HttpStatus.FORBIDDEN,
+                "Deposits unavailable",
+                "Deposits are not available in this deployment.",
+                "deposit_disabled");
+    }
+
+    /**
      * Bean-validation on @RequestParam/@PathVariable (an @Validated controller)
      * raises ConstraintViolationException, NOT MethodArgumentNotValidException —
      * a different type that the body-validation handler above does not catch.
