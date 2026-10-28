@@ -1108,7 +1108,13 @@ commands, with the exact bytes that were running before. Full procedure
      there is no release step to forget and nothing to drift. The guard judges
      the period on the SAME instant the row is stamped with (`openedAt`).
      **No network call inside that transaction, ever** — the tier is resolved
-     before it and passed in.
+     before it and passed in. `openPending(draft, guard)` and
+     `LedgeredMovementExecutor.execute(draft, guard, call)` have **no guard-free
+     overload**: every caller names its guard, so a withdrawal or transfer
+     opened with `PendingReservationGuard.NONE` (past the limits) shows up in
+     review instead of being a default. The wiring and the guard-before-INSERT
+     order are pinned by unit tests (`LedgeredMovementExecutorTest`,
+     `LedgerServiceTest`), not only by the timing-dependent concurrency IT.
    - **The lock is an ADVISORY lock, deliberately not a customer-row lock**:
      it contends with nothing else (login's counter UPDATE, PIN reset, and the
      `FOR KEY SHARE` every ledger/refresh-token INSERT takes on `customer`). If
@@ -1135,8 +1141,12 @@ commands, with the exact bytes that were running before. Full procedure
      payment the limits will refuse is answered 422 `limit_exceeded`, never 403
      `step_up_required` (nobody fetches an SMS code for it). It **skips a key the
      ledger already holds**: a replay must return its recorded outcome, not be
-     counted against itself. BINDING is the guard above. Count-once is the
-     unique `external_ref` (= the namespaced Idempotency-Key) — the binding
+     counted against itself. And it **reads the key again before refusing**: a
+     double-tap whose original commits its PENDING row between the skip and the
+     sum would otherwise be refused on its own payment. The re-read comes after
+     the sum, so any row the sum counted is visible to it, and it keeps ONE usage
+     predicate (no `external_ref <> ?` variant). BINDING is the guard above.
+     Count-once is the unique `external_ref` (= the namespaced Idempotency-Key) — the binding
      check is only reached when no row exists for the key. **Accepted race:** a
      payment can pass the advisory check, spend its SMS approval, and lose the
      binding check to a concurrent payment; the approval is bound to the amount,
@@ -1149,9 +1159,12 @@ commands, with the exact bytes that were running before. Full procedure
      `KycTierResolution` goes to step-up and both limit checks — never re-read,
      never the token's `kyc_tier` claim. Today it is the local row the request
      already loaded; an UNRECOGNISED stored value is BASIC + WARN +
-     `innbucks.kyc_tier.unrecognised`, never an exception (`KycTier.fromDbValue`
-     threw, so one garbage row made every payment of that customer a 500; the
-     strict parser stays for the non-money callers). The seam can already say
+     `innbucks.kyc_tier.unrecognised`, never an exception. The throwing
+     `KycTier.fromDbValue` and `Customer.kycTierEnum()` over it made one garbage
+     row a 500 on every payment of that customer; the payment path was their
+     only caller, so they are DELETED — login and `/me/profile` carry the
+     stored string as is, and a tier for a DECISION comes from the seam only,
+     never from parsing the column again. The seam can already say
      UNAVAILABLE for the live core read that will replace it: BASIC is then used
      only to ALLOW, and anything that would refuse (a limit, or step-up) is 503
      `kyc_tier_unavailable` — never a `limit_exceeded` / `step_up_required`
@@ -1178,9 +1191,26 @@ commands, with the exact bytes that were running before. Full procedure
    - **Emergency overrides are TIGHTEN-ONLY** (`LIMITS_OVERRIDE_<TIER>_<KIND>`):
      a looser value refuses boot, any value tightens an absent one, each active
      override is a boot WARN plus a `LIMITS_OVERRIDE_ACTIVE` audit row on every
-     boot, and the EFFECTIVE policy must pass the same consistency rules. No
-     other env override of a limit value exists — the old trap where a box's
-     `.env` silently beats reviewed values.
+     boot. No other env override of a limit value exists — the old trap where a
+     box's `.env` silently beats reviewed values.
+     **An override that tightens NEVER refuses boot.** The emergency lever must
+     not be able to take the cell down — login and statements included — at the
+     moment someone clamps a limit, for being too cautious. (It used to: the
+     effective policy re-ran the file's consistency rules, so clamping
+     `STANDARD_DAILY` on the dormant file, where basic is unlimited, was a dead
+     cell.) The consistency rules bind the FILE only. On the effective policy:
+     within a tier, a present daily above the monthly, or a present per_payment
+     above either, is **LOWERED** to it (absent kinds are never invented). Each
+     lowered value is its own `LIMITS_OVERRIDE_ACTIVE` row with `derivedFrom`.
+     Lowering changes no payment's outcome: a payment over the daily is refused
+     by the daily whatever per_payment says, and a day lies inside its month.
+     It changes only which limit a refusal names and what `/me/limits` shows,
+     which becomes true (`PaymentLimitsPolicyLoaderTest` checks this over a
+     grid). A higher tier left stricter than a lower one is a **boot WARN** plus
+     `warnings` on `LIMITS_POLICY_LOADED`, never lowered to match: each tier is
+     enforced on its own, so the only cost is that upgrading lowers that limit
+     while the override stands, and lowering the lower tiers would tighten
+     customers nobody named.
    - **Second approver and visibility, stated honestly:** a PR review is the
      second approver on a value change only once `main` requires a review from
      someone other than the author — it does not today. The repo is public, so
@@ -1206,8 +1236,13 @@ commands, with the exact bytes that were running before. Full procedure
      `limit` (`per_payment|daily|monthly|daily_count`), `limitMinor` +
      `remainingMinor` (money) or `limitCount` + `remainingCount`, `resetsAt`
      (ISO-8601 at the MARKET offset, e.g. `2026-10-29T00:00:00+02:00`; null for
-     per_payment, whose `remainingMinor` is the limit itself — it never
-     depletes), `kycTier`, `nextTier` (null at enhanced). One limit is reported:
+     per_payment — the cap itself never resets), `kycTier`, `nextTier` (null at
+     enhanced). **`remainingMinor` of every money refusal is the most that passes
+     NOW**: exactly `/me/limits`' `sendableNowMinor`. For daily and monthly
+     that follows from the precedence below. For per_payment it is set to that
+     explicitly, and can be BELOW `limitMinor` (0 once the count is used up). Offering the cap
+     when the day had less left sent the customer into a second refusal. One
+     limit is reported:
      per_payment, then an exhausted daily count, then whichever of daily/monthly
      has LESS left (tie: monthly). `GET /me/limits` (`customer:read`):
      `kycTier`, `currency`, `stepUpAtOrAboveMinor` (null when step-up is off),
@@ -1249,11 +1284,18 @@ commands, with the exact bytes that were running before. Full procedure
      `MovementService` method). A count limit is not a rate limit: refused and
      failed attempts are free against it.
    Contract pinned by `PaymentLimitsPolicyLoaderTest` (every refusal rule,
-   overrides, the empty-env binding, the step-up WARN), `LimitWindowsTest` (the
+   overrides incl. lowering that never changes an outcome and the tier WARN, the
+   empty-env binding, the step-up WARN), `PaymentLimitsPolicyAuditorTest`,
+   `LedgeredMovementExecutorTest` + `LedgerServiceTest` (guard handed through,
+   refusal = no row and no core call, guard before INSERT on the stamped
+   instant), `LimitWindowsTest` (the
    seam, month end, Dec → Jan, offsets), `PaymentLimitServiceTest` (the rules,
-   precedence, `sendableNowMinor`, skip-on-existing-key, lock-before-sum),
+   precedence, `sendableNowMinor` = every money refusal's `remainingMinor`, the
+   Swagger examples as one reachable state, skip-on-existing-key and the
+   re-read before refusing, lock-before-sum),
    `LimitUsageStoreTest` (the predicate and every bound slot),
-   `LimitExceededProblemTest`, `MovementServiceTest` (guard order),
+   `LimitExceededProblemTest`, `MovementServiceTest` (guard order, withdraw and
+   transfer),
    `OtpServiceStepUpAllowanceTest`, the step-up case in
    `AuthRateLimitFilterTest`, `PaymentLimitsPolicyFilesTest`, and against real
    Postgres by `PaymentLimitsIntegrationTest` (two racing payments → exactly one;
