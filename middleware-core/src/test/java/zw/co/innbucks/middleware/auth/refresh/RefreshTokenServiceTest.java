@@ -10,6 +10,7 @@ import zw.co.innbucks.middleware.audit.AuditOutcome;
 import zw.co.innbucks.middleware.audit.AuditService;
 import zw.co.innbucks.middleware.auth.config.AuthProperties;
 import zw.co.innbucks.middleware.auth.exception.RefreshTokenInvalidException;
+import zw.co.innbucks.middleware.auth.exception.RefreshTokenReplayException;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -86,12 +87,66 @@ class RefreshTokenServiceTest {
     void aRowRevokedAfterRotationReadItIsRefusedAndNoSuccessorIsMinted() {
         // A PIN reset / logout committed between the read and the mark.
         when(repository.markReplaced(eq(current.getJti()), any())).thenReturn(0);
+        RefreshToken revoked = copyOfCurrent();
+        revoked.setRevokedAt(NOW.minusSeconds(1));
+        when(repository.findById(current.getJti())).thenReturn(Optional.of(revoked));
 
         assertThatThrownBy(() -> service.rotate(SECRET, DEVICE))
                 .isInstanceOf(RefreshTokenInvalidException.class);
 
         verify(jdbc, never()).update(contains("INSERT INTO refresh_token"), any(Object[].class));
         verify(audit, never()).record(eq(AuditAction.REFRESH_SUCCESS), any(), any(), any());
+        // A revocation is not a theft signal: nothing more is revoked or audited.
+        verify(repository, never()).revokeFamily(any(), any(), anyString());
+        verify(audit, never()).record(eq(AuditAction.REFRESH_REPLAY_DETECTED), any(), any(), any());
+    }
+
+    @Test
+    void aRowRotatedByARacingRequestAfterRotationReadItIsAReplay() {
+        // Two requests presenting the same token at once (a double submit, or
+        // an attacker racing the real holder): both read it unrotated, the
+        // other one marked it first. Exactly what the same two requests one
+        // after the other get — the family revoked, audited, no successor
+        // here — never a second live chain in the family.
+        when(repository.markReplaced(eq(current.getJti()), any())).thenReturn(0);
+        RefreshToken rotatedMeanwhile = copyOfCurrent();
+        rotatedMeanwhile.setReplacedByJti(UUID.randomUUID());
+        when(repository.findById(current.getJti())).thenReturn(Optional.of(rotatedMeanwhile));
+
+        assertThatThrownBy(() -> service.rotate(SECRET, DEVICE))
+                .isInstanceOf(RefreshTokenReplayException.class);
+
+        verify(repository).revokeFamily(current.getFamilyId(), NOW, "replay_detected");
+        verify(audit).record(AuditAction.REFRESH_REPLAY_DETECTED, AuditOutcome.FAILURE, customerId, DEVICE);
+        verify(jdbc, never()).update(contains("INSERT INTO refresh_token"), any(Object[].class));
+        verify(audit, never()).record(eq(AuditAction.REFRESH_SUCCESS), any(), any(), any());
+    }
+
+    @Test
+    void aRowRotatedAndThenRevokedMeanwhileIsRefusedAsRevokedNotAsAReplay() {
+        // Same order as the opening checks: revoked wins over rotated.
+        when(repository.markReplaced(eq(current.getJti()), any())).thenReturn(0);
+        RefreshToken both = copyOfCurrent();
+        both.setReplacedByJti(UUID.randomUUID());
+        both.setRevokedAt(NOW.minusSeconds(1));
+        when(repository.findById(current.getJti())).thenReturn(Optional.of(both));
+
+        assertThatThrownBy(() -> service.rotate(SECRET, DEVICE))
+                .isInstanceOf(RefreshTokenInvalidException.class);
+
+        verify(repository, never()).revokeFamily(any(), any(), anyString());
+        verify(jdbc, never()).update(contains("INSERT INTO refresh_token"), any(Object[].class));
+    }
+
+    @Test
+    void theMarkMatchesOnlyAnUnrevokedUnrotatedRow() throws Exception {
+        // The SQL half of the two cases above; what the guard does under a
+        // real row lock is RefreshRotationRaceIntegrationTest.
+        String sql = RefreshTokenRepository.class
+                .getMethod("markReplaced", UUID.class, UUID.class)
+                .getAnnotation(org.springframework.data.jdbc.repository.query.Query.class)
+                .value();
+        assertThat(sql).contains("revoked_at IS NULL").contains("replaced_by_jti IS NULL");
     }
 
     @Test
@@ -138,7 +193,7 @@ class RefreshTokenServiceTest {
         current.setReplacedByJti(UUID.randomUUID());
 
         assertThatThrownBy(() -> service.rotate(SECRET, DEVICE))
-                .isInstanceOf(zw.co.innbucks.middleware.auth.exception.RefreshTokenReplayException.class);
+                .isInstanceOf(RefreshTokenReplayException.class);
 
         verify(repository).revokeFamily(current.getFamilyId(), NOW, "replay_detected");
         verify(jdbc, never()).queryForList(anyString(), any(Object[].class));

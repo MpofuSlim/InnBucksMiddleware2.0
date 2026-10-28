@@ -125,13 +125,7 @@ public class RefreshTokenService {
         }
 
         if (current.getReplacedByJti() != null) {
-            repository.revokeFamily(current.getFamilyId(), now, "replay_detected");
-            auditService.record(
-                    AuditAction.REFRESH_REPLAY_DETECTED,
-                    AuditOutcome.FAILURE,
-                    current.getCustomerId(),
-                    deviceHash);
-            throw new RefreshTokenReplayException();
+            throw replayDetected(current, now, deviceHash);
         }
 
         // Device binding (auth slice 4): the refresh token only rotates on the
@@ -164,13 +158,14 @@ public class RefreshTokenService {
         jdbcTemplate.queryForList(LOCK_CUSTOMER_FOR_ROTATION_SQL, current.getCustomerId());
 
         // Mark the presented row replaced BEFORE inserting its successor, and
-        // only while it is still unrevoked: a revocation (logout, replay,
-        // sign-out-everywhere) that committed after the read above must win,
-        // and the successor must not exist if it does — this method's
-        // noRollbackFor would otherwise commit an orphan.
+        // only while it is still unrevoked and unrotated: a revocation (logout,
+        // replay, sign-out-everywhere) or another rotation of the same token
+        // that committed after the read above must win, and the successor
+        // must not exist if it does — this method's noRollbackFor would
+        // otherwise commit an orphan.
         UUID successorJti = UUID.randomUUID();
         if (repository.markReplaced(current.getJti(), successorJti) != 1) {
-            throw new RefreshTokenInvalidException();
+            throw lostTheRowAfterReadingIt(current, now, deviceHash);
         }
         RefreshToken next = persist(successorJti, current.getCustomerId(), current.getFamilyId(), deviceHash);
 
@@ -181,6 +176,47 @@ public class RefreshTokenService {
                 deviceHash);
 
         return next;
+    }
+
+    /**
+     * The presented row changed between rotation's read and its guarded mark.
+     * Re-read it (READ COMMITTED: this statement sees what committed in
+     * between) and judge it exactly as the opening checks would have: revoked
+     * first — a revocation is not a theft signal — then rotated, which is a
+     * REPLAY. That second case is two requests presenting the same token at
+     * once — a client's double submit, or an attacker racing the real holder
+     * with a stolen token and device hash — and is treated exactly like the
+     * same two requests one after the other: the family is revoked, the
+     * successor the winner just minted included, and audited.
+     */
+    private RuntimeException lostTheRowAfterReadingIt(RefreshToken read, Instant now, String deviceHash) {
+        Optional<RefreshToken> reread = repository.findById(read.getJti());
+        if (reread.isEmpty() || reread.get().getRevokedAt() != null) {
+            return new RefreshTokenInvalidException();
+        }
+        if (reread.get().getReplacedByJti() != null) {
+            return replayDetected(read, now, deviceHash);
+        }
+        // Unreachable: the row is unrevoked and unrotated, so the guarded
+        // UPDATE would have matched it. Refuse rather than guess.
+        log.warn("Refresh rotation could not mark token jti={} although it is live; refusing", read.getJti());
+        return new RefreshTokenInvalidException();
+    }
+
+    /**
+     * A token presented after it was rotated away: its secret has left the
+     * device that rotated it, or it is being raced. Revokes the WHOLE family
+     * and audits it; the caller throws what this returns (the
+     * {@code noRollbackFor} on {@link #rotate} keeps the revocation).
+     */
+    private RefreshTokenReplayException replayDetected(RefreshToken token, Instant now, String deviceHash) {
+        repository.revokeFamily(token.getFamilyId(), now, "replay_detected");
+        auditService.record(
+                AuditAction.REFRESH_REPLAY_DETECTED,
+                AuditOutcome.FAILURE,
+                token.getCustomerId(),
+                deviceHash);
+        return new RefreshTokenReplayException();
     }
 
     @Transactional

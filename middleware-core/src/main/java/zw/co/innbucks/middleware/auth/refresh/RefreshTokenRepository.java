@@ -48,10 +48,20 @@ public interface RefreshTokenRepository extends CrudRepository<RefreshToken, UUI
 
     /**
      * Records a rotation on the presented row — ONLY while that row is still
-     * unrevoked. Replaces a whole-entity {@code save()}, which wrote the stale
-     * {@code revoked_at = NULL} it had read back over a revocation committed
-     * in between (undoing a logout or a sign-out-everywhere). 0 rows = the
-     * row was revoked after rotation read it; the caller refuses.
+     * unrevoked AND not yet rotated. Replaces a whole-entity {@code save()},
+     * which wrote the stale {@code revoked_at = NULL} it had read back over a
+     * revocation committed in between (undoing a logout or a
+     * sign-out-everywhere).
+     *
+     * <p>The {@code replaced_by_jti IS NULL} half is what makes two
+     * OVERLAPPING rotations of one token a replay rather than a fork. Both
+     * read the row unrotated before either commits, and the second's UPDATE
+     * waits on the first's row lock; Postgres then re-evaluates this WHERE on
+     * the committed row. Guarded on {@code revoked_at} alone it still matched,
+     * so both rotations succeeded: two live chains in one family and no
+     * {@code REFRESH_REPLAY_DETECTED} — the theft signal silent for exactly an
+     * attacker racing the real holder. 0 rows = the row was revoked or rotated
+     * after rotation read it; the caller re-reads it to tell which.
      */
     @Modifying
     @Query("""
@@ -59,6 +69,7 @@ public interface RefreshTokenRepository extends CrudRepository<RefreshToken, UUI
                SET replaced_by_jti = :successorJti
              WHERE jti = :jti
                AND revoked_at IS NULL
+               AND replaced_by_jti IS NULL
             """)
     int markReplaced(@Param("jti") UUID jti,
                      @Param("successorJti") UUID successorJti);

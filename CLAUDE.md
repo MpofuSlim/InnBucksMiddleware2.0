@@ -271,11 +271,21 @@ Build: `./mvnw verify` at the root. Run locally:
   sees the revocation — without it, a successor committed after the revoking
   statement's snapshot survives, and a client refreshing in a loop sits in
   that window most of the time. And rotation marks the presented row with a
-  guarded `markReplaced` (`… AND revoked_at IS NULL`), never a whole-row
-  `save()`, which wrote the stale `revoked_at = NULL` it had read back over a
-  committed revocation (logout included). Access tokens are NOT revoked —
-  see the deferred list. Pinned by `PinResetSignOutIntegrationTest` (both
-  interleavings, forced with an open transaction) and `RefreshTokenServiceTest`.
+  guarded `markReplaced` (`… AND revoked_at IS NULL AND replaced_by_jti IS
+  NULL`), never a whole-row `save()`, which wrote the stale `revoked_at =
+  NULL` it had read back over a committed revocation (logout included). The
+  `replaced_by_jti` half makes two OVERLAPPING rotations of one token a
+  replay, exactly as they are one request apart: both read the row unrotated,
+  the second's UPDATE waits on the first's row lock, and Postgres re-evaluates
+  the WHERE on the committed row — guarded on revocation alone it still
+  matched, both answered 200, and the family forked into two live chains with
+  no `REFRESH_REPLAY_DETECTED` (the theft signal silent for an attacker racing
+  the real holder). On 0 rows rotation re-reads the row: revoked → invalid;
+  rotated → replay (family revoked, the winner's successor included;
+  audited). Access tokens are NOT revoked — see the deferred list. Pinned by
+  `PinResetSignOutIntegrationTest` (both interleavings, forced with an open
+  transaction), `RefreshRotationRaceIntegrationTest` (the overlapping double
+  submit, forced the same way) and `RefreshTokenServiceTest`.
 * **A FULL bank block ends the customer's sessions at their next refresh**
   (`AccountBlockSessionGuard`, from `LoginController.refresh`). Staff
   restrict a customer by blocking the wallet in the back office; the core
