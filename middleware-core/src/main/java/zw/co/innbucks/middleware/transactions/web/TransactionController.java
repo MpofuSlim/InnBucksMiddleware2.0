@@ -47,6 +47,23 @@ public class TransactionController {
              "status":"SUCCESS","coreTxRef":"501","failureCode":null,"failureMessage":null}
             """;
 
+    /**
+     * {@code CoreBankingExceptionHandler.upstreamAuth}, verbatim: the core refused
+     * this service's own credentials or a permission they need. Our fault, never
+     * the request's, so the wording is generic and the detail stays in the logs.
+     */
+    private static final String CORE_REFUSED_US = """
+            {"type":"about:blank","title":"Service temporarily unavailable","status":502,
+             "detail":"We couldn't reach the banking system. Please try again shortly.",
+             "errorCode":"core_banking_unavailable"}
+            """;
+    private static final String CORE_REFUSED_US_DESCRIPTION = "The core banking system refused this "
+            + "service's own credentials or a permission they need (errorCode core_banking_unavailable): "
+            + "an operations fault, never the request's, and nothing moved. If the core refused the "
+            + "movement itself, its ledger row is FAILED (failureCode core_auth_failed) and a retry with "
+            + "the SAME Idempotency-Key is answered 200 FAILED from that row, so a fresh attempt needs a "
+            + "fresh key; if it refused an earlier read, nothing was recorded";
+
     private final MovementService movementService;
 
     @PostMapping("/deposit")
@@ -83,6 +100,11 @@ public class TransactionController {
             @ApiResponse(responseCode = "422", description = "Key reused with a different body, or the core "
                     + "rejected the movement (e.g. insufficient balance, wrong currency)",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
+            @ApiResponse(responseCode = "502", description = CORE_REFUSED_US_DESCRIPTION + ". On a "
+                    + "deposit this is also what a cell provisioned WITHOUT customer deposits at the core answers "
+                    + "while the deposit switch is on: the core's own lock refusing it",
+                    content = @Content(schema = @Schema(implementation = ProblemDetail.class),
+                            examples = @ExampleObject(name = "Core refused this service", value = CORE_REFUSED_US))),
             @ApiResponse(responseCode = "503", description = "Core banking system unreachable",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class)))
     })
@@ -123,6 +145,9 @@ public class TransactionController {
             @ApiResponse(responseCode = "422", description = "Key reused with a different body, or the core "
                     + "rejected the movement (e.g. insufficient balance)",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
+            @ApiResponse(responseCode = "502", description = CORE_REFUSED_US_DESCRIPTION,
+                    content = @Content(schema = @Schema(implementation = ProblemDetail.class),
+                            examples = @ExampleObject(name = "Core refused this service", value = CORE_REFUSED_US))),
             @ApiResponse(responseCode = "503", description = "Core banking system unreachable",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class)))
     })
@@ -164,6 +189,9 @@ public class TransactionController {
             @ApiResponse(responseCode = "422", description = "Key reused with a different body, or the core "
                     + "rejected the movement (e.g. insufficient balance, unknown destination)",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
+            @ApiResponse(responseCode = "502", description = CORE_REFUSED_US_DESCRIPTION,
+                    content = @Content(schema = @Schema(implementation = ProblemDetail.class),
+                            examples = @ExampleObject(name = "Core refused this service", value = CORE_REFUSED_US))),
             @ApiResponse(responseCode = "503", description = "Core banking system unreachable",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class)))
     })
