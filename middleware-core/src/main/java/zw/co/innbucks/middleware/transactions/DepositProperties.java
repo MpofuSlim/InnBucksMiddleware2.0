@@ -4,8 +4,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 
 /**
  * The cell switch for {@code POST /transactions/deposit}. OFF unless a cell
- * turns it on: the endpoint credits the caller's own wallet with a core
- * "cash" deposit that no money stands behind — see {@link DepositGate}.
+ * turns it on: the endpoint credits the caller's own wallet with a plain
+ * savings deposit that no money stands behind — see {@link DepositGate}.
  *
  * <p>A primitive {@code boolean}, so a cell whose configuration does not
  * mention the key at all binds {@code false}. Absent means off, never on.

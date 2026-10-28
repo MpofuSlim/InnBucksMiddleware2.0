@@ -16,14 +16,15 @@ import java.util.UUID;
  * Keeps {@code POST /transactions/deposit} shut unless the cell opts in.
  *
  * <p>The endpoint is an UNFUNDED cash-in. Every customer token carries
- * {@code customer:write}, and a deposit books a core "cash" deposit of any
- * amount into the caller's own wallet: no source of funds, no step-up, no
- * maximum, and the wallet product's accounting rule is None, so the core keeps
- * no GL trail of where the money came from. Open, any customer can credit
- * themselves from nothing and then spend it. That is useful on staging, where
- * testers have to fund wallets somehow, and a go-live blocker anywhere real
- * money is held. Production stays off until a FUNDED cash-in rail exists, and
- * that rail is a new design, not this flag turned on.
+ * {@code customer:write}, and a deposit books a plain savings deposit (the
+ * cell's non-cash wallet payment type) of any amount into the caller's own
+ * wallet: no source of funds, no step-up, no maximum, and the wallet product's
+ * accounting rule is None, so the core keeps no GL trail of where the money
+ * came from. Open, any customer can credit themselves from nothing and then
+ * spend it. That is useful on staging, where testers have to fund wallets
+ * somehow, and a go-live blocker anywhere real money is held. Production stays
+ * off until a FUNDED cash-in rail exists, and that rail is a new design, not
+ * this flag turned on.
  *
  * <p>Off, the refusal is the FIRST thing {@code MovementService.deposit}
  * does: before the customer read, the ownership call to the core, the

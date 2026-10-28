@@ -200,7 +200,7 @@ innbucks:
   transactions:
     deposit:
       # POST /transactions/deposit is an UNFUNDED cash-in: any signed-in
-      # customer credits their own wallet with a core "cash" deposit of any
+      # customer credits their own wallet with a plain savings deposit of any
       # amount, with no source of funds, no step-up, no maximum and no GL trail
       # (the wallet product's accounting rule is None). OFF by default; off, it
       # answers 403 deposit_disabled before anything is read or written.

@@ -173,13 +173,14 @@ Build: `./mvnw verify` at the root. Run locally:
 * **`POST /transactions/deposit` is an unfunded cash-in, OFF by default**
   (`innbucks.transactions.deposit.enabled` / `TRANSACTIONS_DEPOSIT_ENABLED`,
   `DepositGate`). Every customer token carries `customer:write`, and the
-  endpoint books a core "cash" deposit of any amount into the caller's own
-  wallet: no source of funds, no step-up, no maximum, and the wallet product's
-  accounting rule is None, so no GL trail. Open, any customer mints money and
-  then spends it, and no outgoing limit means anything. Off, it answers
-  `403 deposit_disabled` as the FIRST statement of `MovementService.deposit`,
-  ahead of the customer read, the ownership call, the idempotency claim, the
-  ledger row and the core. Like `step_up_required`, a refusal is a counter
+  endpoint books a plain savings deposit (the cell's non-cash wallet payment
+  type) of any amount into the caller's own wallet: no source of funds, no
+  step-up, no maximum, and the wallet product's accounting rule is None, so no
+  GL trail. Open, any customer mints money and then spends it, and no outgoing
+  limit means anything. Off, it answers `403 deposit_disabled` as the FIRST
+  statement of `MovementService.deposit`, ahead of the customer read, the
+  ownership call, the idempotency claim, the ledger row and the core. Like
+  `step_up_required`, a refusal is a counter
   (`innbucks.transactions.deposit.refused`, registered at 0) and an INFO line,
   never an audit row. The property is a primitive `boolean`, so a cell whose
   config never names it is OFF. **Never on where real money is held.** Staging
@@ -187,10 +188,14 @@ Build: `./mvnw verify` at the root. Run locally:
   boot under a deployment profile then logs a WARN banner
   (`ProductionSecretsGuard.isDeployment`, the guard's own notion, empty set
   included). Production stays off until a FUNDED cash-in rail exists, and that
-  rail is a new design, never this flag flipped. The test suite turns it on in
-  `middleware-app/src/test/resources/application.yaml`, which REPLACES the
-  main file on the test classpath. Pinned by `DepositGateTest`,
-  `TransactionControllerDepositSwitchTest` and
+  rail is a new design, never this flag flipped. **The packaged files are the
+  deployed default, and no Spring test reads them**: the test suite turns the
+  switch on in `middleware-app/src/test/resources/application.yaml`, which
+  REPLACES the main file on the test classpath. So `PackagedDepositDefaultTest`
+  reads `src/main/resources` from disk and fails if the default, or any
+  packaged profile but `dev`, resolves ON with the variable unset. A staging
+  cell turns it on with the variable, never a packaged file. Also pinned by
+  `DepositGateTest`, `TransactionControllerDepositSwitchTest` and
   `DepositDisabledFlowIntegrationTest`.
 * **Credential-spray detection** (`anomaly/AuthAnomalyDetector`): the
   brute-force shape the other two controls are blind to — one source trying a

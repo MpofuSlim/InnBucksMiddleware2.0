@@ -122,9 +122,12 @@ class DepositGateTest {
 
     /**
      * The fail-closed claim, through real Spring binding: a configuration that
-     * never names the key yields a gate that refuses. The test suite's
-     * application.yaml replaces the main one, so "nobody wrote the key" is a
-     * real state, not a hypothetical.
+     * never names the key yields a gate that refuses. This is the record's own
+     * default (a primitive {@code boolean}), the floor under any configuration
+     * file that leaves the key out. It is NOT the deployed default: the
+     * packaged application.yaml does name the key, through
+     * {@code TRANSACTIONS_DEPOSIT_ENABLED}, and middleware-app's
+     * {@code PackagedDepositDefaultTest} pins what that file resolves to.
      */
     @Test
     void aConfigurationThatNeverNamesTheKeyBindsOff() {
