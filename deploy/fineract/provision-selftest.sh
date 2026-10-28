@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Regression cover for provision-lib.sh — the parsing and set arithmetic behind
-# provision-cell.sh's steps 6b and 6e, and the customer-deposit lock (5, 6a, 7).
+# provision-cell.sh's steps 6b and 6e, and the customer-deposit lock (5, 6b, 6e,
+# 6f, 7) — plus a few STRUCTURAL checks on provision-cell.sh itself, where the
+# lock depends on which list the script passes where, and in what order.
 #
 # Needs no cell, no Docker and no network. Run it after touching provision-lib.sh
 # or the policy format in deploy/cells/cell.*.env:
@@ -228,20 +230,41 @@ is "OFF revokes the deposit permission (an older cell's role still holds it)" \
 is "unset opt-in revokes too" "$(write_role_revokes)" "DEPOSIT_SAVINGSACCOUNT"
 is "ON revokes nothing"       "$(write_role_revokes 1)" ""
 
+printf 'mw_write_grants / mw_protected_codes (what provision-cell.sh actually uses)\n'
+# The script takes its grant list and 6e's protected set from these two and
+# nothing else (pinned under "provision-cell.sh wiring" below), so these cases
+# cover what a cell is really given, not a copy of it.
+is "this file's copy of the write codes is the lib's" \
+   "$(printf '%s\n' "${WRITE_PERMS[@]}")" "$(printf '%s\n' "${MW_WRITE[@]}")"
+is "OFF grants every write code but the deposit permission" \
+   "$(mw_write_grants 0)" "$(write_role_grants 0 "${MW_WRITE[@]}")"
+is "ON grants every write code" \
+   "$(mw_write_grants 1)" "$(printf '%s\n' "${WRITE_PERMS[@]}")"
+is "unset opt-in grants as OFF" "$(mw_write_grants)" "$(mw_write_grants 0)"
+is "OFF protects the read codes, then the grants" \
+   "$(mw_protected_codes 0)" "$(printf '%s\n' "${READ_PERMS[@]}"; mw_write_grants 0)"
+is "OFF does not protect the deposit permission" \
+   "$(mw_protected_codes 0 | grep -cxF DEPOSIT_SAVINGSACCOUNT)" "0"
+is "ON protects the deposit permission" \
+   "$(mw_protected_codes 1 | grep -cxF DEPOSIT_SAVINGSACCOUNT)" "1"
+is "every other adapter code is protected either way" \
+   "$(comm -3 <(mw_protected_codes 0 | sort) <(mw_protected_codes 1 | sort) | tr -d '[:space:]')" \
+   "DEPOSIT_SAVINGSACCOUNT"
+
 printf 'step 6e protects what step 5 grants\n'
-# provision-cell.sh builds 6e's protected set from READ_PERMS + WRITE_GRANTS, so
-# a flagged DEPOSIT_SAVINGSACCOUNT is the middleware's problem only where the
-# middleware can deposit. Elsewhere it is the bank's teller-deposit code, and
-# 6e must not unflag the bank's dual control on it.
+# 6e's protected set is mw_protected_codes (READ_PERMS + the write role's
+# grants), so a flagged DEPOSIT_SAVINGSACCOUNT is the middleware's problem only
+# where the middleware can deposit. Elsewhere it is the bank's teller-deposit
+# code, and 6e must not unflag the bank's dual control on it.
 FLAGGED=$(printf 'DEPOSIT_SAVINGSACCOUNT\nCREATE_JOURNALENTRY')
 is "ON: a flagged deposit permission is a violation" \
-   "$(mc_violations "$FLAGGED" READ_CLIENT $(write_role_grants 1 "${MW_WRITE[@]}"))" \
+   "$(mc_violations "$FLAGGED" $(mw_protected_codes 1))" \
    "DEPOSIT_SAVINGSACCOUNT"
 is "OFF: a flagged deposit permission is the bank's, not a violation" \
-   "$(mc_violations "$FLAGGED" READ_CLIENT $(write_role_grants 0 "${MW_WRITE[@]}"))" \
+   "$(mc_violations "$FLAGGED" $(mw_protected_codes 0))" \
    ""
 is "OFF: every other middleware code is still protected" \
-   "$(mc_violations "$(printf 'CREATE_ACCOUNTTRANSFER\nDEPOSIT_SAVINGSACCOUNT')" $(write_role_grants 0 "${MW_WRITE[@]}"))" \
+   "$(mc_violations "$(printf 'CREATE_ACCOUNTTRANSFER\nDEPOSIT_SAVINGSACCOUNT')" $(mw_protected_codes 0))" \
    "CREATE_ACCOUNTTRANSFER"
 
 printf 'deposit_capable_codes\n'
@@ -301,6 +324,69 @@ rm -rf "$TMP"
 # THE guard that matters: the real committed cell files. One of them is
 # sourced by production.
 is "no committed cell file opts in" "$(committed_deposit_opt_ins ../cells/*.env)" ""
+
+printf 'is_middleware_role (step 6b refuses these)\n'
+# A cell file is shared by every box of its market. Granting the middleware's
+# write role from one is how a committed line re-opened production's deposit
+# lock past the per-box opt-in (step 5 revoked, 6b granted it back), so 6b
+# refuses any entry naming either middleware role.
+role_verdict() { is_middleware_role "$1" && printf 'refused' || printf 'granted'; }
+is "the write role"                 "$(role_verdict innbucks-mw-write)" "refused"
+is "the read role"                  "$(role_verdict innbucks-mw-read)"  "refused"
+is "case does not get one through"  "$(role_verdict INNBUCKS-MW-WRITE)" "refused"
+is "nor surrounding whitespace"     "$(role_verdict '  innbucks-mw-write ')" "refused"
+is "a bank role is granted"         "$(role_verdict 'TEST Risk Manager')" "granted"
+is "a longer name is another role"  "$(role_verdict innbucks-mw-writer)" "granted"
+is "a prefix is another role"       "$(role_verdict innbucks-mw)" "granted"
+is "empty is not a middleware role" "$(role_verdict '')" "granted"
+is "the names are the script's users" "${MW_READ_ROLE} ${MW_WRITE_ROLE}" "innbucks-mw-read innbucks-mw-write"
+# THE committed-file half: no committed cell file may name one. The script
+# would refuse it and fail; this fails the change that adds it.
+MW_GRANTS_IN_CELL_FILES=""
+for f in ../cells/*.env; do
+  grants=$( set -a; . "$f" >/dev/null 2>&1; printf '%s' "${BANK_ROLE_GRANTS:-}" )
+  while IFS=$'\t' read -r role _; do
+    if is_middleware_role "$role"; then MW_GRANTS_IN_CELL_FILES+="${f##*/}:${role} "; fi
+  done < <(parse_role_grants "$grants" 2>/dev/null)
+done
+is "no committed cell file grants the middleware's roles" "$MW_GRANTS_IN_CELL_FILES" ""
+
+# ─── provision-cell.sh wiring ────────────────────────────────────────────────
+# The lib cases above prove the sets are right. These prove the script USES
+# them, where a refactor that passed WRITE_PERMS to the write role, or rebuilt
+# 6e's set by hand, or moved 6f back above 6b, would keep every case above
+# green while opening the lock on production. Each check requires a POSITIVE
+# match, so a reworded line fails here rather than passing vacuously: update
+# the check with the line, deliberately.
+printf 'provision-cell.sh wiring\n'
+CELL=provision-cell.sh
+count_lines() { grep -cF -- "$1" "$CELL"; }
+is "the write role is ensured with the opt-in-filtered grants" \
+   "$(grep -F 'ensure_role "$MW_WRITE_ROLE"' "$CELL" | grep -cF '"${WRITE_GRANTS[@]}"')" "1"
+is "no role is ever ensured with the unfiltered WRITE_PERMS" \
+   "$(grep -F 'ensure_role ' "$CELL" | grep -cF 'WRITE_PERMS')" "0"
+is "the grants come from mw_write_grants" \
+   "$(count_lines 'mapfile -t WRITE_GRANTS  < <(mw_write_grants "$MW_DEPOSITS")')" "1"
+is "step 5 revokes from the write role" \
+   "$(count_lines 'api PUT "/v1/roles/${WRITE_ROLE_ID}/permissions" "$(json_flag_map false "${WRITE_REVOKES[@]}")"')" "1"
+is "6e's protected set comes from mw_protected_codes" \
+   "$(count_lines 'mapfile -t PROTECTED_CODES < <(mw_protected_codes "$MW_DEPOSITS")')" "1"
+is "6e checks the flagged codes against that set" \
+   "$(count_lines 'mc_violations "$FLAGGED_CODES" "${PROTECTED_CODES[@]}"')" "1"
+is "6b refuses the middleware's roles" \
+   "$(count_lines 'if is_middleware_role "$role_name"; then')" "1"
+# THE ordering. 6f must read the state the run leaves behind, so no role or
+# user write may come after it (it once ran before 6b, and 6b granted the
+# deposit permission back after 6f had printed LOCKED). The smoke comes after
+# it and writes clients and wallets, never roles or users.
+VERIFY_AT=$(grep -nF 'log "6f/7 verifying the customer-deposit lock' "$CELL" | cut -d: -f1)
+LAST_ROLE_WRITE_AT=$(grep -nE 'api (PUT|POST|DELETE) "/v1/(roles|users)' "$CELL" | tail -1 | cut -d: -f1)
+SMOKE_AT=$(grep -nF 'log "7/7 smoke' "$CELL" | cut -d: -f1)
+is "6f exists, once" "$(count_lines 'log "6f/7 verifying the customer-deposit lock')" "1"
+is "6f comes after every role and user write" \
+   "$( (( ${VERIFY_AT:-0} > ${LAST_ROLE_WRITE_AT:-999999} )) && echo after || echo before)" "after"
+is "6f comes before the smoke" \
+   "$( (( ${VERIFY_AT:-999999} < ${SMOKE_AT:-0} )) && echo before || echo after)" "before"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

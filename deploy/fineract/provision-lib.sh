@@ -2,8 +2,59 @@
 # Pure helpers for provision-cell.sh — no network, no state, no side effects,
 # so provision-selftest.sh can cover them without a cell.
 #
-# Only the parsing and set arithmetic lives here. Anything that talks to
-# Fineract stays in provision-cell.sh, where it is obvious that it does.
+# Only the parsing, the set arithmetic and the sets themselves (the middleware's
+# permission codes and role names) live here. Anything that talks to Fineract
+# stays in provision-cell.sh, where it is obvious that it does.
+
+# ─── The middleware's own roles and permission codes (steps 5, 6b, 6e, 6f) ───
+#
+# The two AppUsers the middleware rides, and their roles, which share the name.
+# These roles belong to this script: their codes are READ_PERMS / WRITE_PERMS
+# below, never a cell file (step 6b refuses a BANK_ROLE_GRANTS entry naming
+# either; see is_middleware_role).
+MW_READ_ROLE=innbucks-mw-read
+MW_WRITE_ROLE=innbucks-mw-write
+
+# Every code is checked against the running build before the roles are written
+# (step 5). Notes on the two non-obvious ones:
+#   * There is NO READ_SAVINGSACCOUNTTRANSACTION permission — the transaction
+#     endpoints validate READ against the SAVINGSACCOUNT resource, so
+#     READ_SAVINGSACCOUNT already covers the reconciliation read-back.
+#   * ACTIVATE_CLIENT is required because the adapter creates clients with
+#     active:true, and Fineract's createClient runs the activate command
+#     inline (ClientWritePlatformServiceJpaRepositoryImpl ->
+#     validateRollbackCommand(activateClient) -> validateHasPermissionTo).
+#
+# WRITE_PERMS is everything the adapter CAN issue. What the write role is
+# actually GRANTED is mw_write_grants below: DEPOSIT_SAVINGSACCOUNT only on a
+# box that opts in to customer deposits. Transfers do not need it: an account
+# transfer is checked against CREATE_ACCOUNTTRANSFER alone, and its two legs
+# run through SavingsAccountDomainService with no further permission check.
+READ_PERMS=(READ_CLIENT READ_SAVINGSACCOUNT READ_ACCOUNTTRANSFER)
+WRITE_PERMS=(CREATE_CLIENT ACTIVATE_CLIENT CREATE_SAVINGSACCOUNT APPROVE_SAVINGSACCOUNT
+             ACTIVATE_SAVINGSACCOUNT DEPOSIT_SAVINGSACCOUNT WITHDRAWAL_SAVINGSACCOUNT
+             CREATE_ACCOUNTTRANSFER)
+
+# is_middleware_role NAME — succeeds when NAME is one of the middleware's own
+# roles (whitespace-trimmed, case-insensitive), fails otherwise.
+#
+# Step 6b grants codes to roles a cell file names, and a cell file is shared by
+# every box of its market. Let it name innbucks-mw-write and the committed file
+# can hand production's middleware DEPOSIT_SAVINGSACCOUNT (or ALL_FUNCTIONS),
+# reopening the customer-deposit lock that the per-box opt-in exists to keep
+# shut, and widen the least-privilege set the code defines. So 6b refuses such
+# an entry outright and the run fails. Case-insensitive on purpose: refusing a
+# near-identical name costs nothing, and admitting one could cost the lock.
+# A predicate: call it as a condition (if, &&), never bare under set -e.
+is_middleware_role() {
+  local name="${1-}" r
+  name="${name#"${name%%[![:space:]]*}"}"; name="${name%"${name##*[![:space:]]}"}"
+  [[ -n "$name" ]] || return 1
+  for r in "$MW_READ_ROLE" "$MW_WRITE_ROLE"; do
+    [[ "${name,,}" == "${r,,}" ]] && return 0
+  done
+  return 1
+}
 
 # split_list SEP STRING — one item per line, whitespace-trimmed, blanks dropped.
 # Used for the '|'- and ','-separated policy lists in a cell file, where a
@@ -156,7 +207,7 @@ checker_gaps() {
   return 0
 }
 
-# ─── Customer deposits: the core-side lock (steps 5, 6a and 7) ───────────────
+# ─── Customer deposits: the core-side lock (steps 5, 6f and 7) ───────────────
 #
 # POST /transactions/deposit is an UNFUNDED cash-in: any signed-in customer
 # credits their own wallet from nothing. The middleware refuses it unless its
@@ -204,6 +255,24 @@ write_role_grants() {
     printf '%s\n' "$code"
   done
   return 0
+}
+
+# mw_write_grants OPT_IN — what step 5 GRANTS the middleware's write role:
+# WRITE_PERMS through write_role_grants. provision-cell.sh takes the list from
+# here and nowhere else, so the selftest covers what the script actually grants,
+# not a copy of it.
+mw_write_grants() {
+  write_role_grants "${1:-0}" "${WRITE_PERMS[@]}"
+}
+
+# mw_protected_codes OPT_IN — what step 6e keeps off the maker-checker task
+# list: the read role's codes, then the write role's GRANTS. Derived, never a
+# copied list, so a code added to READ_PERMS / WRITE_PERMS is protected with no
+# other change, and DEPOSIT_SAVINGSACCOUNT is protected exactly where the
+# middleware can issue it.
+mw_protected_codes() {
+  printf '%s\n' "${READ_PERMS[@]}"
+  mw_write_grants "${1:-0}"
 }
 
 # write_role_revokes OPT_IN — the codes to actively REMOVE from the write role:

@@ -149,7 +149,9 @@ stripping a permission an operator added deliberately is worse than leaving one
 behind. See `deploy/cells/cell.example.env` for what each key means. **The one
 exception is the middleware's own write role**, which loses
 `DEPOSIT_SAVINGSACCOUNT` on every box that has not opted in to customer
-deposits (see "Customer deposits at the core" below).
+deposits (see "Customer deposits at the core" below). And the cell file can
+grant the middleware's own two roles nothing at all: their codes are set by the
+script alone.
 
 The block below is the equivalent done by hand, and still the right shape for a
 first stand-up where you are generating the passwords as you go:
@@ -228,15 +230,28 @@ with `403 error.msg.not.authorized` whatever the middleware's flag says.
   ```sh
   echo "MIDDLEWARE_CUSTOMER_DEPOSITS=1" >> deploy/fineract/.env   # STAGING ONLY
   ```
-- **Step 6a proves it from what Fineract will enforce**, not from what step 5
+- **Step 6f proves it from what Fineract will enforce**, not from what step 5
   asked for: it reads every role the user `innbucks-mw-write` holds and looks
   for `DEPOSIT_SAVINGSACCOUNT` or `ALL_FUNCTIONS` (which stands in for every
   code). It prints `LOCKED` (no opt-in) or `ON` (opted in). A role someone added
-  to the user in the console, or a revoke that maker-checker parked (a 200 that
-  changed nothing), is reported as `deposit lock OPEN`. The script never removes
-  a role the bank assigned: take that role off the user in the console and
-  re-run. Problems are collected rather than fatal on the spot, so 6b–6e (the
-  maker-checker assertion above all) still run, and **the run then fails**.
+  to the user in the console, a bank role that 6b widened while the user holds
+  it, or a revoke that maker-checker parked (a 200 that changed nothing), is
+  reported as `deposit lock OPEN`. The script never removes a role the bank
+  assigned: take that role off the user in the console and re-run. **It runs
+  after every step that writes a role** (5 and 6b), so it reads the state the
+  run leaves behind; `provision-selftest.sh` fails if a role or user write is
+  ever placed after it. Problems here and in step 5's revoke are collected
+  rather than fatal on the spot, so every other step still runs (6e's
+  maker-checker assertion above all), and **the run then fails**.
+- **A cell file cannot grant the middleware's roles.** Step 6b refuses any
+  `BANK_ROLE_GRANTS` entry naming `innbucks-mw-read` or `innbucks-mw-write`, in
+  any letter case: nothing of the entry is applied, and the run fails at the end
+  until the line is removed. Their codes are the script's (`READ_PERMS` /
+  `WRITE_PERMS` in `provision-lib.sh`). Before this, step 6a ran ahead of 6b, so
+  `innbucks-mw-write=DEPOSIT_SAVINGSACCOUNT` in `cell.zw.env` (the file
+  production sources too) re-granted the code step 5 had just revoked, the run
+  printed `LOCKED` and exited 0, and it did so on every re-run. The selftest also
+  fails on any committed cell file that names either role.
 - **`RUN_SMOKE=1` without the opt-in** does not post the 1.00 deposit. It sends
   a **zero-amount** deposit as `innbucks-mw-write` and requires the core to
   refuse it with `403 error.msg.not.authorized`: the lock, proved end to end
@@ -252,7 +267,7 @@ with `403 error.msg.not.authorized` whatever the middleware's flag says.
 
 **Re-provisioning an existing cell** (for example production after this change,
 with nothing new in its `.env`) revokes `DEPOSIT_SAVINGSACCOUNT` from
-`innbucks-mw-write` on that run, and 6a must print `LOCKED`. Nothing else
+`innbucks-mw-write` on that run, and 6f must print `LOCKED`. Nothing else
 changes: transfers need only `CREATE_ACCOUNTTRANSFER`, withdrawals keep
 `WITHDRAWAL_SAVINGSACCOUNT`, registration keeps its codes, and teller deposits
 run under the bank's own roles. **On staging, add the opt-in line before
@@ -470,13 +485,15 @@ movement failed.
 ### Maker-checker is provisioned, not hand-configured
 
 `provision-cell.sh` steps 6b–6e apply the bank's operational policy from the
-cell file, in the one order that is safe:
+cell file, in the one order that is safe, and 6f then checks what they left:
 
 1. **6b** grant the bank's operational roles (`BANK_ROLE_GRANTS`) — the role
    must ALREADY EXIST (roles belong to the bank; a name matching nothing is
    refused, with the closest existing names printed), and every code is checked
    against the running build first, so a typo warns loudly instead of silently
-   producing a role that authenticates fine and is refused everywhere.
+   producing a role that authenticates fine and is refused everywhere. The
+   middleware's own two roles are never the bank's: an entry naming either is
+   refused and fails the run (see "Customer deposits at the core").
 
    **Get the role names from the cell, never from a test script.** 6b used to
    create a missing role, and on the ZW cell that turned three near-miss names
@@ -496,11 +513,14 @@ cell file, in the one order that is safe:
 4. **6e** flag the bank's maker-checker tasks (`MAKER_CHECKER_TASKS`), then
    **assert the middleware's own permission codes are NOT flagged**, then
    optionally flip the global switch (`ENABLE_MAKER_CHECKER`).
+5. **6f** verify the customer-deposit lock on what the steps above left behind
+   (not configurable; see "Customer deposits at the core").
 
 **Step 6e's assertion is not configurable and runs on every provision.** It is
-derived from what step 5 actually grants (`READ_PERMS` plus the write role's
-grant list) rather than a copied list, so adding a permission to the middleware
-protects it automatically. `DEPOSIT_SAVINGSACCOUNT` is therefore protected only
+derived from what step 5 actually grants (`mw_protected_codes` in
+`provision-lib.sh`: `READ_PERMS` plus the write role's grant list) rather than a
+copied list, so adding a permission to the middleware protects it
+automatically. `DEPOSIT_SAVINGSACCOUNT` is therefore protected only
 on a box opted in to customer deposits; elsewhere it is the bank's code and may
 be dual-controlled. If it finds one flagged it unflags it and says so.
 
@@ -545,13 +565,18 @@ sits in the `special` grouping (`:62-64`). So the three `READ_PERMS` in the
 assertion are structurally safe and only the write codes can ever trip it.
 
 The parsing and set arithmetic behind 6b/6e, and behind the customer-deposit
-lock (what step 5 grants and revokes, what 6a counts as deposit-capable, how
-the smoke reads its probe, and that no committed cell file opts in), live in
-`provision-lib.sh` and are covered by `./provision-selftest.sh` (no cell, no
-network). Run it after
-touching either — a false negative in the violation check is the difference
-between a working customer rail and every deposit parking for an approver who
-does not exist.
+lock (what step 5 grants and revokes, which roles 6b refuses, what 6f counts as
+deposit-capable, how the smoke reads its probe, and that no committed cell file
+opts in or names a middleware role), live in `provision-lib.sh` and are covered
+by `./provision-selftest.sh` (no cell, no network). The selftest also checks the
+script's WIRING, which the lib cases cannot see: that the write role is given
+the opt-in-filtered grants, that step 5 revokes, that 6e's set and 6b's refusal
+come from the lib, and that 6f follows every role and user write. Each of those
+checks needs a positive match, so rewording one of those lines fails the
+selftest until the check is updated with it. Run it after touching any of the
+three files — a false negative in the violation check is the difference between
+a working customer rail and every deposit parking for an approver who does not
+exist.
 
 **The script runs under `set -euo pipefail`, so any helper that can legitimately
 "find nothing" must be written to succeed anyway.** A `grep … | head -N | …`
@@ -911,7 +936,7 @@ curl -s https://<host>/middleware/v3/api-docs | jq '.servers'
    - **Production** (both unset): `POST /transactions/deposit` must answer
      **403 `deposit_disabled`**, and that refusal is itself the check: it
      proves the go-live posture of the middleware, as `provision-cell.sh`
-     step 6a's `LOCKED` (and its smoke's refused zero-amount probe) proves the
+     step 6f's `LOCKED` (and its smoke's refused zero-amount probe) proves the
      core's. Fund the wallet with a teller deposit in Fineract instead. With
      `FINERACT_CORE_EVENTS_TOKEN` provisioned, that also exercises the
      core-event alert (the customer gets the SMS).
@@ -943,5 +968,5 @@ is set — login before that is supposed to fail.
   break-glass only.
 - The write AppUser holds `DEPOSIT_SAVINGSACCOUNT` only on a box provisioned
   with `MIDDLEWARE_CUSTOMER_DEPOSITS=1` (staging). Production never sets it,
-  and `provision-cell.sh` step 6a must print `LOCKED` there.
+  and `provision-cell.sh` step 6f must print `LOCKED` there.
 - The image is pinned + scanned + attested; upgrades are deliberate tags.

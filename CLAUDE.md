@@ -181,13 +181,18 @@ Build: `./mvnw verify` at the root. Run locally:
   that a copy from staging would carry to production. Its opt-in is per box,
   never in a cell file: `cell.zw.env` is shared by staging and production, and
   the script refuses to run while any `deploy/cells/*.env` assigns it, or on
-  any value but `1`/`0`/unset. Step 6a proves the lock from what Fineract will
-  enforce (every role the user holds; `ALL_FUNCTIONS` counts), the smoke proves
-  it with a zero-amount deposit the core must refuse, and a lock that is not as
-  asked FAILS the run after 6e has still run. With (1) on and (2) closed the app
-  gets `502 core_banking_unavailable` and a `FAILED`/`core_auth_failed` ledger
-  row, never `UNKNOWN` (see the `FineractErrorMapper` note in slice 3a). Staging
-  opens both; production neither. Selftest cases in `provision-selftest.sh`.
+  any value but `1`/`0`/unset. A cell file cannot reach the lock another way
+  either: step 6b refuses any `BANK_ROLE_GRANTS` entry naming
+  `innbucks-mw-read`/`-write` (the run fails until it is removed). Step 6f
+  proves the lock from what Fineract will enforce (every role the user holds;
+  `ALL_FUNCTIONS` counts), and runs LAST of the role steps: it used to run
+  before 6b, which could grant the code back after it had printed `LOCKED`. The
+  smoke proves it with a zero-amount deposit the core must refuse, and a lock
+  that is not as asked FAILS the run after every other step has run. With (1)
+  on and (2) closed the app gets `502 core_banking_unavailable` and a
+  `FAILED`/`core_auth_failed` ledger row, never `UNKNOWN` (see the
+  `FineractErrorMapper` note in slice 3a). Staging opens both; production
+  neither. Selftest cases in `provision-selftest.sh`.
   **The switch, in detail.** Every customer token carries `customer:write`, and
   the endpoint books a plain savings deposit (the cell's non-cash wallet payment
   type) of any amount into the caller's own wallet: no source of funds, no
@@ -478,7 +483,7 @@ reason to copy the rule rather than fork it.
   Staging's `.env` carries `TRANSACTIONS_DEPOSIT_ENABLED=true` AND its
   `deploy/fineract/.env` carries `MIDDLEWARE_CUSTOMER_DEPOSITS=1`; production's
   carry neither, its boot must log `Customer deposits: OFF`, and its
-  `provision-cell.sh` step 6a must print `LOCKED`. On a cell rolling to the
+  `provision-cell.sh` step 6f must print `LOCKED`. On a cell rolling to the
   first image with the switch, add the staging line BEFORE the roll, or staging
   stops taking deposits on that roll; likewise add the opt-in before
   re-provisioning staging, because a run without it revokes the permission.
@@ -890,7 +895,7 @@ commands, with the exact bytes that were running before. Full procedure
    thing that keeps the customer rail moving. Ordering inside 6e is the rest of
    the safety argument: flag the bank's tasks → assert → only then flip the
    global switch. Parsing + set arithmetic are in `provision-lib.sh`, covered
-   by `provision-selftest.sh` (no cell, no network, 95 cases); the
+   by `provision-selftest.sh` (no cell, no network, 123 cases); the
    `_CHECKER`-sibling case there is why the check is `grep -xF` and never a
    substring match — every protected code has a `<CODE>_CHECKER` sibling whose
    flagging is normal and harmless. **The script runs `set -euo pipefail`, so a
@@ -914,7 +919,17 @@ commands, with the exact bytes that were running before. Full procedure
    opt-in differs between two boxes of ONE market, so it is a per-box value
    (`deploy/fineract/.env`), and the script refuses a cell file that sets it
    (Security invariants). It is also the one revoke the script makes, and only
-   on the middleware's own role. **A selftest of `set -e` behaviour must not
+   on the middleware's own role. **The middleware's two roles are code, not
+   policy**: their codes (`READ_PERMS`/`WRITE_PERMS`) and names live in
+   `provision-lib.sh`, 6b refuses a cell-file grant to either and fails the run,
+   and the selftest fails on a committed one. **A check must read the state the
+   run leaves behind**: the deposit-lock verification (now 6f) once ran right
+   after step 5, so a later 6b grant reopened the lock after it had printed
+   `LOCKED`, exit 0. Lib cases cannot see that kind of bug, so the selftest also
+   pins the script's WIRING by grep: which list reaches `ensure_role`, that the
+   revoke is sent, that 6e's set and 6b's refusal come from the lib, and that no
+   role or user write follows 6f. Each check needs a positive match, so a
+   reworded line fails until its check is updated, never passes vacuously. **A selftest of `set -e` behaviour must not
    put the subshell on the left of `||`**: bash suspends errexit for anything
    whose status `||`, `&&` or `if` tests, so `$( (set -e; …) || echo stopped )`
    can never stop and the case passes vacuously. Capture the output and test
