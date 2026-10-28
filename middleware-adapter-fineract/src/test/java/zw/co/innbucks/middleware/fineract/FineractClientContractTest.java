@@ -237,15 +237,34 @@ class FineractClientContractTest {
         wireMock.verify(1, postRequestedFor(urlPathEqualTo("/v1/savingsaccounts/external-id/acct-1/transactions")));
     }
 
+    /**
+     * A READ denial has its own wording, also read out of the fork: the read
+     * endpoints call {@code AppUser.validateHasReadPermission(resourceType)}
+     * (here {@code ClientsApiResource.retrieveClient}, resource "client"),
+     * whose message is "User has no authority to READ " + resource + "s" — not
+     * the command path's "to: CODE" — through the same
+     * {@code NoAuthorizationExceptionMapper} envelope as above. So the code is
+     * the only thing the two denials share, which is why the mapper keys on it.
+     */
+    private static final String READ_PERMISSION_DENIED_BODY = """
+            {"developerMessage":"The user associated with credentials passed on this request does not have sufficient privileges to perform this action.",
+             "httpStatusCode":"403",
+             "defaultUserMessage":"Insufficient privileges to perform this action.",
+             "userMessageGlobalisationCode":"error.msg.not.authorized",
+             "errors":[{"developerMessage":"User has no authority to READ clients",
+                        "defaultUserMessage":"User has no authority to READ clients",
+                        "userMessageGlobalisationCode":"error.msg.not.authorized",
+                        "parameterName":"id","args":[]}]}
+            """;
+
     @Test
     void aPermissionTheReadUserLacksIsAnAuthFailureToo() {
         wireMock.stubFor(get(urlEqualTo("/v1/clients/external-id/x"))
-                .willReturn(aResponse().withStatus(403).withBody(
-                        PERMISSION_DENIED_BODY.replace("DEPOSIT_SAVINGSACCOUNT", "READ_CLIENT"))));
+                .willReturn(aResponse().withStatus(403).withBody(READ_PERMISSION_DENIED_BODY)));
 
         assertThatThrownBy(() -> client.findClientByExternalId("x"))
                 .isInstanceOf(CoreAuthException.class)
-                .hasMessageContaining("READ_CLIENT");
+                .hasMessageContaining("error.msg.not.authorized");
     }
 
     @Test
