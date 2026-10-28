@@ -41,6 +41,7 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -298,6 +299,76 @@ class AccountBlockSessionGuardTest {
         assertThat(count("timed_out")).isEqualTo(1.0);
         assertThat(count("busy")).isEqualTo(1.0);
         verifyNoInteractions(refreshTokenService, audit);
+    }
+
+    @Test
+    void backToBackRefreshesOnOneSlotAreNeverRefusedAsBusy() {
+        // busy must mean "every slot holds an unfinished read", nothing else.
+        // A fixed pool over a SynchronousQueue also refused the read made right
+        // after the previous one finished — its thread had not yet gone back to
+        // waiting — so a few percent of these skipped the block check with the
+        // slot free. 500 in a row passing that by luck is ~1e-11.
+        AccountBlockSessionGuard oneSlot = guardWith(port,
+                new RefreshBlockCheckProperties(Duration.ofSeconds(5), 1));
+        walletIs(AccountRestriction.NONE);
+
+        for (int i = 0; i < 500; i++) {
+            oneSlot.requireSessionAllowed(customer, DEVICE);
+        }
+
+        assertThat(count("busy")).isZero();
+        assertThat(count("none")).isEqualTo(500.0);
+        verify(port, times(500)).listDepositAccountRefs(any());
+    }
+
+    @Test
+    void aFailedReadGivesItsSlotBackBeforeTheRefreshMovesOn() {
+        // The slot is returned by the read itself, before its future
+        // completes: the refresh that saw the failure already finds it free.
+        AccountBlockSessionGuard oneSlot = guardWith(port,
+                new RefreshBlockCheckProperties(Duration.ofSeconds(5), 1));
+        when(port.listDepositAccountRefs(any()))
+                .thenThrow(new CoreTransientException(CoreProvider.FINERACT, "Fineract unreachable", null))
+                .thenReturn(List.of(account(customer.getId() + ":wallet", AccountRestriction.NONE)));
+
+        oneSlot.requireSessionAllowed(customer, DEVICE);
+        assertThat(oneSlot.freeReadSlots()).isEqualTo(1);
+        oneSlot.requireSessionAllowed(customer, DEVICE);
+
+        assertThat(count("read_failed")).isEqualTo(1.0);
+        assertThat(count("none")).isEqualTo(1.0);
+        assertThat(count("busy")).isZero();
+    }
+
+    @Test
+    void anAbandonedReadKeepsItsSlotUntilItFinishesAndThenFreesIt() throws Exception {
+        // Abandoned is not cancelled: the read still loads the core, so it
+        // still counts against the bound — and gives the slot back once the
+        // core answers, so a stall that clears ends the busy period by itself.
+        AccountBlockSessionGuard oneSlot = guardWith(port,
+                new RefreshBlockCheckProperties(Duration.ofMillis(100), 1));
+        CountDownLatch finished = new CountDownLatch(1);
+        coreHangs(new AtomicBoolean(), finished);
+
+        oneSlot.requireSessionAllowed(customer, DEVICE);
+        assertThat(count("timed_out")).isEqualTo(1.0);
+        assertThat(oneSlot.freeReadSlots()).isZero();
+
+        release.countDown();
+        assertThat(finished.await(5, TimeUnit.SECONDS)).isTrue();
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (oneSlot.freeReadSlots() == 0 && System.nanoTime() < deadline) {
+            Thread.onSpinWait();
+        }
+        assertThat(oneSlot.freeReadSlots()).isEqualTo(1);
+
+        doReturn(List.of(account(customer.getId() + ":wallet", AccountRestriction.NONE)))
+                .when(port).listDepositAccountRefs(any());
+        oneSlot.requireSessionAllowed(customer, DEVICE);
+
+        assertThat(count("none")).isEqualTo(1.0);
+        assertThat(count("busy")).isZero();
+        verify(port, times(2)).listDepositAccountRefs(any());
     }
 
     @Test

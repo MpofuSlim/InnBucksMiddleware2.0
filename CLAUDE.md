@@ -295,16 +295,25 @@ Build: `./mvnw verify` at the root. Run locally:
   response was lost to a slow core (it never got the successor) would present
   the old token again and be treated as a thief — family revoked,
   `REFRESH_REPLAY_DETECTED` — i.e. a Fineract slowdown would sign customers
-  out. **Latency is bounded as well as errors**: the read runs on the guard's
-  own pool (`innbucks.auth.refresh-block-check.max-concurrent-reads`, 8, NO
-  queue) and the refresh waits at most `…timeout` (2s) — far under a mobile
-  client's HTTP timeout. Without it, one hung listing (the adapter retries a
-  10 s read three times, and the breaker opens only after calls FINISH) held
-  each refresh's Tomcat thread ~30 s, enough to starve `/auth/login` and every
-  other endpoint during a Fineract stall. A read past the timeout is ABANDONED,
-  never interrupted (an interrupt would count a merely-slow call as a failure
-  on the breaker payments share); with every slot busy a refresh skips the
-  check at once, so the extra load on a struggling core is bounded by the pool.
+  out. **Latency is bounded as well as errors**: the read runs off the request
+  thread, at most `innbucks.auth.refresh-block-check.max-concurrent-reads` (8)
+  at once and NEVER queued, and the refresh waits at most `…timeout` (2s) —
+  far under a mobile client's HTTP timeout. Without it, one hung listing (the
+  adapter retries a 10 s read three times, and the breaker opens only after
+  calls FINISH) held each refresh's Tomcat thread ~30 s, enough to starve
+  `/auth/login` and every other endpoint during a Fineract stall. A read past
+  the timeout is ABANDONED, never interrupted (an interrupt would count a
+  merely-slow call as a failure on the breaker payments share) and never
+  cancelled (it keeps its slot until the core answers); with every slot busy
+  a refresh skips the check at once, so the extra load on a struggling core
+  is bounded by the slots. **A slot is a `Semaphore` permit that the read
+  gives back as its own last act**, before its future completes, over a
+  thread pool that never refuses a task — so `busy` means exactly "every slot
+  holds an unfinished read". Never bound it with a fixed pool over a
+  `SynchronousQueue` + `AbortPolicy`: that pool also refuses the read made just
+  after the previous one FINISHED (its thread is not yet back waiting), which
+  skipped the block check with the slot free on a few percent of back-to-back
+  refreshes and made the MDC test flaky in CI.
   The remaining exposure is the double submit every single-use rotation has: a
   client whose own timeout is shorter than the budget, and which retries the
   same token while the first request is still running, is a replay — as
@@ -324,7 +333,9 @@ Build: `./mvnw verify` at the root. Run locally:
   of read access until that session's first refresh; and an access token
   already issued lives out its TTL. Pinned by `AccountBlockSessionGuardTest`
   (incl. no transaction during the core read, one around the revoke, the
-  bounded wait, the busy pool, no interrupt, MDC carried),
+  bounded wait, busy only when every slot holds an unfinished read — 500
+  back-to-back refreshes on one slot, never one `busy` — no interrupt, MDC
+  carried),
   `RefreshTokenServiceTest` (the liveness read spends and revokes nothing),
   `RefreshAccountRestrictedResponseTest` (the order) and
   `RefreshAccountBlockIntegrationTest` (the token is unspent while the core is

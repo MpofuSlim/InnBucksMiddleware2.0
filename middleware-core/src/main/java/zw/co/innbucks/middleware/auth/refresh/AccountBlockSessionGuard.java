@@ -28,6 +28,7 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -75,9 +76,9 @@ import java.util.concurrent.atomic.AtomicInteger;
  * Waited for on the request thread, every refresh in that window would hold a
  * Tomcat worker for half a minute — a Fineract stall would then starve
  * {@code /auth/login} and every other endpoint, where before refresh never
- * touched the core at all. So the read runs on a small pool of its own
- * ({@code max-concurrent-reads}, no queue) and the refresh waits at most the
- * timeout:
+ * touched the core at all. So the read runs off the request thread, at most
+ * {@code max-concurrent-reads} at once and never queued, and the refresh waits
+ * at most the timeout:
  * <ul>
  *   <li>A read past the timeout is ABANDONED, not interrupted. It finishes on
  *       its own inside the adapter's timeouts and its answer is discarded.
@@ -86,7 +87,20 @@ import java.util.concurrent.atomic.AtomicInteger;
  *       Fineract could open the breaker on the money path because of refreshes.</li>
  *   <li>With every slot busy (a stall), a refresh does not queue: it is let
  *       through at once. So the extra load this check can put on a struggling
- *       core is bounded by the pool, not by the refresh rate.</li>
+ *       core is bounded by the slots, not by the refresh rate.</li>
+ *   <li>A slot is a {@link Semaphore} permit, taken before the read is handed
+ *       to a thread and given back by the read itself as its last act — so it
+ *       is free again BEFORE the waiting refresh wakes, and {@code busy} means
+ *       exactly that every slot holds a read that has not finished. The
+ *       threads come from a pool that never refuses a task (no queue, no
+ *       thread cap); the permits keep it near one thread per slot (a thread
+ *       still winding down from one read can briefly overlap the next). It
+ *       used to be a fixed pool of {@code max-concurrent-reads} threads over a
+ *       {@code SynchronousQueue}, whose "full" also counted a thread that had
+ *       just FINISHED a read but was not yet waiting for the next one: a
+ *       refresh arriving in that gap was refused as {@code busy} with every
+ *       slot free and skipped the block check — a few percent of back-to-back
+ *       refreshes on one slot.</li>
  * </ul>
  *
  * <p><b>Ordering and transactions.</b> {@code LoginController.refresh} calls
@@ -134,7 +148,9 @@ public class AccountBlockSessionGuard implements DisposableBean {
     private final AuditService auditService;
     private final TransactionTemplate revokeTransaction;
     private final Duration readTimeout;
-    private final ThreadPoolExecutor readPool;
+    /** One permit per read allowed in flight; see the class javadoc. */
+    private final Semaphore readSlots;
+    private final ThreadPoolExecutor readThreads;
     private final Map<Outcome, Counter> counters = new EnumMap<>(Outcome.class);
 
     public AccountBlockSessionGuard(ObjectProvider<CoreBankingPort> corePort,
@@ -149,13 +165,15 @@ public class AccountBlockSessionGuard implements DisposableBean {
         this.revokeTransaction = new TransactionTemplate(transactionManager);
         this.readTimeout = properties.timeout();
         int maxConcurrentReads = properties.maxConcurrentReads();
-        // No queue (SynchronousQueue): a read either starts now on a free slot
-        // or is refused, so nothing ever waits behind a hung read. Daemon
-        // threads, so an abandoned read can never hold up a shutdown.
-        this.readPool = new ThreadPoolExecutor(maxConcurrentReads, maxConcurrentReads,
-                30, TimeUnit.SECONDS, new SynchronousQueue<>(), daemonThreads(),
-                new ThreadPoolExecutor.AbortPolicy());
-        this.readPool.allowCoreThreadTimeOut(true);
+        this.readSlots = new Semaphore(maxConcurrentReads);
+        // The permits are the bound; this pool only supplies threads, and
+        // never refuses a task it is handed (SynchronousQueue hands the read
+        // to an idle thread or starts one), so a permitted read always starts
+        // at once and nothing ever waits behind a hung read. Idle threads die
+        // after 30 s. Daemon threads, so an abandoned read can never hold up
+        // a shutdown.
+        this.readThreads = new ThreadPoolExecutor(0, Integer.MAX_VALUE,
+                30, TimeUnit.SECONDS, new SynchronousQueue<>(), daemonThreads());
         for (Outcome outcome : Outcome.values()) {
             counters.put(outcome, Counter.builder("innbucks.auth.refresh.block_check")
                     .description("Session-refresh reads of the customer's account block in the core, by outcome")
@@ -202,10 +220,7 @@ public class AccountBlockSessionGuard implements DisposableBean {
             return Outcome.READ_FAILED;
         }
         CoreCustomerRef ref = new CoreCustomerRef(customer.getCoreExternalId());
-        Future<List<DepositAccountRef>> pending;
-        try {
-            pending = readPool.submit(withCallerMdc(() -> port.listDepositAccountRefs(ref)));
-        } catch (RejectedExecutionException ex) {
+        if (!readSlots.tryAcquire()) {
             // Every slot is held by a read that has not come back: the core is
             // stalling. DEBUG, not WARN — this fires on every refresh for the
             // length of the stall; the busy counter is the signal.
@@ -213,12 +228,21 @@ public class AccountBlockSessionGuard implements DisposableBean {
                     customer.getId());
             return Outcome.BUSY;
         }
+        Future<List<DepositAccountRef>> pending;
+        try {
+            pending = readThreads.submit(holdingSlot(withCallerMdc(() -> port.listDepositAccountRefs(ref))));
+        } catch (RejectedExecutionException ex) {
+            // Only once the pool is shut down (the context is closing).
+            readSlots.release();
+            return Outcome.READ_FAILED;
+        }
         try {
             return assess(pending.get(readTimeout.toMillis(), TimeUnit.MILLISECONDS));
         } catch (TimeoutException ex) {
-            // Abandon, never interrupt: see the class javadoc (the breaker the
-            // payment path shares would count the interruption as a failure).
-            pending.cancel(false);
+            // Abandon, never interrupt (see the class javadoc: the breaker the
+            // payment path shares would count the interruption as a failure),
+            // and never cancel: the read keeps its slot until it finishes, and
+            // a read cancelled before it started would never give its slot back.
             log.warn("Refresh block check for customer={} gave up after {} ms waiting for the core; failing open",
                     customer.getId(), readTimeout.toMillis());
             return Outcome.TIMED_OUT;
@@ -231,8 +255,8 @@ public class AccountBlockSessionGuard implements DisposableBean {
                     customer.getId(), cause.getClass().getSimpleName(), cause.getMessage());
             return Outcome.READ_FAILED;
         } catch (InterruptedException ex) {
+            // The read is abandoned exactly as on a timeout.
             Thread.currentThread().interrupt();
-            pending.cancel(false);
             return Outcome.READ_FAILED;
         } catch (RuntimeException ex) {
             // A bug in assess() or a malformed answer: still never a sign-out.
@@ -264,14 +288,35 @@ public class AccountBlockSessionGuard implements DisposableBean {
         return credits ? Outcome.CREDITS_BLOCKED : Outcome.NONE;
     }
 
-    /** Stops the read pool; an abandoned read still in flight is not waited for. */
+    /** Stops the read threads; an abandoned read still in flight is not waited for. */
     @Override
     public void destroy() {
-        readPool.shutdownNow();
+        readThreads.shutdownNow();
+    }
+
+    /** Free read slots right now; for tests. */
+    int freeReadSlots() {
+        return readSlots.availablePermits();
     }
 
     private void count(Outcome outcome) {
         counters.get(outcome).increment();
+    }
+
+    /**
+     * Gives the read's slot back as the read's own last act — inside the
+     * task, so BEFORE its future completes and the waiting refresh wakes.
+     * Released any later (after the future completes) and a refresh made right
+     * after the previous one finished could still find the slot taken.
+     */
+    private <T> Callable<T> holdingSlot(Callable<T> task) {
+        return () -> {
+            try {
+                return task.call();
+            } finally {
+                readSlots.release();
+            }
+        };
     }
 
     /**
