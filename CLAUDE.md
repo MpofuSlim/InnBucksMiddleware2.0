@@ -159,8 +159,20 @@ Build: `./mvnw verify` at the root. Run locally:
   `OTP_HMAC_SECRET`, `AUDIT_HMAC_SECRET` (+ non-blank `DATASOURCE_PASSWORD`).
   Generate each: `openssl rand -base64 48`. All distinct values.
 * **Low-entropy secrets are HMAC-keyed, never bare-hashed**: OTP codes
-  (`OtpHasher`), national IDs (`NationalIdHasher`). PINs: Argon2id
+  (`OtpHasher`), national IDs (`NationalIdHasher`), and the idempotency
+  request fingerprint (`IdempotencyFingerprinter`), because it covers
+  `/register`'s body, national ID included. PINs: Argon2id
   (`PinHasher`). Refresh tokens: SHA-256 of a high-entropy opaque secret.
+  The fingerprint's key is a SUB-KEY of `NATIONAL_ID_HMAC_KEY`
+  (`HMAC(key, 0xFF ‖ label)`), not a new secret: it protects what that key
+  already protects, and that key is never casually rotated. The 0xFF is the
+  domain separation — UTF-8 never contains it, so no "national ID" a
+  registrant types can make `NationalIdHasher` store the sub-key; a plain-text
+  label could. Rotating `NATIONAL_ID_HMAC_KEY` therefore also re-keys
+  in-flight fingerprints: a same-key retry within the TTL answers 422 (never a
+  second execution) — drain `idempotency_record` (one TTL) first. Stored as
+  `v2:` + base64url (46 chars, fits the VARCHAR(64)); an unprefixed value is
+  the pre-keyed SHA-256 hex and still matches until it expires.
 * **The two Fineract AppUsers are stored at bcrypt cost 6, `mifos` at 10** —
   the same entropy argument, run the other way. Fineract's
   `DaoAuthenticationProvider` has NO verification cache, so `matches()` runs on
@@ -1182,4 +1194,6 @@ runbook; per-customer namespacing of inbound Idempotency-Keys
 (HMAC(customerUuid ‖ key)) before propagation; velocity/amount limit tables;
 **offsite/automated** backup scheduling (the scripts are manual and write to the
 box — copying them off is still an operator step); ShedLock;
-PENDING_VERIFICATION expiry job.
+PENDING_VERIFICATION expiry job; drop `IdempotencyFingerprinter`'s legacy
+(unprefixed SHA-256) match once a full idempotency TTL has passed since the
+keyed fingerprint deployed on every cell.

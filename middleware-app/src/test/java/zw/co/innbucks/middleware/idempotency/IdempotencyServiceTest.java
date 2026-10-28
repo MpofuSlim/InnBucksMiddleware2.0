@@ -23,6 +23,9 @@ class IdempotencyServiceTest {
     @Autowired
     JdbcTemplate jdbcTemplate;
 
+    @Autowired
+    IdempotencyFingerprinter fingerprinter;
+
     @BeforeEach
     void clean() {
         jdbcTemplate.update("TRUNCATE idempotency_record");
@@ -176,8 +179,55 @@ class IdempotencyServiceTest {
         assertThat(replay.status()).isEqualTo(201);
     }
 
-    /** Mirrors IdempotencyService.fingerprint (SHA-256 of Jackson-canonical body). */
+    @Test
+    void theStoredFingerprintIsKeyedNeverTheBareHash() {
+        DummyBody body = new DummyBody("hello", 1);
+
+        idempotencyService.execute("key-8", "POST", "/test", body, DummyResponse.class,
+                () -> new DummyResponse("ok", 42));
+
+        String stored = jdbcTemplate.queryForObject(
+                "SELECT request_fingerprint FROM idempotency_record WHERE idempotency_key = 'key-8'",
+                String.class);
+        assertThat(stored).startsWith("v2:").isEqualTo(fingerprintOf(body));
+        assertThat(stored).isNotEqualTo(legacyFingerprintOf(body));
+    }
+
+    @Test
+    void aRecordWrittenBeforeTheKeyedFingerprintStillReplays() {
+        // A completed row as the previous release wrote it: bare SHA-256 hex.
+        AtomicInteger calls = new AtomicInteger();
+        DummyBody body = new DummyBody("hello", 1);
+        jdbcTemplate.update("""
+                INSERT INTO idempotency_record
+                    (idempotency_key, request_fingerprint, http_method, request_path,
+                     response_status, response_body, created_at, expires_at)
+                VALUES ('key-9', ?, 'POST', '/test', 201, '{"message":"legacy","code":7}',
+                        NOW() - INTERVAL '1 hour', NOW() + INTERVAL '1 hour')
+                """, legacyFingerprintOf(body));
+
+        var replay = idempotencyService.execute("key-9", "POST", "/test", body, DummyResponse.class,
+                201, () -> {
+                    calls.incrementAndGet();
+                    return new DummyResponse("should-not-run", 99);
+                });
+
+        assertThat(calls.get()).isZero();
+        assertThat(replay.replayed()).isTrue();
+        assertThat(replay.body().message()).isEqualTo("legacy");
+        assertThatThrownBy(() ->
+                idempotencyService.execute("key-9", "POST", "/test", new DummyBody("hello", 2),
+                        DummyResponse.class, () -> new DummyResponse("different", 99)))
+                .isInstanceOf(IdempotencyConflictException.class);
+    }
+
+    /** What IdempotencyService stores for a new claim: the keyed (v2) fingerprint. */
     private String fingerprintOf(DummyBody body) {
+        return fingerprinter.fingerprint(body).value();
+    }
+
+    /** The pre-keyed format (bare SHA-256 hex of the Jackson-canonical body). */
+    private String legacyFingerprintOf(DummyBody body) {
         try {
             var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
             var digest = java.security.MessageDigest.getInstance("SHA-256");
