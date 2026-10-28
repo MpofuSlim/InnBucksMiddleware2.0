@@ -146,7 +146,10 @@ set -a; source .env;                 set +a     # secrets, gitignored
 Everything the script does is idempotent and **additive** — a re-run re-asserts
 the cell file's intent and never revokes a grant the file does not name, because
 stripping a permission an operator added deliberately is worse than leaving one
-behind. See `deploy/cells/cell.example.env` for what each key means.
+behind. See `deploy/cells/cell.example.env` for what each key means. **The one
+exception is the middleware's own write role**, which loses
+`DEPOSIT_SAVINGSACCOUNT` on every box that has not opted in to customer
+deposits (see "Customer deposits at the core" below).
 
 The block below is the equivalent done by hand, and still the right shape for a
 first stand-up where you are generating the passwords as you go:
@@ -168,6 +171,9 @@ export CORE_EVENTS_TOKEN="$(openssl rand -hex 32)"
 # are ZIMBABWE-shaped — set these per market, or to '' to skip. See below.
 # export CLIENT_CONSTITUTIONS="Sole Trader|Partnership|…"
 # export CLIENT_BUSINESS_LINES="Agriculture|Mining|…"
+# STAGING ONLY: let the middleware's write user post customer deposits. Never on
+# production; see "Customer deposits at the core" below.
+# export MIDDLEWARE_CUSTOMER_DEPOSITS=1
 RUN_SMOKE=1 ./provision-cell.sh
 ```
 
@@ -184,9 +190,77 @@ zero-interest wallet savings product, creates the two least-privilege roles +
 AppUsers (verifying every permission code exists on this build first — never
 `ALL_FUNCTIONS`), and with `RUN_SMOKE=1` drives the adapter's exact call
 sequence (client → wallet create/approve/activate → deposit → read-back by
-external id) using the new middleware credentials. It prints the values the
+external id) using the new middleware credentials. Without the customer-deposit
+opt-in, the deposit is a zero-amount probe the core must refuse, and the
+read-back reads the wallet (see "Customer deposits at the core" above). It
+prints the values the
 middleware's `.env` needs. **Store the rotated admin password in your
 password manager** — it is the break-glass credential for this cell.
+
+### Customer deposits at the core: staging opts in, production never
+
+`POST /transactions/deposit` is an unfunded cash-in: any signed-in customer
+credits their own wallet with any amount, from nothing. Two independent locks
+keep it shut, and **both** must be opened for it to work:
+
+| lock | where | production | staging |
+|---|---|---|---|
+| the middleware's switch | `TRANSACTIONS_DEPOSIT_ENABLED` in the **middleware's** `.env` (section 5) | unset | `true` |
+| the core's permission | `MIDDLEWARE_CUSTOMER_DEPOSITS` in **`deploy/fineract/.env`**, read by `provision-cell.sh` | unset | `1` |
+
+The second lock exists because the first one is a line in a gitignored file:
+copied from staging at go-live, it would reopen money creation with no review
+and no record, while the middleware's Fineract user still held the permission.
+Now, unless the box says `MIDDLEWARE_CUSTOMER_DEPOSITS=1`, step 5 grants
+`innbucks-mw-write` every write code **except** `DEPOSIT_SAVINGSACCOUNT` and
+then **revokes** it (`PUT /v1/roles/{id}/permissions` with `false`, which
+Fineract applies as a removal). Fineract then refuses the middleware's deposits
+with `403 error.msg.not.authorized` whatever the middleware's flag says.
+
+- **Why `deploy/fineract/.env` and not the cell file.** `cell.zw.env` is shared
+  by every ZW box, staging and production alike, so a committed switch would be
+  on for both or off for both. The opt-in is per box, like the secrets, in the
+  file the canonical run sources **after** the cell file. The script **refuses
+  to run** while any `deploy/cells/*.env` assigns it, and refuses any value but
+  `1`, `0` or unset (`true` and `yes` stop the run rather than being guessed).
+  Staging adds the line once:
+
+  ```sh
+  echo "MIDDLEWARE_CUSTOMER_DEPOSITS=1" >> deploy/fineract/.env   # STAGING ONLY
+  ```
+- **Step 6a proves it from what Fineract will enforce**, not from what step 5
+  asked for: it reads every role the user `innbucks-mw-write` holds and looks
+  for `DEPOSIT_SAVINGSACCOUNT` or `ALL_FUNCTIONS` (which stands in for every
+  code). It prints `LOCKED` (no opt-in) or `ON` (opted in). A role someone added
+  to the user in the console, or a revoke that maker-checker parked (a 200 that
+  changed nothing), is reported as `deposit lock OPEN`. The script never removes
+  a role the bank assigned: take that role off the user in the console and
+  re-run. Problems are collected rather than fatal on the spot, so 6b–6e (the
+  maker-checker assertion above all) still run, and **the run then fails**.
+- **`RUN_SMOKE=1` without the opt-in** does not post the 1.00 deposit. It sends
+  a **zero-amount** deposit as `innbucks-mw-write` and requires the core to
+  refuse it with `403 error.msg.not.authorized`: the lock, proved end to end
+  with the real credential. Zero cannot move money even if the lock were open
+  (Fineract's validator refuses it), so a `400` there means the permission
+  check let the command through: `deposit lock OPEN`, and the run fails. The
+  read credential is still proven, by reading the probe wallet back. There is
+  no transfer step in this smoke; the end-to-end smoke in section 5 funds its
+  transfer per cell (a teller deposit on production).
+- **Step 6e protects what step 5 grants.** On a box without the opt-in,
+  `DEPOSIT_SAVINGSACCOUNT` is not a middleware code, so 6e leaves it alone: the
+  bank may put teller deposits under dual control there.
+
+**Re-provisioning an existing cell** (for example production after this change,
+with nothing new in its `.env`) revokes `DEPOSIT_SAVINGSACCOUNT` from
+`innbucks-mw-write` on that run, and 6a must print `LOCKED`. Nothing else
+changes: transfers need only `CREATE_ACCOUNTTRANSFER`, withdrawals keep
+`WITHDRAWAL_SAVINGSACCOUNT`, registration keeps its codes, and teller deposits
+run under the bank's own roles. **On staging, add the opt-in line before
+re-running**, or the run closes staging's deposits at the core. If that happens
+anyway, the app sees `502 core_banking_unavailable` (not a 422 naming the
+permission) and the ledger row is `FAILED` with `core_auth_failed`, never
+parked `UNKNOWN`; the middleware log names the missing permission. Add the
+line and re-run.
 
 ### Client Constitution / Main Business Line code values (step 4d)
 
@@ -371,6 +445,11 @@ docker compose exec -T fineract-db psql -U fineract -d fineract_default \
 docker compose restart fineract
 ```
 
+On a box **without** the customer-deposit opt-in (production), leave
+`'DEPOSIT_SAVINGSACCOUNT'` out of the UPDATE: the middleware cannot issue it
+there, so its flag is the bank's dual control on teller deposits, not a rail
+problem. Step 6e makes the same distinction.
+
 The column is `can_maker_checker` — not `is_maker_checker`, which is the name
 the API and the docs suggest. Note also that `CREATE_CLIENT` alone is not
 enough to check: creating a client with `active:true` runs the activate
@@ -419,9 +498,11 @@ cell file, in the one order that is safe:
    optionally flip the global switch (`ENABLE_MAKER_CHECKER`).
 
 **Step 6e's assertion is not configurable and runs on every provision.** It is
-derived from the script's own `READ_PERMS`/`WRITE_PERMS` arrays rather than a
-copied list, so adding a permission to the middleware protects it automatically.
-If it finds one flagged it unflags it and says so.
+derived from what step 5 actually grants (`READ_PERMS` plus the write role's
+grant list) rather than a copied list, so adding a permission to the middleware
+protects it automatically. `DEPOSIT_SAVINGSACCOUNT` is therefore protected only
+on a box opted in to customer deposits; elsewhere it is the bank's code and may
+be dual-controlled. If it finds one flagged it unflags it and says so.
 
 > [!IMPORTANT]
 > **Apache Fineract SEEDS three of the middleware's own write permissions as
@@ -463,8 +544,11 @@ READ permissions cannot be flagged at all: the same write service throws
 sits in the `special` grouping (`:62-64`). So the three `READ_PERMS` in the
 assertion are structurally safe and only the write codes can ever trip it.
 
-The parsing and set arithmetic behind 6b/6e live in `provision-lib.sh` and are
-covered by `./provision-selftest.sh` (no cell, no network). Run it after
+The parsing and set arithmetic behind 6b/6e, and behind the customer-deposit
+lock (what step 5 grants and revokes, what 6a counts as deposit-capable, how
+the smoke reads its probe, and that no committed cell file opts in), live in
+`provision-lib.sh` and are covered by `./provision-selftest.sh` (no cell, no
+network). Run it after
 touching either — a false negative in the violation check is the difference
 between a working customer rail and every deposit parking for an approver who
 does not exist.
@@ -498,7 +582,8 @@ needed, and each alone looks like "maker-checker is broken":
    why "Configure Maker Checker Tasks" alone changes nothing.
 2. **Flag the tasks** (`PUT /v1/permissions` `{"permissions":{"CREATE_JOURNALENTRY":true,…}}`
    or the console's Configure Maker Checker Tasks) — immediate, uncached.
-   Never flag the eight middleware codes above.
+   Never flag the middleware codes above (seven, plus `DEPOSIT_SAVINGSACCOUNT`
+   on a box opted in to customer deposits).
 3. **The maker must NOT hold `ALL_FUNCTIONS` or `CHECKER_SUPER_USER`** — a
    superuser maker self-checks and posts directly (`AppUser.hasPermissionTo`
    short-circuits on `ALL_FUNCTIONS`), so testing maker-checker as the
@@ -654,6 +739,15 @@ recorded in Fineract. On an existing staging cell, add the line **before**
 rolling the image that introduced the flag; otherwise deposits stop on that
 roll.
 
+**This flag is only the first lock.** The core refuses the middleware's
+deposits too unless the box was provisioned with
+`MIDDLEWARE_CUSTOMER_DEPOSITS=1` in `deploy/fineract/.env` (section 4,
+"Customer deposits at the core"). Staging needs **both**: with the flag on and
+the core lock closed, every deposit answers `502 core_banking_unavailable` and
+lands in the ledger as `FAILED` / `core_auth_failed`, and the middleware log
+names the missing `DEPOSIT_SAVINGSACCOUNT`. On production neither is set, so a
+flag carried over by mistake still cannot mint money: the core says no.
+
 ### The compose override (truststore, loopback, forwarded headers)
 
 ```yaml
@@ -808,14 +902,19 @@ curl -s https://<host>/middleware/v3/api-docs | jq '.servers'
    `ledger_transaction` land COMPLETED and, for anything parked,
    `innbucks.ledger.parked_overdue` stay at zero. How you fund it depends on
    the cell:
-   - **Staging** (`TRANSACTIONS_DEPOSIT_ENABLED=true`, section 5):
+   - **Staging** (`TRANSACTIONS_DEPOSIT_ENABLED=true` here, and provisioned
+     with `MIDDLEWARE_CUSTOMER_DEPOSITS=1`, section 4):
      `POST /transactions/deposit`. The endpoint credits money from nothing,
-     which is exactly why only staging has it on.
-   - **Production** (flag unset): `POST /transactions/deposit` must answer
+     which is exactly why only staging has it on. A `502
+     core_banking_unavailable` here means the second half is missing: the
+     cell was provisioned without the opt-in.
+   - **Production** (both unset): `POST /transactions/deposit` must answer
      **403 `deposit_disabled`**, and that refusal is itself the check: it
-     proves the go-live posture. Fund the wallet with a teller deposit in
-     Fineract instead. With `FINERACT_CORE_EVENTS_TOKEN` provisioned, that
-     also exercises the core-event alert (the customer gets the SMS).
+     proves the go-live posture of the middleware, as `provision-cell.sh`
+     step 6a's `LOCKED` (and its smoke's refused zero-amount probe) proves the
+     core's. Fund the wallet with a teller deposit in Fineract instead. With
+     `FINERACT_CORE_EVENTS_TOKEN` provisioned, that also exercises the
+     core-event alert (the customer gets the SMS).
 
 Tell the FE team three things or they will lose a day each: **amounts cross
 the API in MINOR units** (cents), **every state-changing call needs an
@@ -842,4 +941,7 @@ is set — login before that is supposed to fail.
   password encrypts tenant creds at rest.
 - The middleware rides two least-privilege AppUsers; the admin account is
   break-glass only.
+- The write AppUser holds `DEPOSIT_SAVINGSACCOUNT` only on a box provisioned
+  with `MIDDLEWARE_CUSTOMER_DEPOSITS=1` (staging). Production never sets it,
+  and `provision-cell.sh` step 6a must print `LOCKED` there.
 - The image is pinned + scanned + attested; upgrades are deliberate tags.

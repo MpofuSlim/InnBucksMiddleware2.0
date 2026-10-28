@@ -170,10 +170,26 @@ Build: `./mvnw verify` at the root. Run locally:
   concurrent same-key requests can never double-execute. Replays return the
   ORIGINAL stored status. Same key + different body → 422; fresh claim in
   flight → 409; stale claim (>60s) taken over.
-* **`POST /transactions/deposit` is an unfunded cash-in, OFF by default**
-  (`innbucks.transactions.deposit.enabled` / `TRANSACTIONS_DEPOSIT_ENABLED`,
-  `DepositGate`). Every customer token carries `customer:write`, and the
-  endpoint books a plain savings deposit (the cell's non-cash wallet payment
+* **`POST /transactions/deposit` is an unfunded cash-in, shut by TWO
+  independent locks, both closed by default.** (1) The middleware's switch,
+  `innbucks.transactions.deposit.enabled` / `TRANSACTIONS_DEPOSIT_ENABLED`
+  (`DepositGate`, below). (2) The core's permission: `provision-cell.sh` grants
+  the write AppUser `DEPOSIT_SAVINGSACCOUNT` only when the box sets
+  `MIDDLEWARE_CUSTOMER_DEPOSITS=1` in its gitignored `deploy/fineract/.env`, and
+  otherwise REVOKES it, so Fineract refuses the deposit even when (1) is wrong.
+  The second lock exists because the first is one line in a gitignored `.env`
+  that a copy from staging would carry to production. Its opt-in is per box,
+  never in a cell file: `cell.zw.env` is shared by staging and production, and
+  the script refuses to run while any `deploy/cells/*.env` assigns it, or on
+  any value but `1`/`0`/unset. Step 6a proves the lock from what Fineract will
+  enforce (every role the user holds; `ALL_FUNCTIONS` counts), the smoke proves
+  it with a zero-amount deposit the core must refuse, and a lock that is not as
+  asked FAILS the run after 6e has still run. With (1) on and (2) closed the app
+  gets `502 core_banking_unavailable` and a `FAILED`/`core_auth_failed` ledger
+  row, never `UNKNOWN` (see the `FineractErrorMapper` note in slice 3a). Staging
+  opens both; production neither. Selftest cases in `provision-selftest.sh`.
+  **The switch, in detail.** Every customer token carries `customer:write`, and
+  the endpoint books a plain savings deposit (the cell's non-cash wallet payment
   type) of any amount into the caller's own wallet: no source of funds, no
   step-up, no maximum, and the wallet product's accounting rule is None, so no
   GL trail. Open, any customer mints money and then spends it, and no outgoing
@@ -458,11 +474,16 @@ reason to copy the rule rather than fork it.
 * Containers pin `-Duser.timezone=UTC` in the Dockerfile ENTRYPOINT.
 * Single-replica per cell assumption (in-memory rate limits, unlocked
   `@Scheduled` jobs) — wrap with ShedLock before ever scaling horizontally.
-* **The deposit switch is per environment.** Staging's `.env` carries
-  `TRANSACTIONS_DEPOSIT_ENABLED=true`; production's never does, and its boot
-  must log `Customer deposits: OFF`. On a cell rolling to the first image with
-  the switch, add the staging line BEFORE the roll, or staging stops taking
-  deposits on that roll. Runbook §5.
+* **The deposit switch is per environment, and so is the core's lock.**
+  Staging's `.env` carries `TRANSACTIONS_DEPOSIT_ENABLED=true` AND its
+  `deploy/fineract/.env` carries `MIDDLEWARE_CUSTOMER_DEPOSITS=1`; production's
+  carry neither, its boot must log `Customer deposits: OFF`, and its
+  `provision-cell.sh` step 6a must print `LOCKED`. On a cell rolling to the
+  first image with the switch, add the staging line BEFORE the roll, or staging
+  stops taking deposits on that roll; likewise add the opt-in before
+  re-provisioning staging, because a run without it revokes the permission.
+  Re-provisioning production with no change closes the core lock. Runbook §4
+  ("Customer deposits at the core") and §5.
 
 ## Environments (EC2, af-south-1)
 
@@ -858,16 +879,18 @@ commands, with the exact bytes that were running before. Full procedure
    reviewable as a diff, sourced before `provision-cell.sh`, applied by its
    steps 6b–6e additively and idempotently. Deliberately NOT configurable is
    **6e's assertion that the middleware's own permission codes are never
-   `can_maker_checker`** — it is derived from the script's `READ_PERMS`/
-   `WRITE_PERMS` arrays (so a new middleware permission is protected
-   automatically, never a copied list that drifts), it runs on EVERY provision
+   `can_maker_checker`** — it is derived from what step 5 GRANTS (`READ_PERMS`
+   plus the write role's grant list, so a new middleware permission is
+   protected automatically, never a copied list that drifts; and
+   `DEPOSIT_SAVINGSACCOUNT` only on a box opted in to customer deposits, so
+   production's bank may dual-control teller deposits), it runs on EVERY provision
    even on a cell that never enables maker-checker (the flag can be set from
    the console too), and it unflags + screams rather than merely warning. A
    cell file can widen what the bank dual-controls; it can never switch off the
    thing that keeps the customer rail moving. Ordering inside 6e is the rest of
    the safety argument: flag the bank's tasks → assert → only then flip the
    global switch. Parsing + set arithmetic are in `provision-lib.sh`, covered
-   by `provision-selftest.sh` (no cell, no network, 25 cases); the
+   by `provision-selftest.sh` (no cell, no network, 95 cases); the
    `_CHECKER`-sibling case there is why the check is `grep -xF` and never a
    substring match — every protected code has a `<CODE>_CHECKER` sibling whose
    flagging is normal and harmless. **The script runs `set -euo pipefail`, so a
@@ -886,6 +909,16 @@ commands, with the exact bytes that were running before. Full procedure
    ("Test Internal Auditor" vs the cell's real "TEST Internal Audit"). Role
    names in a cell file come from the cell's own `GET /v1/roles`, and a grant
    to a role with no members is worth nothing — check `GET /v1/users` too.
+
+   **Not every provisioning choice is market policy.** The customer-deposit
+   opt-in differs between two boxes of ONE market, so it is a per-box value
+   (`deploy/fineract/.env`), and the script refuses a cell file that sets it
+   (Security invariants). It is also the one revoke the script makes, and only
+   on the middleware's own role. **A selftest of `set -e` behaviour must not
+   put the subshell on the left of `||`**: bash suspends errexit for anything
+   whose status `||`, `&&` or `if` tests, so `$( (set -e; …) || echo stopped )`
+   can never stop and the case passes vacuously. Capture the output and test
+   that instead (the `parse_deposit_opt_in` case does).
 
    **Two Fineract facts the step depends on, verified in the fork 2026-09-18.**
    (1) **Fineract SEEDS three of our write permissions maker-checkerable** —
