@@ -18,6 +18,7 @@ import zw.co.innbucks.middleware.auth.CustomerScopes;
 import zw.co.innbucks.middleware.auth.jwt.JwtIssuer;
 import zw.co.innbucks.middleware.common.country.Country;
 import zw.co.innbucks.middleware.corebanking.CoreProvider;
+import zw.co.innbucks.middleware.corebanking.exception.CoreAccountRestrictedException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreClientException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreUnknownOutcomeException;
 import zw.co.innbucks.middleware.corebanking.value.AccountBalance;
@@ -352,6 +353,42 @@ class TransactionFlowIntegrationTest {
 
         assertThat(jdbcTemplate.queryForObject(
                 "SELECT status FROM ledger_transaction", String.class)).isEqualTo("FAILED");
+    }
+
+    @Test
+    void aBlockedSourceAccountIs403AccountRestrictedAndReplaysTheSameCopy() throws Exception {
+        stubPort.onWithdraw = (cmd, key) -> {
+            throw new CoreAccountRestrictedException(CoreProvider.FINERACT,
+                    "Fineract refused to debit a restricted account "
+                            + "(error.msg.savings.account.debit.transaction.not.allowed)", null);
+        };
+        String body = """
+                {"accountId":"%s","amountMinor":9999,"currency":"KES"}
+                """.formatted(wallet);
+
+        mockMvc.perform(post("/transactions/withdraw")
+                        .header(HttpHeaders.AUTHORIZATION, bearer).header("Idempotency-Key", "wd-blocked")
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.errorCode").value("account_restricted"))
+                .andExpect(jsonPath("$.detail")
+                        .value("Payments from this account are paused. Please contact support."));
+
+        // Still a provably-not-applied refusal: FAILED, coded for ops.
+        assertThat(jdbcTemplate.queryForMap("SELECT status, failure_code FROM ledger_transaction"))
+                .containsEntry("status", "FAILED")
+                .containsEntry("failure_code", "account_restricted");
+
+        // A same-key retry answers from the ledger row — with the same fixed
+        // copy, never the core's code the first answer withheld.
+        mockMvc.perform(post("/transactions/withdraw")
+                        .header(HttpHeaders.AUTHORIZATION, bearer).header("Idempotency-Key", "wd-blocked")
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("FAILED"))
+                .andExpect(jsonPath("$.failureCode").value("account_restricted"))
+                .andExpect(jsonPath("$.failureMessage")
+                        .value("Payments from this account are paused. Please contact support."));
     }
 
     @Test

@@ -3,6 +3,7 @@ package zw.co.innbucks.middleware.ledger;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+import zw.co.innbucks.middleware.corebanking.exception.CoreAccountRestrictedException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreAuthException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreClientException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreServerException;
@@ -92,6 +93,10 @@ public class LedgeredMovementExecutor {
     }
 
     private static String failureCode(RuntimeException ex) {
+        // Before its parent: a restriction is worth telling apart in the ledger
+        // (ops: "which failures were blocked accounts"), and the same-key
+        // replay answers from this code.
+        if (ex instanceof CoreAccountRestrictedException) return "account_restricted";
         if (ex instanceof CoreClientException) return "core_rejected";
         if (ex instanceof CoreAuthException) return "core_auth_failed";
         if (ex instanceof CoreTransientException) return "core_unreachable";

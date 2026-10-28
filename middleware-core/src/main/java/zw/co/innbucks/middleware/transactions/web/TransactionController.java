@@ -47,6 +47,20 @@ public class TransactionController {
              "status":"SUCCESS","coreTxRef":"501","failureCode":null,"failureMessage":null}
             """;
 
+    private static final String STEP_UP_REQUIRED = """
+            {"type":"about:blank","title":"Approval required","status":403,
+             "detail":"This amount needs SMS approval. Request a code, verify it, and retry with the X-Step-Up-Token header.",
+             "errorCode":"step_up_required",
+             "txnFp":"9f2b4c6d8e0a1b3c5d7e9f0a2b4c6d8e0a1b3c5d7e9f0a2b4c6d8e0a1b3c5d7e"}
+            """;
+
+    /** CoreBankingExceptionHandler.restricted — fixed copy, never the core's reason. */
+    private static final String ACCOUNT_RESTRICTED = """
+            {"type":"about:blank","title":"Account restricted","status":403,
+             "detail":"Payments from this account are paused. Please contact support.",
+             "errorCode":"account_restricted"}
+            """;
+
     private final MovementService movementService;
 
     @PostMapping("/deposit")
@@ -91,15 +105,15 @@ public class TransactionController {
             @ApiResponse(responseCode = "401", description = "Missing or invalid Bearer token, or an invalid / "
                     + "already-used / wrong-transaction X-Step-Up-Token",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
-            @ApiResponse(responseCode = "403", description = "Account does not belong to the caller, or step-up "
-                    + "approval is required (errorCode step_up_required, txnFp echoed)",
+            @ApiResponse(responseCode = "403", description = "Account does not belong to the caller; step-up "
+                    + "approval is required (errorCode step_up_required, txnFp echoed); or the bank has blocked "
+                    + "debits from this account (errorCode account_restricted — never retry automatically: show the "
+                    + "detail; a new attempt can only succeed once the bank lifts the block)",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class),
-                            examples = @ExampleObject(name = "Step-up required", value = """
-                                    {"type":"about:blank","title":"Approval required","status":403,
-                                     "detail":"This amount needs SMS approval. Request a code, verify it, and retry with the X-Step-Up-Token header.",
-                                     "errorCode":"step_up_required",
-                                     "txnFp":"9f2b4c6d8e0a1b3c5d7e9f0a2b4c6d8e0a1b3c5d7e9f0a2b4c6d8e0a1b3c5d7e"}
-                                    """))),
+                            examples = {
+                                    @ExampleObject(name = "Step-up required", value = STEP_UP_REQUIRED),
+                                    @ExampleObject(name = "Account restricted", value = ACCOUNT_RESTRICTED)
+                            })),
             @ApiResponse(responseCode = "409", description = "An identical request is still in progress",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
             @ApiResponse(responseCode = "422", description = "Key reused with a different body, or the core "
@@ -132,20 +146,28 @@ public class TransactionController {
             @ApiResponse(responseCode = "401", description = "Missing or invalid Bearer token, or an invalid / "
                     + "already-used / wrong-transaction X-Step-Up-Token",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
-            @ApiResponse(responseCode = "403", description = "Source account does not belong to the caller, or "
-                    + "step-up approval is required (errorCode step_up_required, txnFp echoed)",
+            @ApiResponse(responseCode = "403", description = "Source account does not belong to the caller; "
+                    + "step-up approval is required (errorCode step_up_required, txnFp echoed); or the bank has "
+                    + "blocked debits from the SOURCE account (errorCode account_restricted — never retry "
+                    + "automatically: show the detail; a new attempt can only succeed once the bank lifts the "
+                    + "block). A block on the RECIPIENT's account is not the sender's restriction and answers "
+                    + "422 core_rejected instead",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class),
-                            examples = @ExampleObject(name = "Step-up required", value = """
-                                    {"type":"about:blank","title":"Approval required","status":403,
-                                     "detail":"This amount needs SMS approval. Request a code, verify it, and retry with the X-Step-Up-Token header.",
-                                     "errorCode":"step_up_required",
-                                     "txnFp":"9f2b4c6d8e0a1b3c5d7e9f0a2b4c6d8e0a1b3c5d7e9f0a2b4c6d8e0a1b3c5d7e"}
-                                    """))),
+                            examples = {
+                                    @ExampleObject(name = "Step-up required", value = STEP_UP_REQUIRED),
+                                    @ExampleObject(name = "Account restricted", value = ACCOUNT_RESTRICTED)
+                            })),
             @ApiResponse(responseCode = "409", description = "An identical request is still in progress",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
             @ApiResponse(responseCode = "422", description = "Key reused with a different body, or the core "
-                    + "rejected the movement (e.g. insufficient balance, unknown destination)",
-                    content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
+                    + "rejected the movement (e.g. insufficient balance, unknown destination, or a recipient "
+                    + "account that cannot accept payments)",
+                    content = @Content(schema = @Schema(implementation = ProblemDetail.class),
+                            examples = @ExampleObject(name = "Recipient cannot receive", value = """
+                                    {"type":"about:blank","title":"Request refused","status":422,
+                                     "detail":"Fineract vetoed the request: error.msg.savings.account.credit.transaction.not.allowed: the receiving account cannot accept this payment",
+                                     "errorCode":"core_rejected"}
+                                    """))),
             @ApiResponse(responseCode = "503", description = "Core banking system unreachable",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class)))
     })

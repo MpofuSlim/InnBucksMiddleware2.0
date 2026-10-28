@@ -3,6 +3,7 @@ package zw.co.innbucks.middleware.ledger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import zw.co.innbucks.middleware.corebanking.CoreProvider;
+import zw.co.innbucks.middleware.corebanking.exception.CoreAccountRestrictedException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreClientException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreTransientException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreUnknownOutcomeException;
@@ -119,6 +120,19 @@ class LedgeredMovementExecutorTest {
         })).isInstanceOf(CoreClientException.class);
 
         verify(ledgerService).markFailed(eq(rowId), eq("core_rejected"), anyString());
+    }
+
+    @Test
+    void aRestrictedAccountIsStillAProvenFailureCodedForOps() {
+        // A CoreClientException subtype: FAILED (nothing applied), rethrown for
+        // the 403, and coded so a same-key retry replays the fixed copy.
+        assertThatThrownBy(() -> executor.execute(draft, ref -> {
+            throw new CoreAccountRestrictedException(CoreProvider.FINERACT,
+                    "Fineract refused to debit a restricted account", null);
+        })).isInstanceOf(CoreAccountRestrictedException.class);
+
+        verify(ledgerService).markFailed(eq(rowId), eq("account_restricted"), anyString());
+        verify(ledgerService, never()).markUnknown(any(), any());
     }
 
     @Test

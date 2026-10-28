@@ -88,6 +88,23 @@ Build: `./mvnw verify` at the root. Run locally:
   (`CoreAuthException` / `CoreClientException` / `CoreServerException` /
   `CoreTransientException` / `CoreUnknownOutcomeException`); nothing upstream
   of an adapter sees a core-specific exception or raw body.
+* **A bank block on the account a movement DEBITS is
+  `CoreAccountRestrictedException`** (a `CoreClientException`, so the ledger
+  still marks it FAILED, coded `account_restricted`) → **403
+  `account_restricted`** with fixed copy ("Payments from this account are
+  paused. Please contact support.") — never the core's reason, on the first
+  answer or on a same-key replay. A block on ANY OTHER account (a transfer's
+  recipient, a deposit's own credit side) is not the caller's restriction and
+  stays `422 core_rejected`. Fineract (read from the fork): a withdrawal checks
+  BLOCK then DEBIT block, a deposit BLOCK then CREDIT block, a transfer runs
+  the source's withdrawal first; DEBIT/CREDIT block name only their own side,
+  but a full BLOCK has ONE code for both sides of a transfer, so
+  `FineractErrorMapper.accountRestriction` attributes it by
+  `errors[0].args[0].value` against the source's numeric id — and an
+  unattributable BLOCK is NOT called the sender's. The recipient-side refusal
+  is reworded without Fineract's sentence, which names the recipient's
+  internal account id. Pinned by the restriction cases in
+  `FineractClientContractTest` and `AccountRestrictedResponseTest`.
 * **A maker-checker-PARKED command is UNKNOWN, never a success.** Fineract
   answers a parked command with a success-shaped
   `200 {"commandId":N,"rollbackTransaction":true}` and no resourceId/echo —
@@ -608,7 +625,9 @@ commands, with the exact bytes that were running before. Full procedure
    ARRAYS from the legacy Gson serializer (ISO strings also accepted).
    `CoreBankingExceptionHandler`:
    `CoreClientException` → 422
-   `core_rejected` (upstream wording allowed), auth/server/transient → 502/503
+   `core_rejected` (upstream wording allowed) except its
+   `CoreAccountRestrictedException` refinement → 403 `account_restricted`
+   (fixed copy), auth/server/transient → 502/503
    generic (ops detail stays in logs). Amounts cross the API in MINOR units.
    Contract pinned by `RegisterFlowIntegrationTest` +
    `TransactionFlowIntegrationTest` (stub port, real Postgres).

@@ -6,7 +6,9 @@ import zw.co.innbucks.middleware.corebanking.CoreProvider;
  * Base of the core-neutral exception taxonomy. Adapters map their core's
  * failures onto these four leaf types plus {@link CoreUnknownOutcomeException};
  * nothing upstream of an adapter ever sees a core-specific exception or a raw
- * upstream body.
+ * upstream body. One refinement exists: {@link CoreAccountRestrictedException}
+ * is a {@link CoreClientException} the web layer answers differently (403
+ * {@code account_restricted}) — catch sites for the parent still see it.
  */
 public abstract class CoreBankingException extends RuntimeException {
 

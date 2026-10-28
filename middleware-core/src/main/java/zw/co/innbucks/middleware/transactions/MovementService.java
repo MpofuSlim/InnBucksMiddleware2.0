@@ -3,6 +3,7 @@ package zw.co.innbucks.middleware.transactions;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import zw.co.innbucks.middleware.config.CoreBankingExceptionHandler;
 import zw.co.innbucks.middleware.corebanking.CoreBankingPort;
 import zw.co.innbucks.middleware.corebanking.command.MoneyMovementCommand;
 import zw.co.innbucks.middleware.corebanking.command.TransferCommand;
@@ -171,11 +172,21 @@ public class MovementService {
             case COMPLETED -> TransactionResponse.success(row.getId(), row.getCoreTxRef());
             case FAILED -> TransactionResponse.failed(row.getId(),
                     row.getFailureCode() == null ? "core_reported_failed" : row.getFailureCode(),
-                    row.getFailureMessage() == null
-                            ? "The movement did not apply. Use a new Idempotency-Key for a fresh attempt."
-                            : row.getFailureMessage());
+                    replayedFailureMessage(row));
             default -> TransactionResponse.processing(row.getId(), row.getCoreTxRef());
         };
+    }
+
+    private static String replayedFailureMessage(LedgerTransaction row) {
+        // A restriction replays the SAME fixed copy its first 403 carried: the
+        // row's failure_message is ops detail (the core's code) that the first
+        // answer withheld, so a same-key retry must not hand it out either.
+        if (CoreBankingExceptionHandler.ACCOUNT_RESTRICTED.equals(row.getFailureCode())) {
+            return CoreBankingExceptionHandler.ACCOUNT_RESTRICTED_DETAIL;
+        }
+        return row.getFailureMessage() == null
+                ? "The movement did not apply. Use a new Idempotency-Key for a fresh attempt."
+                : row.getFailureMessage();
     }
 
     private Customer requireMappedCustomer(UUID customerId) {

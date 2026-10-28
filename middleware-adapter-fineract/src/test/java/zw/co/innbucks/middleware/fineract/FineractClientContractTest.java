@@ -6,6 +6,7 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import zw.co.innbucks.middleware.corebanking.exception.CoreAccountRestrictedException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreAuthException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreClientException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreServerException;
@@ -289,6 +290,181 @@ class FineractClientContractTest {
         assertThatThrownBy(() -> client.createClient("cust-uuid-9", "A", "B", "+254712000009", "key-mc2"))
                 .isInstanceOf(CoreUnknownOutcomeException.class)
                 .hasMessageContaining("maker-checker");
+    }
+
+    // ------------------------------------------------ savings restrictions
+
+    /**
+     * A savings-restriction refusal EXACTLY as the fork serialises it
+     * (MpofuSlim/fineract develop, read from source — not yet observed on a
+     * cell): {@code Savings{Account,AccountDebits,AccountCredits}BlockedException}
+     * (fineract-savings .../savings/exception/) extend
+     * {@code AbstractPlatformDomainRuleException};
+     * {@code PlatformDomainRuleExceptionMapper.toResponse} answers
+     * {@code Status.FORBIDDEN} with {@code ApiGlobalErrorResponse.domainRuleViolation}
+     * (fineract-core .../core/data/ApiGlobalErrorResponse.java), whose one error
+     * is {@code ApiParameterError.generalError}: developerMessage =
+     * defaultUserMessage, parameterName "id", args = [{value: accountId}].
+     * Jersey writes it with the Jackson converter configured NON_NULL
+     * ({@code JerseyJacksonConverterConfig}), so the null {@code value} key is
+     * absent and the account id is a JSON number.
+     */
+    private static String domainRuleViolation(String code, String message, long accountId) {
+        return """
+                {"developerMessage":"Request was understood but caused a domain rule violation.",
+                 "httpStatusCode":"403",
+                 "defaultUserMessage":"Errors contain reason for domain rule violation.",
+                 "userMessageGlobalisationCode":"validation.msg.domain.rule.violation",
+                 "errors":[{"developerMessage":"%2$s",
+                            "defaultUserMessage":"%2$s",
+                            "userMessageGlobalisationCode":"%1$s",
+                            "parameterName":"id",
+                            "args":[{"value":%3$d}]}]}
+                """.formatted(code, message, accountId);
+    }
+
+    /** SavingsAccountBlockedException(accountId) — note "saving." singular. */
+    private static String blocked(long id) {
+        return domainRuleViolation("error.msg.saving.account.blocked.transaction.not.allowed",
+                "Any transaction to " + id + " is not allowed, since the account is blocked", id);
+    }
+
+    /** SavingsAccountDebitsBlockedException(accountId). */
+    private static String debitsBlocked(long id) {
+        return domainRuleViolation("error.msg.savings.account.debit.transaction.not.allowed",
+                "Any debit transactions from " + id + " is not allowed, since the account is blocked for debits", id);
+    }
+
+    /** SavingsAccountCreditsBlockedException(accountId). */
+    private static String creditsBlocked(long id) {
+        return domainRuleViolation("error.msg.savings.account.credit.transaction.not.allowed",
+                "Any Credit transactions to " + id + " is not allowed, since the account is blocked for credits", id);
+    }
+
+    private void withdrawalAnswers(String body) {
+        wireMock.stubFor(post(urlPathEqualTo("/v1/savingsaccounts/external-id/acct-1/transactions"))
+                .withQueryParam("command", equalTo("withdrawal"))
+                .willReturn(aResponse().withStatus(403)
+                        .withHeader("Content-Type", "application/json").withBody(body)));
+    }
+
+    private void transferAnswers(String body) {
+        wireMock.stubFor(post(urlEqualTo("/v1/accounttransfers"))
+                .willReturn(aResponse().withStatus(403)
+                        .withHeader("Content-Type", "application/json").withBody(body)));
+    }
+
+    @Test
+    void aWithdrawalFromABlockedAccountIsARestriction() {
+        // validateForAccountBlock runs first on the withdrawal; the externalId
+        // route never tells us the numeric id, and needs not — one account.
+        withdrawalAnswers(blocked(17));
+
+        assertThatThrownBy(() -> client.withdraw("acct-1", new BigDecimal("5.00"), "ref-b", "key-b"))
+                .isInstanceOf(CoreAccountRestrictedException.class)
+                .hasMessageContaining("error.msg.saving.account.blocked.transaction.not.allowed")
+                // Ops detail is the code; Fineract's sentence (and its id) stays out.
+                .hasMessageNotContaining("17");
+    }
+
+    @Test
+    void aWithdrawalFromADebitBlockedAccountIsARestriction() {
+        withdrawalAnswers(debitsBlocked(17));
+
+        assertThatThrownBy(() -> client.withdraw("acct-1", new BigDecimal("5.00"), "ref-db", "key-db"))
+                .isInstanceOf(CoreAccountRestrictedException.class)
+                .hasMessageContaining("error.msg.savings.account.debit.transaction.not.allowed");
+    }
+
+    @Test
+    void aTransferFromABlockedSourceIsARestriction() {
+        // Source 11 (fromAccountId below): the withdrawal leg runs first.
+        transferAnswers(blocked(11));
+
+        assertThatThrownBy(() -> client.transfer(7L, 11L, 8L, 12L, new BigDecimal("100.00"), "rent", "key-tb"))
+                .isInstanceOf(CoreAccountRestrictedException.class);
+    }
+
+    @Test
+    void aTransferFromADebitBlockedSourceIsARestriction() {
+        transferAnswers(debitsBlocked(11));
+
+        assertThatThrownBy(() -> client.transfer(7L, 11L, 8L, 12L, new BigDecimal("100.00"), "rent", "key-td"))
+                .isInstanceOf(CoreAccountRestrictedException.class);
+    }
+
+    @Test
+    void aBlockedRecipientIsAPlainRefusalNotTheSendersRestriction() {
+        // Same code as a blocked source — only args[0] (12 = toAccountId) says
+        // whose account it is. It is the recipient's, so the sender must not be
+        // told THEIR account is paused, nor learn the recipient's account id.
+        transferAnswers(blocked(12));
+
+        assertThatThrownBy(() -> client.transfer(7L, 11L, 8L, 12L, new BigDecimal("100.00"), "rent", "key-rb"))
+                .isInstanceOf(CoreClientException.class)
+                .isNotInstanceOf(CoreAccountRestrictedException.class)
+                .hasMessage("Fineract vetoed the request: error.msg.saving.account.blocked.transaction.not.allowed: "
+                        + "the receiving account cannot accept this payment");
+    }
+
+    @Test
+    void aCreditBlockedRecipientIsAPlainRefusalToo() {
+        transferAnswers(creditsBlocked(12));
+
+        assertThatThrownBy(() -> client.transfer(7L, 11L, 8L, 12L, new BigDecimal("100.00"), "rent", "key-rc"))
+                .isInstanceOf(CoreClientException.class)
+                .isNotInstanceOf(CoreAccountRestrictedException.class)
+                .hasMessage("Fineract vetoed the request: error.msg.savings.account.credit.transaction.not.allowed: "
+                        + "the receiving account cannot accept this payment");
+    }
+
+    @Test
+    void aFullBlockWhoseAccountCannotBeReadIsNotCalledTheSenders() {
+        // Defensive: a BLOCK on a transfer with no id to attribute it. Calling
+        // it the sender's restriction would be the worse error.
+        transferAnswers("""
+                {"errors":[{"userMessageGlobalisationCode":"error.msg.saving.account.blocked.transaction.not.allowed",
+                            "defaultUserMessage":"Any transaction to 12 is not allowed, since the account is blocked"}]}
+                """);
+
+        assertThatThrownBy(() -> client.transfer(7L, 11L, 8L, 12L, new BigDecimal("100.00"), "rent", "key-rn"))
+                .isInstanceOf(CoreClientException.class)
+                .isNotInstanceOf(CoreAccountRestrictedException.class);
+    }
+
+    @Test
+    void aDepositIntoABlockedAccountDebitsNothingSoIsNoRestriction() {
+        // A deposit's BLOCK / CREDIT-block refusal is about the credited side.
+        wireMock.stubFor(post(urlPathEqualTo("/v1/savingsaccounts/external-id/acct-1/transactions"))
+                .withQueryParam("command", equalTo("deposit"))
+                .willReturn(aResponse().withStatus(403)
+                        .withHeader("Content-Type", "application/json").withBody(blocked(17))));
+
+        assertThatThrownBy(() -> client.deposit("acct-1", new BigDecimal("5.00"), "ref-dep", "key-dep"))
+                .isInstanceOf(CoreClientException.class)
+                .isNotInstanceOf(CoreAccountRestrictedException.class);
+    }
+
+    @Test
+    void otherDomainVetoesKeepTheirUpstreamWording() {
+        // The restriction match is exact-code: insufficient balance, in the
+        // fork's real envelope, is still the generic refusal with its sentence.
+        withdrawalAnswers("""
+                {"developerMessage":"Request was understood but caused a domain rule violation.",
+                 "httpStatusCode":"403",
+                 "defaultUserMessage":"Errors contain reason for domain rule violation.",
+                 "userMessageGlobalisationCode":"validation.msg.domain.rule.violation",
+                 "errors":[{"developerMessage":"Insufficient account balance.",
+                            "defaultUserMessage":"Insufficient account balance.",
+                            "userMessageGlobalisationCode":"error.msg.savingsaccount.transaction.insufficient.account.balance",
+                            "parameterName":"id",
+                            "args":[{"value":17}]}]}
+                """);
+
+        assertThatThrownBy(() -> client.withdraw("acct-1", new BigDecimal("5.00"), "ref-ib", "key-ib"))
+                .isInstanceOf(CoreClientException.class)
+                .isNotInstanceOf(CoreAccountRestrictedException.class)
+                .hasMessageContaining("Insufficient account balance.");
     }
 
     @Test

@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClientResponseException;
 import zw.co.innbucks.middleware.corebanking.CoreProvider;
+import zw.co.innbucks.middleware.corebanking.exception.CoreAccountRestrictedException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreAuthException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreBankingException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreClientException;
@@ -37,11 +38,65 @@ import java.util.Locale;
  *       Fineract uses 403 for BUSINESS rule vetoes (insufficient balance,
  *       wrong account state), so 403 with a domain-error body →
  *       {@link CoreClientException}; a bare 403 → auth.</li>
+ *   <li>A savings BLOCK / DEBIT block on the account a write DEBITS →
+ *       {@link CoreAccountRestrictedException} (a {@link CoreClientException},
+ *       so still FAILED in the ledger). A block on any OTHER account — a
+ *       transfer's recipient — stays a plain {@link CoreClientException}
+ *       worded without the recipient's account id: see
+ *       {@link #accountRestriction}.</li>
  * </ul>
  */
 final class FineractErrorMapper {
 
     private static final ObjectMapper JSON = new ObjectMapper();
+
+    /*
+     * Fineract's savings-restriction refusals, read from the fork
+     * (MpofuSlim/fineract, develop): SavingsAccount.validateForAccountBlock /
+     * validateForDebitBlock / validateForCreditBlock throw
+     * SavingsAccount{,Debits,Credits}BlockedException(accountId), each an
+     * AbstractPlatformDomainRuleException, so PlatformDomainRuleExceptionMapper
+     * answers 403 with the code below on errors[0] and the blocked account's
+     * numeric id as errors[0].args[0].value. Note the FIRST is "saving."
+     * (singular) — copy it, never retype it.
+     *
+     * Which legs check which (SavingsAccountDomainServiceJpa): a withdrawal
+     * checks BLOCK then DEBIT block; a deposit checks BLOCK then CREDIT block;
+     * a savings-to-savings transfer runs the withdrawal on its source FIRST,
+     * then the deposit on its destination
+     * (AccountTransfersWritePlatformServiceImpl). So DEBIT block only ever
+     * names the debited account, CREDIT block only ever the credited one, and
+     * BLOCK can be either — only args[0] tells a transfer's two sides apart.
+     */
+    static final String ACCOUNT_BLOCKED = "error.msg.saving.account.blocked.transaction.not.allowed";
+    static final String DEBITS_BLOCKED = "error.msg.savings.account.debit.transaction.not.allowed";
+    static final String CREDITS_BLOCKED = "error.msg.savings.account.credit.transaction.not.allowed";
+
+    /**
+     * The account a write DEBITS — the only account whose restriction is the
+     * caller's own. A withdrawal addresses ONE account (by externalId, so its
+     * numeric id is not known here): any block refusing it is on the debited
+     * account. A transfer names its source by numeric id, which is compared
+     * with the id Fineract echoes.
+     */
+    record DebitedAccount(boolean debits, boolean onlyAccount, Long savingsId) {
+
+        /** Writes that debit no customer account: deposits, onboarding commands. */
+        static final DebitedAccount NONE = new DebitedAccount(false, false, null);
+
+        /** A command that touches exactly one account and debits it (withdrawal). */
+        static final DebitedAccount ONLY_ACCOUNT = new DebitedAccount(true, true, null);
+
+        /**
+         * A transfer's source, by Fineract's numeric savings id. A null id
+         * (never expected) only makes a full BLOCK unattributable — it must not
+         * throw here, before the call, where an NPE would park the movement
+         * UNKNOWN instead of letting Fineract refuse it.
+         */
+        static DebitedAccount savings(Long savingsId) {
+            return new DebitedAccount(true, false, savingsId);
+        }
+    }
 
     private FineractErrorMapper() {
     }
@@ -62,13 +117,19 @@ final class FineractErrorMapper {
     }
 
     static CoreBankingException mapWriteFailure(RestClientResponseException ex, TxRef txRef) {
+        return mapWriteFailure(ex, txRef, DebitedAccount.NONE);
+    }
+
+    static CoreBankingException mapWriteFailure(RestClientResponseException ex, TxRef txRef,
+                                                DebitedAccount debited) {
         int status = ex.getStatusCode().value();
         String detail = errorDetail(ex);
         if (status == 401) {
             return new CoreAuthException(CoreProvider.FINERACT, "Fineract rejected the write credentials: " + detail, ex);
         }
         if (status == 403) {
-            return forbidden(detail, ex);
+            CoreBankingException restriction = accountRestriction(ex, debited);
+            return restriction != null ? restriction : forbidden(detail, ex);
         }
         if (status == 425) {
             // Fineract's idempotency layer: the SAME key's original command is
@@ -118,6 +179,73 @@ final class FineractErrorMapper {
             cause = cause.getCause();
         }
         return false;
+    }
+
+    /**
+     * A savings-restriction refusal, attributed to the account it names; null
+     * for every other 403. Matched on the exact globalisation code BEFORE the
+     * permission-wording heuristic in {@link #forbidden}.
+     *
+     * <ul>
+     *   <li>On the debited account → {@link CoreAccountRestrictedException}.
+     *       The message carries the code (BLOCK vs DEBIT block is ops detail)
+     *       but never Fineract's sentence, which names the account id.</li>
+     *   <li>On any other account → {@link CoreClientException} — the app's
+     *       generic {@code 422 core_rejected} — worded "the receiving account
+     *       cannot accept this payment", again without Fineract's sentence:
+     *       the sender learns the payment cannot land, not the recipient's
+     *       internal account id. Also what a deposit into the customer's own
+     *       blocked account becomes (a deposit debits nothing of theirs).</li>
+     *   <li>A full BLOCK on a transfer whose echoed id is missing or
+     *       unreadable cannot be attributed, and is NOT called the sender's
+     *       restriction — the false "your account is paused" is the worse
+     *       error. A DEBIT block needs no id: only the debited leg checks it.</li>
+     * </ul>
+     */
+    static CoreBankingException accountRestriction(RestClientResponseException ex, DebitedAccount debited) {
+        JsonNode first = firstError(ex);
+        if (first == null) {
+            return null;
+        }
+        String code = first.path("userMessageGlobalisationCode").asText("");
+        if (!code.equals(ACCOUNT_BLOCKED) && !code.equals(DEBITS_BLOCKED) && !code.equals(CREDITS_BLOCKED)) {
+            return null;
+        }
+        boolean onDebitedAccount = debited.debits() && !code.equals(CREDITS_BLOCKED)
+                && (debited.onlyAccount()
+                    || code.equals(DEBITS_BLOCKED)
+                    || (debited.savingsId() != null && debited.savingsId().equals(blockedAccountId(first))));
+        if (onDebitedAccount) {
+            return new CoreAccountRestrictedException(CoreProvider.FINERACT,
+                    "Fineract refused to debit a restricted account (" + code + ")", ex);
+        }
+        return new CoreClientException(CoreProvider.FINERACT,
+                "Fineract vetoed the request: " + code + ": the receiving account cannot accept this payment", ex);
+    }
+
+    /** errors[0].args[0].value — a JSON number from Fineract's Jackson writer; a numeric string is tolerated. */
+    private static Long blockedAccountId(JsonNode error) {
+        JsonNode value = error.path("args").path(0).path("value");
+        if (value.isIntegralNumber()) {
+            return value.asLong();
+        }
+        if (value.isTextual() && value.asText().matches("\\d{1,18}")) {
+            return Long.parseLong(value.asText());
+        }
+        return null;
+    }
+
+    private static JsonNode firstError(RestClientResponseException ex) {
+        String body = ex.getResponseBodyAsString();
+        if (body == null || body.isBlank()) {
+            return null;
+        }
+        try {
+            JsonNode errors = JSON.readTree(body).path("errors");
+            return errors.isArray() && !errors.isEmpty() ? errors.get(0) : null;
+        } catch (Exception ignored) {
+            return null;
+        }
     }
 
     private static CoreBankingException forbidden(String detail, RestClientResponseException ex) {

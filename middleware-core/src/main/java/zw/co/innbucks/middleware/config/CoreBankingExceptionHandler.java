@@ -9,6 +9,7 @@ import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import zw.co.innbucks.middleware.corebanking.exception.CoreAccountRestrictedException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreAuthException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreClientException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreServerException;
@@ -26,6 +27,12 @@ import java.net.URI;
  * (it is the "your request was refused" case — insufficient balance, unknown
  * account). Auth/server/transient failures are OUR ops problem; the customer
  * gets a generic retryable message and the detail goes to the logs.
+ *
+ * <p>{@link CoreAccountRestrictedException} — the bank has blocked the
+ * account the movement debits — is the one client refusal that carries NO
+ * upstream wording: 403 {@code account_restricted} with fixed copy. Why an
+ * account is restricted (fraud hold, compliance, a dispute) is the bank's to
+ * tell, and the app needs only to stop retrying and point at support.
  */
 @Slf4j
 @RestControllerAdvice
@@ -33,6 +40,27 @@ import java.net.URI;
 public class CoreBankingExceptionHandler {
 
     private static final URI PROBLEM_TYPE = URI.create("about:blank");
+
+    public static final String ACCOUNT_RESTRICTED = "account_restricted";
+
+    /**
+     * The whole customer-facing story of a restriction. Also what a same-key
+     * retry of the refused movement replays (MovementService), so the two
+     * answers can never say different things.
+     */
+    public static final String ACCOUNT_RESTRICTED_DETAIL =
+            "Payments from this account are paused. Please contact support.";
+
+    @ExceptionHandler(CoreAccountRestrictedException.class)
+    public ResponseEntity<ProblemDetail> restricted(CoreAccountRestrictedException ex) {
+        // Most specific handler wins over rejected() below (Spring matches by
+        // exception depth). The upstream detail stays in the log.
+        log.info("Core refused a debit from a restricted account: {}", ex.getMessage());
+        return problem(HttpStatus.FORBIDDEN,
+                "Account restricted",
+                ACCOUNT_RESTRICTED_DETAIL,
+                ACCOUNT_RESTRICTED);
+    }
 
     @ExceptionHandler(CoreClientException.class)
     public ResponseEntity<ProblemDetail> rejected(CoreClientException ex) {
