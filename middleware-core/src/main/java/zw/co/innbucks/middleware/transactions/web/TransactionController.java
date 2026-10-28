@@ -23,6 +23,8 @@ import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import zw.co.innbucks.middleware.idempotency.IdempotencyService;
+import zw.co.innbucks.middleware.limits.LimitExceededProblem;
+import zw.co.innbucks.middleware.limits.PaymentLimitExceededException;
 import zw.co.innbucks.middleware.stepup.StepUpRequiredException;
 import zw.co.innbucks.middleware.transactions.MovementRequests.DepositRequest;
 import zw.co.innbucks.middleware.transactions.MovementRequests.TransferRequest;
@@ -47,6 +49,40 @@ public class TransactionController {
              "status":"SUCCESS","coreTxRef":"501","failureCode":null,"failureMessage":null}
             """;
 
+    /** Consistent with the GET /me/limits example: basic tier, 12,500 of 150,000 used today. */
+    private static final String LIMIT_DAILY_EXAMPLE = """
+            {"type":"about:blank","title":"Payment limit reached","status":422,
+             "detail":"This payment would take you over your daily sending limit.",
+             "errorCode":"limit_exceeded","limit":"daily","limitMinor":150000,"remainingMinor":137500,
+             "resetsAt":"2026-10-29T00:00:00+02:00","kycTier":"basic","nextTier":"standard"}
+            """;
+
+    private static final String LIMIT_PER_PAYMENT_EXAMPLE = """
+            {"type":"about:blank","title":"Payment limit reached","status":422,
+             "detail":"This amount is more than you can send in one payment.",
+             "errorCode":"limit_exceeded","limit":"per_payment","limitMinor":100000,"remainingMinor":100000,
+             "resetsAt":null,"kycTier":"basic","nextTier":"standard"}
+            """;
+
+    private static final String LIMIT_COUNT_EXAMPLE = """
+            {"type":"about:blank","title":"Payment limit reached","status":422,
+             "detail":"You have made as many payments as you can today.",
+             "errorCode":"limit_exceeded","limit":"daily_count","limitCount":10,"remainingCount":0,
+             "resetsAt":"2026-10-29T00:00:00+02:00","kycTier":"enhanced","nextTier":null}
+            """;
+
+    private static final String CORE_REJECTED_EXAMPLE = """
+            {"type":"about:blank","title":"Request refused","status":422,
+             "detail":"Insufficient account balance.","errorCode":"core_rejected"}
+            """;
+
+    private static final String LIMITS_422_DESCRIPTION = "Refused before anything was written. "
+            + "errorCode limit_exceeded: the payment would break the caller's per-tier limit (fields "
+            + "limit, limitMinor/limitCount, remainingMinor/remainingCount, resetsAt, kycTier, nextTier; "
+            + "checked BEFORE step-up, so a payment that will be refused never gets step_up_required). "
+            + "Also: key reused with a different body (idempotency_conflict), or the core rejected the "
+            + "movement (core_rejected).";
+
     private final MovementService movementService;
 
     @PostMapping("/deposit")
@@ -63,7 +99,8 @@ public class TransactionController {
             @ApiResponse(responseCode = "409", description = "An identical request is still in progress",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
             @ApiResponse(responseCode = "422", description = "Key reused with a different body, or the core "
-                    + "rejected the movement (e.g. insufficient balance, wrong currency)",
+                    + "rejected the movement (e.g. insufficient balance, wrong currency). Deposits are not "
+                    + "subject to the per-tier payment limits.",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
             @ApiResponse(responseCode = "503", description = "Core banking system unreachable",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class)))
@@ -82,7 +119,9 @@ public class TransactionController {
     @Operation(summary = "Withdraw from the caller's own account",
             description = "At or above the caller's KYC-tier step-up threshold this returns 403 "
                     + "step_up_required with a txnFp; approve it via /auth/step-up/request + /verify and "
-                    + "retry with the returned token in X-Step-Up-Token.")
+                    + "retry with the returned token in X-Step-Up-Token. The caller's per-tier payment limits "
+                    + "(GET /me/limits) are checked FIRST: a payment over them is 422 limit_exceeded and never "
+                    + "asks for an approval.")
     @ApiResponses({
             @ApiResponse(responseCode = "200", description = "Movement outcome (SUCCESS / PROCESSING / FAILED)",
                     content = @Content(mediaType = MediaType.APPLICATION_JSON_VALUE,
@@ -102,10 +141,17 @@ public class TransactionController {
                                     """))),
             @ApiResponse(responseCode = "409", description = "An identical request is still in progress",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
-            @ApiResponse(responseCode = "422", description = "Key reused with a different body, or the core "
-                    + "rejected the movement (e.g. insufficient balance)",
-                    content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
-            @ApiResponse(responseCode = "503", description = "Core banking system unreachable",
+            @ApiResponse(responseCode = "422", description = LIMITS_422_DESCRIPTION,
+                    content = @Content(schema = @Schema(implementation = ProblemDetail.class),
+                            examples = {
+                                    @ExampleObject(name = "Daily limit", value = LIMIT_DAILY_EXAMPLE),
+                                    @ExampleObject(name = "Per-payment limit", value = LIMIT_PER_PAYMENT_EXAMPLE),
+                                    @ExampleObject(name = "Payments per day", value = LIMIT_COUNT_EXAMPLE),
+                                    @ExampleObject(name = "Core rejected", value = CORE_REJECTED_EXAMPLE)
+                            })),
+            @ApiResponse(responseCode = "503", description = "Core banking system unreachable "
+                    + "(core_banking_unavailable), or the caller's KYC tier could not be read for a decision "
+                    + "that would refuse (kyc_tier_unavailable). Retry unchanged.",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class)))
     })
     @PreAuthorize("hasAuthority('SCOPE_customer:write')")
@@ -123,7 +169,9 @@ public class TransactionController {
     @Operation(summary = "Transfer from the caller's own account to another account",
             description = "At or above the caller's KYC-tier step-up threshold this returns 403 "
                     + "step_up_required with a txnFp; approve it via /auth/step-up/request + /verify and "
-                    + "retry with the returned token in X-Step-Up-Token.")
+                    + "retry with the returned token in X-Step-Up-Token. The caller's per-tier payment limits "
+                    + "(GET /me/limits) are checked FIRST: a payment over them is 422 limit_exceeded and never "
+                    + "asks for an approval.")
     @ApiResponses({
             @ApiResponse(responseCode = "200", description = "Movement outcome (SUCCESS / PROCESSING / FAILED)",
                     content = @Content(mediaType = MediaType.APPLICATION_JSON_VALUE,
@@ -143,10 +191,17 @@ public class TransactionController {
                                     """))),
             @ApiResponse(responseCode = "409", description = "An identical request is still in progress",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
-            @ApiResponse(responseCode = "422", description = "Key reused with a different body, or the core "
-                    + "rejected the movement (e.g. insufficient balance, unknown destination)",
-                    content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
-            @ApiResponse(responseCode = "503", description = "Core banking system unreachable",
+            @ApiResponse(responseCode = "422", description = LIMITS_422_DESCRIPTION,
+                    content = @Content(schema = @Schema(implementation = ProblemDetail.class),
+                            examples = {
+                                    @ExampleObject(name = "Daily limit", value = LIMIT_DAILY_EXAMPLE),
+                                    @ExampleObject(name = "Per-payment limit", value = LIMIT_PER_PAYMENT_EXAMPLE),
+                                    @ExampleObject(name = "Payments per day", value = LIMIT_COUNT_EXAMPLE),
+                                    @ExampleObject(name = "Core rejected", value = CORE_REJECTED_EXAMPLE)
+                            })),
+            @ApiResponse(responseCode = "503", description = "Core banking system unreachable "
+                    + "(core_banking_unavailable), or the caller's KYC tier could not be read for a decision "
+                    + "that would refuse (kyc_tier_unavailable). Retry unchanged.",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class)))
     })
     @PreAuthorize("hasAuthority('SCOPE_customer:write')")
@@ -158,6 +213,13 @@ public class TransactionController {
         IdempotencyService.Result<TransactionResponse> result = movementService.transfer(
                 UUID.fromString(jwt.getSubject()), idempotencyKey, request, stepUpToken);
         return ResponseEntity.status(result.status()).body(result.body());
+    }
+
+    @ExceptionHandler(PaymentLimitExceededException.class)
+    public ResponseEntity<ProblemDetail> limitExceeded(PaymentLimitExceededException ex) {
+        return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
+                .contentType(MediaType.APPLICATION_PROBLEM_JSON)
+                .body(LimitExceededProblem.of(ex.refusal()));
     }
 
     @ExceptionHandler(StepUpRequiredException.class)

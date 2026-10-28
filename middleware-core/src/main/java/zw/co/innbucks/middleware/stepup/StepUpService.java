@@ -158,6 +158,17 @@ public class StepUpService {
     }
 
     /**
+     * The amount at or above which {@code tier}'s withdrawals and transfers
+     * need an approval, or {@code null} when step-up is switched off — what
+     * {@code GET /me/limits} reports as {@code stepUpAtOrAboveMinor}. Same
+     * reading as {@link #stepUpApplies}, so the screen cannot disagree with
+     * the 403.
+     */
+    public Long thresholdAtOrAbove(KycTier tier) {
+        return properties.enabled() ? properties.thresholdFor(tier) : null;
+    }
+
+    /**
      * Whether this movement is in scope for step-up at all. The ONE place the
      * master switch and the tier threshold are read, so the pre-check and the
      * authoritative check can never disagree about which movements need an

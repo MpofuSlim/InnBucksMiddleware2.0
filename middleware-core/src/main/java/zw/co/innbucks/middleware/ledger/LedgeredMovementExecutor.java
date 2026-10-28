@@ -46,7 +46,24 @@ public class LedgeredMovementExecutor {
     public LedgerOutcome execute(LedgerDraft draft,
                                  Function<TxRef, TransactionResult> coreCall) {
         // Write-ahead: committed (REQUIRES_NEW) before the core call goes out.
-        LedgerTransaction row = ledgerService.openPending(draft);
+        return callCore(draft, ledgerService.openPending(draft), coreCall);
+    }
+
+    /**
+     * As {@link #execute(LedgerDraft, Function)}, but the PENDING row is only
+     * opened if {@code reservationGuard} lets it — checked inside the same
+     * transaction as the INSERT (see {@link LedgerService#openPending(LedgerDraft,
+     * PendingReservationGuard)}). A refusal propagates from HERE, before the
+     * try block below: no row, no core call, nothing to reconcile.
+     */
+    public LedgerOutcome execute(LedgerDraft draft,
+                                 PendingReservationGuard reservationGuard,
+                                 Function<TxRef, TransactionResult> coreCall) {
+        return callCore(draft, ledgerService.openPending(draft, reservationGuard), coreCall);
+    }
+
+    private LedgerOutcome callCore(LedgerDraft draft, LedgerTransaction row,
+                                   Function<TxRef, TransactionResult> coreCall) {
         TxRef ref = new TxRef(draft.externalRef());
 
         TransactionResult result;
