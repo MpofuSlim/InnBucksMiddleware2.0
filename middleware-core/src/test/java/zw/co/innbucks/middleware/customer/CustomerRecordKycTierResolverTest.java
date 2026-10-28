@@ -6,11 +6,10 @@ import org.junit.jupiter.api.Test;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * The tier seam never throws out of the money path: an unrecognised stored
- * value is BASIC, counted and logged — where {@link KycTier#fromDbValue} turned
+ * value is BASIC, counted and logged — where the old strict {@code KycTier.fromDbValue} turned
  * it into a 500 on every payment the customer attempted.
  */
 class CustomerRecordKycTierResolverTest {
@@ -43,8 +42,6 @@ class CustomerRecordKycTierResolverTest {
             assertThat(resolution.authoritative()).isTrue();
         }
         assertThat(meters.counter("innbucks.kyc_tier.unrecognised").count()).isEqualTo(5.0);
-        // The strict parser still throws — which is why the money path no longer uses it.
-        assertThatThrownBy(() -> KycTier.fromDbValue("premium")).isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test

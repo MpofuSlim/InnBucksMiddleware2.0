@@ -17,18 +17,14 @@ public enum KycTier {
     }
 
     /**
-     * Strict parse — THROWS on anything that is not a tier name. Kept for the
-     * non-money callers that always had it; the money path never uses it (see
-     * {@link #parse} and {@code KycTierResolver}), because one garbage value in
-     * a customer row must not turn every payment of that customer into a 500.
-     */
-    public static KycTier fromDbValue(String value) {
-        return valueOf(value.toUpperCase(Locale.ROOT));
-    }
-
-    /**
      * Lenient parse: trims, ignores case, and answers {@link Optional#empty()}
-     * for null, blank or unrecognised values instead of throwing.
+     * for null, blank or unrecognised values instead of throwing. The ONLY
+     * parser: the strict, throwing {@code fromDbValue} (and
+     * {@code Customer.kycTierEnum()} over it) went when its last caller, the
+     * payment path, moved to {@code KycTierResolver} — one garbage value in a
+     * customer row turned every payment of that customer into a 500. Login and
+     * {@code /me/profile} carry the stored string as is. Resolve a tier for a
+     * decision through {@code KycTierResolver}, never by parsing here.
      */
     public static Optional<KycTier> parse(String value) {
         if (value == null || value.isBlank()) {

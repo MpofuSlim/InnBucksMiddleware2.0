@@ -13,10 +13,11 @@ import java.util.Optional;
  *
  * <p>An unrecognised stored value maps to BASIC (the tightest tier), is
  * counted on {@code innbucks.kyc_tier.unrecognised} and logged at WARN. It
- * never throws: {@link KycTier#fromDbValue} did, which turned one bad value
- * in a row into a 500 on every payment that customer attempted. The column has
- * no CHECK constraint, and once tiers are written from outside the
- * middleware a typo or a new tier name is a matter of time.
+ * never throws: the old strict {@code KycTier.fromDbValue} (now deleted) did,
+ * which turned one bad value in a row into a 500 on every payment that
+ * customer attempted. The column has no CHECK constraint, and once tiers are
+ * written from outside the middleware a typo or a new tier name is a matter
+ * of time.
  */
 @Slf4j
 @Component
