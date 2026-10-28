@@ -161,11 +161,12 @@ public class TransactionController {
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
             @ApiResponse(responseCode = "422", description = "Key reused with a different body, or the core "
                     + "rejected the movement (e.g. insufficient balance, unknown destination, or a recipient "
-                    + "account that cannot accept payments)",
+                    + "account that cannot accept payments — fixed copy, the same for every kind of block on "
+                    + "the recipient's side)",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class),
                             examples = @ExampleObject(name = "Recipient cannot receive", value = """
                                     {"type":"about:blank","title":"Request refused","status":422,
-                                     "detail":"Fineract vetoed the request: error.msg.savings.account.credit.transaction.not.allowed: the receiving account cannot accept this payment",
+                                     "detail":"The receiving account cannot accept this payment.",
                                      "errorCode":"core_rejected"}
                                     """))),
             @ApiResponse(responseCode = "503", description = "Core banking system unreachable",

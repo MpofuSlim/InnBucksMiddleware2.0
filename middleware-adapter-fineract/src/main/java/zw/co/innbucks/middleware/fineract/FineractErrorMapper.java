@@ -2,6 +2,7 @@ package zw.co.innbucks.middleware.fineract;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClientResponseException;
 import zw.co.innbucks.middleware.corebanking.CoreProvider;
@@ -42,10 +43,11 @@ import java.util.Locale;
  *       {@link CoreAccountRestrictedException} (a {@link CoreClientException},
  *       so still FAILED in the ledger). A block on any OTHER account — a
  *       transfer's recipient — stays a plain {@link CoreClientException}
- *       worded without the recipient's account id: see
+ *       with FIXED copy and none of Fineract's code or sentence: see
  *       {@link #accountRestriction}.</li>
  * </ul>
  */
+@Slf4j
 final class FineractErrorMapper {
 
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -71,6 +73,20 @@ final class FineractErrorMapper {
     static final String ACCOUNT_BLOCKED = "error.msg.saving.account.blocked.transaction.not.allowed";
     static final String DEBITS_BLOCKED = "error.msg.savings.account.debit.transaction.not.allowed";
     static final String CREDITS_BLOCKED = "error.msg.savings.account.credit.transaction.not.allowed";
+
+    /*
+     * The WHOLE message of a restriction refusal that is not the caller's own.
+     * It becomes the 422 core_rejected detail, the ledger's failure_message
+     * and every same-key replay of it, so it carries no Fineract code: BLOCK
+     * vs CREDIT block on someone else's wallet is the bank's hold (a fraud or
+     * compliance freeze looks exactly like this), and a free, repeatable
+     * transfer would otherwise read it out to any sender. Ops get the code in
+     * this class's log line instead.
+     */
+    static final String RECIPIENT_CANNOT_RECEIVE = "The receiving account cannot accept this payment.";
+
+    /** A BLOCK on a transfer that cannot be pinned to either side: name neither. */
+    static final String RESTRICTION_UNATTRIBUTED = "The banking system refused this payment.";
 
     /**
      * The account a write DEBITS — the only account whose restriction is the
@@ -128,7 +144,7 @@ final class FineractErrorMapper {
             return new CoreAuthException(CoreProvider.FINERACT, "Fineract rejected the write credentials: " + detail, ex);
         }
         if (status == 403) {
-            CoreBankingException restriction = accountRestriction(ex, debited);
+            CoreBankingException restriction = accountRestriction(ex, txRef, debited);
             return restriction != null ? restriction : forbidden(detail, ex);
         }
         if (status == 425) {
@@ -191,18 +207,25 @@ final class FineractErrorMapper {
      *       The message carries the code (BLOCK vs DEBIT block is ops detail)
      *       but never Fineract's sentence, which names the account id.</li>
      *   <li>On any other account → {@link CoreClientException} — the app's
-     *       generic {@code 422 core_rejected} — worded "the receiving account
-     *       cannot accept this payment", again without Fineract's sentence:
-     *       the sender learns the payment cannot land, not the recipient's
-     *       internal account id. Also what a deposit into the customer's own
-     *       blocked account becomes (a deposit debits nothing of theirs).</li>
+     *       generic {@code 422 core_rejected} — whose message is EXACTLY
+     *       {@link #RECIPIENT_CANNOT_RECEIVE}: no Fineract code, no sentence,
+     *       no account id. The sender learns the payment cannot land, not
+     *       which hold the bank put on whose account. Also what a deposit
+     *       into the customer's own blocked account becomes (a deposit debits
+     *       nothing of theirs, and the receiving account is theirs).</li>
      *   <li>A full BLOCK on a transfer whose echoed id is missing or
      *       unreadable cannot be attributed, and is NOT called the sender's
      *       restriction — the false "your account is paused" is the worse
-     *       error. A DEBIT block needs no id: only the debited leg checks it.</li>
+     *       error — nor the recipient's: {@link #RESTRICTION_UNATTRIBUTED}.
+     *       A DEBIT block needs no id: only the debited leg checks it.</li>
      * </ul>
+     *
+     * <p>For both non-debited cases the code and the blocked account's id
+     * reach ops through ONE log line here, keyed by the movement's ref —
+     * never through the message, which every downstream layer repeats.
      */
-    static CoreBankingException accountRestriction(RestClientResponseException ex, DebitedAccount debited) {
+    static CoreBankingException accountRestriction(RestClientResponseException ex, TxRef txRef,
+                                                   DebitedAccount debited) {
         JsonNode first = firstError(ex);
         if (first == null) {
             return null;
@@ -211,16 +234,26 @@ final class FineractErrorMapper {
         if (!code.equals(ACCOUNT_BLOCKED) && !code.equals(DEBITS_BLOCKED) && !code.equals(CREDITS_BLOCKED)) {
             return null;
         }
+        Long blockedId = blockedAccountId(first);
         boolean onDebitedAccount = debited.debits() && !code.equals(CREDITS_BLOCKED)
                 && (debited.onlyAccount()
                     || code.equals(DEBITS_BLOCKED)
-                    || (debited.savingsId() != null && debited.savingsId().equals(blockedAccountId(first))));
+                    || (debited.savingsId() != null && debited.savingsId().equals(blockedId)));
         if (onDebitedAccount) {
             return new CoreAccountRestrictedException(CoreProvider.FINERACT,
                     "Fineract refused to debit a restricted account (" + code + ")", ex);
         }
+        // Not the debited account. It IS the credited one when nothing is
+        // debited (a deposit), when only a credit leg can raise the code, or
+        // when a transfer's BLOCK echoes an id that is not its source.
+        boolean onCreditedAccount = !debited.debits()
+                || code.equals(CREDITS_BLOCKED)
+                || (debited.savingsId() != null && blockedId != null);
+        log.info("Fineract refused a write on an account it does not debit (code={}, savingsId={}, ref={}); "
+                        + "answered as {}", code, blockedId, txRef == null ? null : txRef.reference(),
+                onCreditedAccount ? "the receiving account" : "unattributable");
         return new CoreClientException(CoreProvider.FINERACT,
-                "Fineract vetoed the request: " + code + ": the receiving account cannot accept this payment", ex);
+                onCreditedAccount ? RECIPIENT_CANNOT_RECEIVE : RESTRICTION_UNATTRIBUTED, ex);
     }
 
     /** errors[0].args[0].value — a JSON number from Fineract's Jackson writer; a numeric string is tolerated. */

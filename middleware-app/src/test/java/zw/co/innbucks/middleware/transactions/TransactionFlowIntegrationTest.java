@@ -392,6 +392,43 @@ class TransactionFlowIntegrationTest {
     }
 
     @Test
+    void aBlockedRecipientIs422AndEveryAnswerCarriesOnlyTheFixedCopy() throws Exception {
+        // Exactly what FineractErrorMapper raises for a recipient's BLOCK or
+        // CREDIT block. Unlike a restriction, nothing downstream masks a plain
+        // refusal: the 422 detail, the ledger's failure_message and the
+        // same-key replay all repeat the message — so the adapter's fixed copy
+        // is the only thing that keeps the bank's hold type away from a sender.
+        stubPort.onTransfer = (cmd, key) -> {
+            throw new CoreClientException(CoreProvider.FINERACT,
+                    "The receiving account cannot accept this payment.", null);
+        };
+        String body = """
+                {"fromAccountId":"%s","toAccountId":"other:wallet",
+                 "amountMinor":5000,"currency":"KES"}
+                """.formatted(wallet);
+
+        mockMvc.perform(post("/transactions/transfer")
+                        .header(HttpHeaders.AUTHORIZATION, bearer).header("Idempotency-Key", "tr-recipient")
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.errorCode").value("core_rejected"))
+                .andExpect(jsonPath("$.detail").value("The receiving account cannot accept this payment."));
+
+        assertThat(jdbcTemplate.queryForMap("SELECT status, failure_code, failure_message FROM ledger_transaction"))
+                .containsEntry("status", "FAILED")
+                .containsEntry("failure_code", "core_rejected")
+                .containsEntry("failure_message", "The receiving account cannot accept this payment.");
+
+        mockMvc.perform(post("/transactions/transfer")
+                        .header(HttpHeaders.AUTHORIZATION, bearer).header("Idempotency-Key", "tr-recipient")
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("FAILED"))
+                .andExpect(jsonPath("$.failureCode").value("core_rejected"))
+                .andExpect(jsonPath("$.failureMessage").value("The receiving account cannot accept this payment."));
+    }
+
+    @Test
     void unknownOutcomeRendersAsProcessingWithAParkedRow() throws Exception {
         stubPort.onTransfer = (cmd, key) -> {
             throw new CoreUnknownOutcomeException(CoreProvider.FINERACT,

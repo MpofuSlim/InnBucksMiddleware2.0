@@ -103,11 +103,13 @@ class AccountRestrictedResponseTest {
     }
 
     @Test
-    void aBlockedRecipientStaysTheGeneric422() throws Exception {
+    void aBlockedRecipientStaysTheGeneric422WithTheAdaptersFixedCopy() throws Exception {
+        // Exactly what FineractErrorMapper raises for a recipient's BLOCK or
+        // CREDIT block (pinned in FineractClientContractTest). The 422 repeats
+        // the message verbatim, which is why the adapter keeps every code out.
         when(movementService.transfer(eq(customerId), anyString(), any(), any()))
                 .thenThrow(new CoreClientException(CoreProvider.FINERACT,
-                        "Fineract vetoed the request: error.msg.savings.account.credit.transaction.not.allowed: "
-                                + "the receiving account cannot accept this payment", null));
+                        "The receiving account cannot accept this payment.", null));
 
         mockMvc.perform(post("/transactions/transfer")
                         .header("Idempotency-Key", "tr-2")
@@ -118,6 +120,7 @@ class AccountRestrictedResponseTest {
                                 """))
                 .andExpect(status().isUnprocessableEntity())
                 .andExpect(jsonPath("$.errorCode").value("core_rejected"))
-                .andExpect(jsonPath("$.detail").value(containsString("the receiving account cannot accept")));
+                .andExpect(jsonPath("$.detail").value("The receiving account cannot accept this payment."))
+                .andExpect(content().string(not(containsString("error.msg"))));
     }
 }

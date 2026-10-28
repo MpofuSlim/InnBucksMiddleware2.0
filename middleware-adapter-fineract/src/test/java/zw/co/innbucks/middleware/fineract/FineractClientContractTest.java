@@ -397,31 +397,37 @@ class FineractClientContractTest {
     void aBlockedRecipientIsAPlainRefusalNotTheSendersRestriction() {
         // Same code as a blocked source — only args[0] (12 = toAccountId) says
         // whose account it is. It is the recipient's, so the sender must not be
-        // told THEIR account is paused, nor learn the recipient's account id.
+        // told THEIR account is paused. The message is ALL the sender ever sees
+        // (422 detail, ledger failure_message, same-key replay), so it is fixed
+        // copy: Fineract's code would say WHICH hold the bank put on someone
+        // else's wallet, on a probe that moves no money and repeats for free.
         transferAnswers(blocked(12));
 
         assertThatThrownBy(() -> client.transfer(7L, 11L, 8L, 12L, new BigDecimal("100.00"), "rent", "key-rb"))
                 .isInstanceOf(CoreClientException.class)
                 .isNotInstanceOf(CoreAccountRestrictedException.class)
-                .hasMessage("Fineract vetoed the request: error.msg.saving.account.blocked.transaction.not.allowed: "
-                        + "the receiving account cannot accept this payment");
+                .hasMessage("The receiving account cannot accept this payment.");
     }
 
     @Test
-    void aCreditBlockedRecipientIsAPlainRefusalToo() {
+    void aCreditBlockedRecipientIsWordedExactlyLikeAFullBlock() {
+        // A credit-only block and a full freeze must be indistinguishable to
+        // the sender — same message, byte for byte, nothing of either code.
         transferAnswers(creditsBlocked(12));
 
         assertThatThrownBy(() -> client.transfer(7L, 11L, 8L, 12L, new BigDecimal("100.00"), "rent", "key-rc"))
                 .isInstanceOf(CoreClientException.class)
                 .isNotInstanceOf(CoreAccountRestrictedException.class)
-                .hasMessage("Fineract vetoed the request: error.msg.savings.account.credit.transaction.not.allowed: "
-                        + "the receiving account cannot accept this payment");
+                .hasMessage("The receiving account cannot accept this payment.")
+                .hasMessageNotContaining("error.msg")
+                .hasMessageNotContaining("12");
     }
 
     @Test
     void aFullBlockWhoseAccountCannotBeReadIsNotCalledTheSenders() {
         // Defensive: a BLOCK on a transfer with no id to attribute it. Calling
-        // it the sender's restriction would be the worse error.
+        // it the sender's restriction would be the worse error, and calling it
+        // the recipient's would be a guess — so it names neither.
         transferAnswers("""
                 {"errors":[{"userMessageGlobalisationCode":"error.msg.saving.account.blocked.transaction.not.allowed",
                             "defaultUserMessage":"Any transaction to 12 is not allowed, since the account is blocked"}]}
@@ -429,12 +435,14 @@ class FineractClientContractTest {
 
         assertThatThrownBy(() -> client.transfer(7L, 11L, 8L, 12L, new BigDecimal("100.00"), "rent", "key-rn"))
                 .isInstanceOf(CoreClientException.class)
-                .isNotInstanceOf(CoreAccountRestrictedException.class);
+                .isNotInstanceOf(CoreAccountRestrictedException.class)
+                .hasMessage("The banking system refused this payment.");
     }
 
     @Test
     void aDepositIntoABlockedAccountDebitsNothingSoIsNoRestriction() {
-        // A deposit's BLOCK / CREDIT-block refusal is about the credited side.
+        // A deposit's BLOCK / CREDIT-block refusal is about the credited side —
+        // the customer's own account here, so "receiving account" is true.
         wireMock.stubFor(post(urlPathEqualTo("/v1/savingsaccounts/external-id/acct-1/transactions"))
                 .withQueryParam("command", equalTo("deposit"))
                 .willReturn(aResponse().withStatus(403)
@@ -442,7 +450,8 @@ class FineractClientContractTest {
 
         assertThatThrownBy(() -> client.deposit("acct-1", new BigDecimal("5.00"), "ref-dep", "key-dep"))
                 .isInstanceOf(CoreClientException.class)
-                .isNotInstanceOf(CoreAccountRestrictedException.class);
+                .isNotInstanceOf(CoreAccountRestrictedException.class)
+                .hasMessage("The receiving account cannot accept this payment.");
     }
 
     @Test

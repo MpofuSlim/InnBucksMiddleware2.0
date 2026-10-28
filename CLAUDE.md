@@ -101,10 +101,19 @@ Build: `./mvnw verify` at the root. Run locally:
   but a full BLOCK has ONE code for both sides of a transfer, so
   `FineractErrorMapper.accountRestriction` attributes it by
   `errors[0].args[0].value` against the source's numeric id — and an
-  unattributable BLOCK is NOT called the sender's. The recipient-side refusal
-  is reworded without Fineract's sentence, which names the recipient's
-  internal account id. Pinned by the restriction cases in
-  `FineractClientContractTest` and `AccountRestrictedResponseTest`.
+  unattributable BLOCK is NOT called the sender's. **The recipient-side
+  refusal is FIXED copy — "The receiving account cannot accept this
+  payment." — with no Fineract code, sentence or account id** (an
+  unattributable BLOCK: "The banking system refused this payment."). A plain
+  `CoreClientException`'s message is repeated verbatim by the 422 detail, the
+  ledger's `failure_message` and every same-key replay, and nothing downstream
+  masks it, so the code would let any sender tell a full freeze from a
+  credit-only block on someone else's wallet with a free, repeatable probe.
+  The code and account id go to ONE adapter log line keyed by the movement's
+  ref. Whether even the fixed copy says too much (it still reveals the
+  recipient cannot receive) is the owner's call. Pinned by the restriction
+  cases in `FineractClientContractTest`, `AccountRestrictedResponseTest` and
+  `TransactionFlowIntegrationTest`.
 * **A maker-checker-PARKED command is UNKNOWN, never a success.** Fineract
   answers a parked command with a success-shaped
   `200 {"commandId":N,"rollbackTransaction":true}` and no resourceId/echo —
