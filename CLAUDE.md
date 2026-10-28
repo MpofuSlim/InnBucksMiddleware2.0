@@ -282,7 +282,13 @@ Build: `./mvnw verify` at the root. Run locally:
   no `REFRESH_REPLAY_DETECTED` (the theft signal silent for an attacker racing
   the real holder). On 0 rows rotation re-reads the row: revoked → invalid;
   rotated → replay (family revoked, the winner's successor included;
-  audited). Access tokens are NOT revoked — see the deferred list. Pinned by
+  audited; stamped with the time AFTER the lock wait, so the successor is
+  never revoked before it was issued). **The app must single-flight
+  `/auth/refresh`**: before this guard, overlapping refreshes forked and both
+  kept a session; now they sign the customer out, and the winner's 200
+  carries tokens that are already revoked. The Swagger on `/auth/refresh` says so;
+  tell the app developer before deploying a build with this guard.
+  Access tokens are NOT revoked — see the deferred list. Pinned by
   `PinResetSignOutIntegrationTest` (both interleavings, forced with an open
   transaction), `RefreshRotationRaceIntegrationTest` (the overlapping double
   submit, forced the same way) and `RefreshTokenServiceTest`.

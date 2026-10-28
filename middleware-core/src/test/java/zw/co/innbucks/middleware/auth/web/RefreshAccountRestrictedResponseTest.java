@@ -11,6 +11,7 @@ import zw.co.innbucks.middleware.audit.AuditService;
 import zw.co.innbucks.middleware.auth.config.AuthProperties;
 import zw.co.innbucks.middleware.auth.exception.AccountRestrictedSessionException;
 import zw.co.innbucks.middleware.auth.exception.RefreshTokenInvalidException;
+import zw.co.innbucks.middleware.auth.exception.RefreshTokenReplayException;
 import zw.co.innbucks.middleware.auth.jwt.JwtIssuer;
 import zw.co.innbucks.middleware.auth.login.LoginService;
 import zw.co.innbucks.middleware.auth.refresh.AccountBlockSessionGuard;
@@ -161,7 +162,22 @@ class RefreshAccountRestrictedResponseTest {
     @Test
     void aRotationThatLosesARaceAfterTheCheckIsStillRefused() throws Exception {
         // Live when read, spent by a concurrent refresh before this one
-        // rotates: rotate() decides, exactly as before the check existed.
+        // rotates: rotate() decides, and decides it is a REPLAY — the whole
+        // family revoked, the racing refresh's new pair included — exactly
+        // as the same two refreshes one after the other.
+        when(refreshTokenService.rotate(anyString(), anyString())).thenThrow(new RefreshTokenReplayException());
+
+        mockMvc.perform(post("/auth/refresh").contentType(MediaType.APPLICATION_JSON).content(BODY))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.errorCode").value("refresh_replay_detected"));
+
+        verify(jwtIssuer, never()).issue(any());
+    }
+
+    @Test
+    void aRotationThatLosesToARevocationAfterTheCheckIsRefusedAsInvalid() throws Exception {
+        // Live when read, revoked (a logout, a PIN reset) before this one
+        // rotates: a revocation is not a theft signal.
         when(refreshTokenService.rotate(anyString(), anyString())).thenThrow(new RefreshTokenInvalidException());
 
         mockMvc.perform(post("/auth/refresh").contentType(MediaType.APPLICATION_JSON).content(BODY))

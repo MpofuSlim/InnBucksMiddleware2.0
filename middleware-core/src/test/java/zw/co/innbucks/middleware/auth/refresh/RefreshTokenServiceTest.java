@@ -21,6 +21,7 @@ import java.time.ZoneOffset;
 import java.util.HexFormat;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -120,6 +121,31 @@ class RefreshTokenServiceTest {
         verify(audit).record(AuditAction.REFRESH_REPLAY_DETECTED, AuditOutcome.FAILURE, customerId, DEVICE);
         verify(jdbc, never()).update(contains("INSERT INTO refresh_token"), any(Object[].class));
         verify(audit, never()).record(eq(AuditAction.REFRESH_SUCCESS), any(), any(), any());
+    }
+
+    @Test
+    void theRacingReplayIsStampedAfterTheWaitNotWhenTheRowWasRead() {
+        // The losing mark waits on the winner's row lock, and the winner's
+        // successor is issued during that wait. Stamped with the instant this
+        // rotation READ the row, that successor would be revoked before it
+        // was issued.
+        AtomicReference<Instant> time = new AtomicReference<>(NOW);
+        Clock clock = mock(Clock.class);
+        when(clock.instant()).thenAnswer(inv -> time.get());
+        RefreshTokenService racing = new RefreshTokenService(repository, authProperties, clock, audit, jdbc);
+        Instant afterTheWait = NOW.plusMillis(250);
+        when(repository.markReplaced(eq(current.getJti()), any())).thenAnswer(inv -> {
+            time.set(afterTheWait);
+            return 0;
+        });
+        RefreshToken rotatedMeanwhile = copyOfCurrent();
+        rotatedMeanwhile.setReplacedByJti(UUID.randomUUID());
+        when(repository.findById(current.getJti())).thenReturn(Optional.of(rotatedMeanwhile));
+
+        assertThatThrownBy(() -> racing.rotate(SECRET, DEVICE))
+                .isInstanceOf(RefreshTokenReplayException.class);
+
+        verify(repository).revokeFamily(current.getFamilyId(), afterTheWait, "replay_detected");
     }
 
     @Test

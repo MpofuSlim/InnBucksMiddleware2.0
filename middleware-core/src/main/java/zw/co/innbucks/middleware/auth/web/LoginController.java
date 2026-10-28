@@ -73,14 +73,21 @@ public class LoginController {
     @PostMapping("/refresh")
     @Operation(
             summary = "Rotate the refresh token, issuing a fresh access + refresh pair",
-            description = "Each refresh token is single-use. Re-presenting an already-rotated refresh token is treated as theft and revokes the whole token family. "
+            description = "Each refresh token is single-use. Presenting one a second time is treated as theft and revokes the whole token family, "
+                    + "whether the first refresh has finished or is still in flight. So send at most ONE refresh per refresh token at a time: when "
+                    + "several calls fail with 401 together, queue them behind a single refresh and reuse its result. Two refreshes of the same token "
+                    + "sent together sign the customer out: one may still answer 200, but the tokens it returns are already revoked. After "
+                    + "refresh_replay_detected, discard every stored token, including any just received, and go to sign-in. "
                     + "If the bank has fully blocked the customer's account, the refresh is refused with 403 account_restricted and EVERY session the customer "
                     + "holds is ended: show the detail and return to the signed-out screen — retrying cannot succeed while the block stands. A debit-only "
                     + "block does not end sessions (payments answer account_restricted instead)."
     )
     @ApiResponses({
             @ApiResponse(responseCode = "200", description = "Tokens rotated"),
-            @ApiResponse(responseCode = "401", description = "Invalid, expired, or replay-detected refresh token",
+            @ApiResponse(responseCode = "401", description = "Invalid or expired refresh token (errorCode refresh_invalid), or a "
+                    + "refresh token presented a second time (errorCode refresh_replay_detected) — including the second of two refreshes "
+                    + "sent together. Either way the session is over: discard every stored token, including one just received from a "
+                    + "concurrent refresh, and sign in again.",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
             @ApiResponse(responseCode = "403", description = "The bank has fully blocked the customer's account; every "
                     + "session has been ended (errorCode account_restricted)",
@@ -201,7 +208,9 @@ public class LoginController {
 
     @Schema(description = "Refresh request.")
     public record RefreshRequest(
-            @NotBlank @Schema(description = "The opaque refresh token (UUID format) issued by /auth/login; single-use, replay revokes the whole family.", example = "550e8400-e29b-41d4-a716-446655440000")
+            @NotBlank @Schema(description = "The opaque refresh token (UUID format) issued by /auth/login or the last refresh; single-use. "
+                    + "Send one refresh per token at a time: a second one, concurrent or later, revokes the whole family.",
+                    example = "550e8400-e29b-41d4-a716-446655440000")
             String refreshToken,
 
             @NotBlank @Schema(description = "Must match the device the refresh token was issued to.", example = "sha256-hex-of-device-fingerprint")

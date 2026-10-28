@@ -169,7 +169,7 @@ public class RefreshTokenService {
         // otherwise commit an orphan.
         UUID successorJti = UUID.randomUUID();
         if (repository.markReplaced(current.getJti(), successorJti) != 1) {
-            throw lostTheRowAfterReadingIt(current, now, deviceHash);
+            throw lostTheRowAfterReadingIt(current, deviceHash);
         }
         RefreshToken next = persist(successorJti, current.getCustomerId(), current.getFamilyId(), deviceHash);
 
@@ -192,14 +192,20 @@ public class RefreshTokenService {
      * with a stolen token and device hash — and is treated exactly like the
      * same two requests one after the other: the family is revoked, the
      * successor the winner just minted included, and audited.
+     *
+     * <p>The revocation is stamped NOW, after the mark waited on the winner's
+     * row lock — not with the instant rotation read the row at. That earlier
+     * instant can predate the winner's successor, which would then carry a
+     * {@code revoked_at} before its own {@code issued_at}: a session that,
+     * to a forensic "which session was live at time X" query, never was.
      */
-    private RuntimeException lostTheRowAfterReadingIt(RefreshToken read, Instant now, String deviceHash) {
+    private RuntimeException lostTheRowAfterReadingIt(RefreshToken read, String deviceHash) {
         Optional<RefreshToken> reread = repository.findById(read.getJti());
         if (reread.isEmpty() || reread.get().getRevokedAt() != null) {
             return new RefreshTokenInvalidException();
         }
         if (reread.get().getReplacedByJti() != null) {
-            return replayDetected(read, now, deviceHash);
+            return replayDetected(read, clock.instant(), deviceHash);
         }
         // Unreachable: the row is unrevoked and unrotated, so the guarded
         // UPDATE would have matched it. Refuse rather than guess.
