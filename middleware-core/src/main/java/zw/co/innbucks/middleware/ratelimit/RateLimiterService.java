@@ -28,6 +28,16 @@ import java.util.concurrent.TimeUnit;
  * the KYC create budget (5 a day) into 5 per quiet hour, and would do the
  * same to any window an operator raises past an hour through the env.
  *
+ * <p>That promise is bounded by the ONE shared size cap (100,000 keys, about
+ * 45 MB at the ~475 bytes a key measured). Past it, Caffeine evicts by
+ * frequency, and a day-long bucket touched a handful of times is exactly the
+ * kind of key it drops — it comes back full. That needs 100,000 distinct keys
+ * live at once (every per-minute key lives an hour), i.e. a very busy cell,
+ * and the buckets of anyone hitting an endpoint hard survive it. A cache of
+ * its own for long windows was not taken: it would add up to the same 45 MB
+ * to the replica that moves money to protect budgets that already reset on
+ * every restart.
+ *
  * <p>Single-instance only — see {@link RateLimitProperties}.
  */
 @Service

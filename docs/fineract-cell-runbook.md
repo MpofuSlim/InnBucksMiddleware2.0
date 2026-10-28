@@ -744,11 +744,25 @@ tuples until VACUUM and in every backup taken before, until those age out.
 **Smoke-test one upload in the released image before switching KYC on.**
 The photo pipeline (ImageIO's JPEG codec in `java.desktop`) is tested on the
 build JDK, never inside the `eclipse-temurin:21-jre-alpine` runtime image. On
-staging with `KYC_ENABLED=true`, open a request from a test account and `POST`
-one real phone photo to `/me/kyc/submissions/{id}/files/id_front`: a `200`
-with `width`/`height` proves the decoder, scaler and encoder run there; a
-`500`, or a `kyc_file_invalid` for a photo that is plainly fine, means the
-image is missing something the pipeline needs.
+staging with `KYC_ENABLED=true`, open a request from a test account and upload
+a photo SHAPED THE WAY THE APP SENDS ONE — a baseline (not progressive) JPEG
+under 2 MiB and 16 MP, e.g. a phone photo re-saved at about 1600 px on its
+long side. A camera original is the wrong test file: it is often over 2 MiB
+(a 413), over 16 MP (`too_many_pixels`), or HEIC on an iPhone (`not_jpeg`),
+and each of those is the intake doing its job. Send the raw bytes —
+`--data-binary`, never `-d`, which strips line breaks and corrupts the file:
+
+```sh
+curl -sS -X POST "https://<host>/middleware/me/kyc/submissions/$ID/files/id_front" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: image/jpeg' --data-binary @id.jpg
+```
+
+A `200` with `width`/`height` proves the decoder, scaler and encoder run
+there. On a refusal, read its `reason` before blaming the image:
+`too_many_pixels`, `too_small`, `not_jpeg` and any 413 are about the FILE.
+Only a `500`, or `corrupt` / `unsupported_encoding` for a file that a
+middleware run from source (dev profile, build JDK) accepts, points at
+something the runtime image is missing.
 
 Then start it. **Pull a published, scanned image — do not build on the box.**
 The Release workflow (`.github/workflows/release.yml`) gates on the test

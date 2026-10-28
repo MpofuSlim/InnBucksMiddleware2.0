@@ -1482,7 +1482,13 @@ commands, with the exact bytes that were running before. Full procedure
      `RateLimiterService` now keeps an idle key for its own window or an hour,
      whichever is longer: the old flat one-hour idle eviction recreated the
      bucket full, i.e. 5 per quiet hour (and silently shortened any window an
-     operator raised past an hour through the env).
+     operator raised past an hour through the env). It stays a SOFT bound:
+     every restart resets it, and past the limiter's one shared size cap
+     (100,000 keys, ~45 MB at ~475 B a key, measured) Caffeine evicts by
+     frequency, so a daily bucket spent quietly can be dropped and come back
+     full. A cache of its own for long windows was weighed and not taken —
+     up to another 45 MB on the replica that moves money, for a budget whose
+     overrun now costs rows, not reviewer flags (see `duplicate_count`).
    - **Lifecycle** (`KycLifecycleJob`, daily): drafts and reopened rounds past
      `draft-ttl` (14 d) expire and lose their unsubmitted files; REJECTED rounds'
      files go after `rejected-file-retention` (30 d — a placeholder, compliance's
@@ -1526,9 +1532,13 @@ commands, with the exact bytes that were running before. Full procedure
      `submission.round`, `.missing`, `.expiresAt` (they drive the resume
      screen) and `.nationalId` (masked); `onFile` is the evidence of RECORD,
      not "last sent", and adds `proofOfAddress`; resume from `GET /me/kyc`,
-     never by probing create; uploads are raw `image/jpeg` bodies, POST
-     preferred; ANY 413 means too large; 503 `kyc_upload_busy` means retry
-     after Retry-After; and the cancel endpoint once the owner says go.
+     never by probing create; every NEW request takes a NEW Idempotency-Key,
+     one opened after a cancel or an expiry included — for a day the old key
+     replays the old, closed request's 201 (an id that then answers 409
+     `expired`) and spends the create budget each time; uploads are raw
+     `image/jpeg` bodies, POST preferred; ANY 413 means too large; 503
+     `kyc_upload_busy` means retry after Retry-After; and the cancel endpoint
+     once the owner says go.
    - **`approve()` is called only once the tier change is in force.** It frees
      the one-open slot and makes the round the record; on a reviewer's yes
      alone `/me/kyc` would show `approved` beside the old tier and offer the
@@ -1554,9 +1564,12 @@ commands, with the exact bytes that were running before. Full procedure
      0.15–0.4 MB, a request 0.5–1.6 MB.
    - **Go-live gates outside the code**: EBS encryption on the box, encrypted and
      pruned backups, an offline copy of the key file, compliance's tier
-     requirements and retention, and one real photo uploaded through the
-     RELEASED image (the JPEG pipeline is tested on the build JDK, never in
-     the alpine JRE runtime — runbook).
+     requirements and retention, and one photo shaped the way the app sends
+     it (baseline JPEG under 2 MiB and 16 MP, raw `--data-binary`) uploaded
+     through the RELEASED image (the JPEG pipeline is tested on the build JDK,
+     never in the alpine JRE runtime — runbook; a camera original is the
+     wrong test file, its 413 / `too_many_pixels` / `not_jpeg` is the intake
+     working).
    Contract pinned by `KycCipherTest` + `KycKeyRingTest` (envelope, AAD incl.
    a file opening only as its own submission/round/kind, previous and wrong
    keys, strict parsing), the national-ID tests (ZW/KE
@@ -1566,8 +1579,11 @@ commands, with the exact bytes that were running before. Full procedure
    same hand-built file in one scan accepted, EXIF and trailing data gone,
    downscale, slot released on failure), `KycServiceTest` / `KycRoundsTest` / `KycLifecycleJobTest` over an
    in-memory store with the SQL's semantics, `KycHttpTest` (standalone MockMvc:
-   statuses, errorCodes, headers, Swagger examples parse with no duplicate
-   keys and carry exactly a real response's fields), `KycSwitchTest` (off = nothing exists; on = key required; on = every
+   statuses, errorCodes, headers, every Swagger example parses with no
+   duplicate keys and carries exactly the fields of a real response of its
+   kind — problem examples leave out `instance`, the request path Spring adds
+   to every problem, as every example in this codebase does), `KycSwitchTest`
+   (off = nothing exists; on = key required; on = every
    bean wires), the guard cases in `ProductionSecretsGuardTest`,
    `ServletBodyParsingSwitchesTest` (the SHIPPED yaml switches multipart and
    the form filter off, and Boot honours it), and against

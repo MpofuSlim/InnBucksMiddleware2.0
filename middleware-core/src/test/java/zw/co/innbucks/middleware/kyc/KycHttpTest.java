@@ -324,6 +324,118 @@ class KycHttpTest {
         assertThat(examples).isEqualTo(3);
     }
 
+    /**
+     * Every OTHER example — success bodies and problem bodies alike — beside a
+     * real response of the same kind, field for field. Covers every
+     * {@code *_EXAMPLE} constant, so an example added without a real
+     * counterpart fails here instead of drifting quietly.
+     */
+    @Test
+    void everyOtherExampleHasExactlyTheFieldsOfTheResponseItShows() throws Exception {
+        java.util.Map<String, JsonNode> real = new java.util.LinkedHashMap<>();
+        String create = "/me/kyc/submissions";
+
+        real.put("CREATED_EXAMPLE", body(post(create).header("Idempotency-Key", UUID.randomUUID().toString())
+                .contentType(MediaType.APPLICATION_JSON).content(standard()), 201));
+        String id = real.get("CREATED_EXAMPLE").get("id").asText();
+        real.put("SUBMISSION_OPEN_EXAMPLE", body(post(create).header("Idempotency-Key", UUID.randomUUID().toString())
+                .contentType(MediaType.APPLICATION_JSON).content(standard()), 409));
+        real.put("NATIONAL_ID_INVALID_EXAMPLE", body(post(create)
+                .header("Idempotency-Key", UUID.randomUUID().toString()).contentType(MediaType.APPLICATION_JSON)
+                .content("{\"targetTier\":\"standard\",\"nationalId\":\"12\"}"), 400));
+        real.put("TARGET_INVALID_EXAMPLE", body(post(create)
+                .header("Idempotency-Key", UUID.randomUUID().toString()).contentType(MediaType.APPLICATION_JSON)
+                .content("{\"targetTier\":\"premium\",\"nationalId\":\"63-1234567 X 18\"}"), 400));
+        real.put("ADDRESS_INVALID_EXAMPLE", body(post(create)
+                .header("Idempotency-Key", UUID.randomUUID().toString()).contentType(MediaType.APPLICATION_JSON)
+                .content("{\"targetTier\":\"enhanced\",\"nationalId\":\"63-1234567 X 18\"}"), 400));
+
+        String files = "/me/kyc/submissions/" + id + "/files/";
+        byte[] jpeg = TestImages.jpeg(900, 600);
+        real.put("STORED_EXAMPLE", body(post(files + "id_front").contentType(MediaType.IMAGE_JPEG).content(jpeg), 200));
+        real.put("FILE_INVALID_EXAMPLE", body(post(files + "id_back").contentType(MediaType.IMAGE_JPEG)
+                .content("not a photo".getBytes(java.nio.charset.StandardCharsets.US_ASCII)), 400));
+        real.put("FILE_NOT_NEEDED_EXAMPLE", body(post(files + "proof_of_address")
+                .contentType(MediaType.IMAGE_JPEG).content(jpeg), 400));
+        real.put("TOO_LARGE_EXAMPLE", body(post(files + "id_back").contentType(MediaType.IMAGE_JPEG)
+                .content(new byte[2 * 1024 * 1024 + 1]), 413));
+        real.put("NOT_FOUND_EXAMPLE", body(post("/me/kyc/submissions/" + UUID.randomUUID() + "/files/id_back")
+                .contentType(MediaType.IMAGE_JPEG).content(jpeg), 404));
+        List<AutoCloseable> held = new ArrayList<>();
+        try {
+            for (int i = 0; i < 4; i++) {
+                held.add(f.images.admit());
+            }
+            real.put("BUSY_EXAMPLE", body(post(files + "id_back").contentType(MediaType.IMAGE_JPEG).content(jpeg), 503));
+        } finally {
+            for (AutoCloseable admission : held) {
+                admission.close();
+            }
+        }
+        real.put("INCOMPLETE_EXAMPLE", body(post("/me/kyc/submissions/" + id + "/submit"), 422));
+        mvc.perform(post(files + "id_back").contentType(MediaType.IMAGE_JPEG).content(jpeg))
+                .andExpect(status().isOk());
+        mvc.perform(post(files + "selfie").contentType(MediaType.IMAGE_JPEG).content(jpeg))
+                .andExpect(status().isOk());
+        real.put("ACCEPTED_EXAMPLE", body(post("/me/kyc/submissions/" + id + "/submit"), 202));
+        real.put("NOT_OPEN_EXAMPLE", body(post(files + "id_back").contentType(MediaType.IMAGE_JPEG).content(jpeg), 409));
+        real.put("NOT_CANCELLABLE_EXAMPLE", body(post("/me/kyc/submissions/" + id + "/cancel"), 409));
+
+        UUID other = f.customer("basic", null);
+        signInAs(other);
+        String draft = create(standard());
+        real.put("CANCELLED_EXAMPLE", body(post("/me/kyc/submissions/" + draft + "/cancel"), 200));
+        doThrow(new RateLimitExceededException(40)).when(f.rateLimiter).submit(eq(other), eq(IP));
+        real.put("RATE_LIMITED_EXAMPLE", body(post("/me/kyc/submissions/" + draft + "/submit"), 429));
+
+        signInAs(f.customer("enhanced", null));
+        real.put("NOT_AVAILABLE_EXAMPLE", body(post(create).header("Idempotency-Key", UUID.randomUUID().toString())
+                .contentType(MediaType.APPLICATION_JSON).content(standard()), 409));
+
+        f.tierResolver = c -> zw.co.innbucks.middleware.customer.KycTierResolution.unavailable();
+        ClientIpResolver ipResolver = mock(ClientIpResolver.class);
+        when(ipResolver.resolve(any())).thenReturn(IP);
+        mvc = MockMvcBuilders.standaloneSetup(new KycController(f.service(), ipResolver))
+                .setControllerAdvice(new KycExceptionHandler(), new AuthExceptionHandler(),
+                        new GlobalExceptionHandler())
+                .setCustomArgumentResolvers(new AuthenticationPrincipalArgumentResolver())
+                .build();
+        real.put("TIER_UNAVAILABLE_EXAMPLE", body(get("/me/kyc"), 503));
+
+        List<String> examples = new ArrayList<>();
+        for (java.lang.reflect.Field field : KycController.class.getDeclaredFields()) {
+            if (field.getType() == String.class && field.getName().endsWith("_EXAMPLE")
+                    && !field.getName().startsWith("STATUS_")) {
+                examples.add(field.getName());
+                field.setAccessible(true);
+                JsonNode shown = json.readTree((String) field.get(null));
+                assertThat(real).as("a real response for " + field.getName()).containsKey(field.getName());
+                JsonNode actual = real.get(field.getName());
+                List<String> actualNames = fieldNames(actual);
+                // `instance` is the request path Spring adds to every problem
+                // body; like every example in this codebase, ours leave it out.
+                actualNames.remove("instance");
+                assertThat(fieldNames(shown)).as(field.getName())
+                        .containsExactlyInAnyOrderElementsOf(actualNames);
+                if (actual.has("errorCode")) {
+                    assertThat(shown.get("errorCode")).as(field.getName() + " errorCode")
+                            .isEqualTo(actual.get("errorCode"));
+                    assertThat(shown.get("status")).as(field.getName() + " status")
+                            .isEqualTo(actual.get("status"));
+                }
+            }
+        }
+        assertThat(examples).containsExactlyInAnyOrderElementsOf(real.keySet());
+    }
+
+    private JsonNode body(org.springframework.test.web.servlet.RequestBuilder request, int expectedStatus)
+            throws Exception {
+        MvcResult result = mvc.perform(request).andReturn();
+        assertThat(result.getResponse().getStatus()).as(result.getResponse().getContentAsString())
+                .isEqualTo(expectedStatus);
+        return json.readTree(result.getResponse().getContentAsString());
+    }
+
     private static List<String> fieldNames(JsonNode node) {
         List<String> names = new ArrayList<>();
         node.fieldNames().forEachRemaining(names::add);

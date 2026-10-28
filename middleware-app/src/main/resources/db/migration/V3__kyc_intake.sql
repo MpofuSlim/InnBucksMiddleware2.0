@@ -109,7 +109,8 @@ CREATE TABLE kyc_file (
     submission_id       UUID                     NOT NULL,
     round               INTEGER                  NOT NULL,
     kind                VARCHAR(24)              NOT NULL,
-    -- AES-GCM envelope (binary form) of the RE-ENCODED JPEG, bound to this id.
+    -- AES-GCM envelope (binary form) of the RE-ENCODED JPEG, bound to
+    -- (submission, upload round, kind, id) — KycAad.file.
     content_ciphertext  BYTEA                    NOT NULL,
     width               INTEGER                  NOT NULL,
     height              INTEGER                  NOT NULL,

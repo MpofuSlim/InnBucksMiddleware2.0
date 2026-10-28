@@ -235,6 +235,8 @@ public class KycController {
     @PostMapping("/submissions")
     @Operation(summary = "Open a request for a higher tier",
             description = "Requires an Idempotency-Key: a retry with the same key and body replays the 201. "
+                    + "A NEW request needs a NEW key, including one opened after a cancel or an expiry: for a "
+                    + "day the old key replays the old, now closed, request's 201 (and spends the budget). "
                     + "targetTier must be above the caller's tier. The national ID is checked for shape "
                     + "(spaces, dashes and case ignored) and stored encrypted. An address is required for "
                     + "enhanced and refused otherwise. Only one request may be open: a second one is 409 "
@@ -391,7 +393,8 @@ public class KycController {
                     + "ID number, the wrong level or the wrong address, which a new request is needed for (only "
                     + "one can be open). The request closes as `expired`; the photos uploaded into its open "
                     + "round are deleted, photos of rounds already sent to staff follow their own retention. "
-                    + "Then open a new request. Cancelling a request that is already expired answers the same "
+                    + "Then open a new request, with a new Idempotency-Key. Cancelling a request that is "
+                    + "already expired answers the same "
                     + "200. A request with staff (pending_review) or decided cannot be cancelled. Shares the "
                     + "daily budget of POST /me/kyc/submissions.")
     @ApiResponses({
