@@ -219,6 +219,15 @@ then **revokes** it (`PUT /v1/roles/{id}/permissions` with `false`, which
 Fineract applies as a removal). Fineract then refuses the middleware's deposits
 with `403 error.msg.not.authorized` whatever the middleware's flag says.
 
+> [!IMPORTANT]
+> **The core's lock is closed only on a cell this script has provisioned since
+> the lock was added.** It lives in Fineract's roles, not in the middleware
+> image, so rolling a new image changes nothing there: a cell provisioned
+> earlier keeps `DEPOSIT_SAVINGSACCOUNT` on `innbucks-mw-write`, and the
+> middleware's switch stays its ONLY lock until `provision-cell.sh` runs on it
+> again. That run is a required, one-time rollout step on every existing cell;
+> see "One-time rollout" below.
+
 - **Why `deploy/fineract/.env` and not the cell file.** `cell.zw.env` is shared
   by every ZW box, staging and production alike, so a committed switch would be
   on for both or off for both. The opt-in is per box, like the secrets, in the
@@ -276,6 +285,42 @@ anyway, the app sees `502 core_banking_unavailable` (not a 422 naming the
 permission) and the ledger row is `FAILED` with `core_auth_failed`, never
 parked `UNKNOWN`; the middleware log names the missing permission. Add the
 line and re-run.
+
+#### One-time rollout: re-provision every existing cell
+
+Do this once on every cell that was provisioned before the core deposit lock
+existed, after that change merges. It is not part of the image roll, and
+nothing else will do it.
+
+1. **Every cell except staging (production first).** Change nothing in
+   `deploy/fineract/.env`: no `MIDDLEWARE_CUSTOMER_DEPOSITS` line is exactly
+   what closes the lock. Run the canonical sequence from the top of this
+   section:
+
+   ```sh
+   cd deploy/fineract
+   set -a; source ../cells/cell.zw.env; set +a     # policy, committed
+   set -a; source .env;                 set +a     # secrets, gitignored
+   ./provision-cell.sh
+   ```
+
+   Done means BOTH: the run exits 0, and step 6f prints
+   `LOCKED: no role of innbucks-mw-write grants DEPOSIT_SAVINGSACCOUNT or
+   ALL_FUNCTIONS`. A `deposit lock OPEN` line, or a refusal of a cell-file
+   entry, fails the run: fix what it names and re-run. Then check the
+   middleware side is closed as well: its `.env` has no
+   `TRANSACTIONS_DEPOSIT_ENABLED` line, and its boot logs `Customer deposits:
+   OFF`.
+
+   For end-to-end proof, add `RUN_SMOKE=1`: the core must refuse a real
+   zero-amount deposit sent with the write credential. Fineract cannot delete
+   the `SMOKE-Probe` client and wallet that run leaves behind, so on production
+   use it only where the bank accepts that; 6f is the required check.
+2. **Staging.** Add the opt-in line first (above), then the same run. 6f must
+   print `ON`, and the smoke's 1.00 deposit must succeed.
+
+Until a cell has had this run, treat its core lock as open, whatever this
+section says about the design.
 
 ### Client Constitution / Main Business Line code values (step 4d)
 
@@ -770,8 +815,11 @@ deposits too unless the box was provisioned with
 "Customer deposits at the core"). Staging needs **both**: with the flag on and
 the core lock closed, every deposit answers `502 core_banking_unavailable` and
 lands in the ledger as `FAILED` / `core_auth_failed`, and the middleware log
-names the missing `DEPOSIT_SAVINGSACCOUNT`. On production neither is set, so a
-flag carried over by mistake still cannot mint money: the core says no.
+names the missing `DEPOSIT_SAVINGSACCOUNT`. On production neither is set, so
+once production has been re-provisioned with this script (section 4, "One-time
+rollout"), a flag carried over by mistake still cannot mint money: the core
+says no. Before that run, production's core still grants the permission and
+this flag is the only lock.
 
 ### The compose override (truststore, loopback, forwarded headers)
 
@@ -968,5 +1016,7 @@ is set — login before that is supposed to fail.
   break-glass only.
 - The write AppUser holds `DEPOSIT_SAVINGSACCOUNT` only on a box provisioned
   with `MIDDLEWARE_CUSTOMER_DEPOSITS=1` (staging). Production never sets it,
-  and `provision-cell.sh` step 6f must print `LOCKED` there.
+  and `provision-cell.sh` step 6f must print `LOCKED` there. A cell provisioned
+  before that lock existed keeps the permission until the script runs on it
+  again (section 4, "One-time rollout").
 - The image is pinned + scanned + attested; upgrades are deliberate tags.

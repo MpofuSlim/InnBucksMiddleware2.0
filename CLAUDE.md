@@ -171,7 +171,11 @@ Build: `./mvnw verify` at the root. Run locally:
   ORIGINAL stored status. Same key + different body → 422; fresh claim in
   flight → 409; stale claim (>60s) taken over.
 * **`POST /transactions/deposit` is an unfunded cash-in, shut by TWO
-  independent locks, both closed by default.** (1) The middleware's switch,
+  independent locks, both closed by default — the core's once the cell has
+  been provisioned by a `provision-cell.sh` that carries it.** A cell
+  provisioned before the lock keeps the permission until the script runs there
+  again: a one-time rollout step, not an image roll (Operational conventions;
+  runbook §4 "One-time rollout"). (1) The middleware's switch,
   `innbucks.transactions.deposit.enabled` / `TRANSACTIONS_DEPOSIT_ENABLED`
   (`DepositGate`, below). (2) The core's permission: `provision-cell.sh` grants
   the write AppUser `DEPOSIT_SAVINGSACCOUNT` only when the box sets
@@ -487,8 +491,12 @@ reason to copy the rule rather than fork it.
   first image with the switch, add the staging line BEFORE the roll, or staging
   stops taking deposits on that roll; likewise add the opt-in before
   re-provisioning staging, because a run without it revokes the permission.
-  Re-provisioning production with no change closes the core lock. Runbook §4
-  ("Customer deposits at the core") and §5.
+  Re-provisioning production with no change closes the core lock, and **that
+  re-provision is REQUIRED, once, on every cell provisioned before the lock**:
+  the permission lives in Fineract's roles, so rolling the image leaves it in
+  place and the switch stays the only lock there. Done means the run exits 0
+  and 6f prints `LOCKED`. Runbook §4 ("Customer deposits at the core", "One-time
+  rollout") and §5.
 
 ## Environments (EC2, af-south-1)
 
@@ -538,6 +546,16 @@ Pin `IMAGE_TAG` to a `sha-` tag, never leave a cell on mutable `:latest` —
 rollback is then re-pinning the previous tag and re-running the same two
 commands, with the exact bytes that were running before. Full procedure
 (TLS, truststore, edge, smoke) in `docs/fineract-cell-runbook.md`.
+
+**When the merge touches `deploy/fineract/provision-*.sh`, the image roll is
+not the whole deploy.** Fineract's roles and permissions change only when
+`provision-cell.sh` runs on the cell, so the post-merge commands must include
+that run, per cell, with what it must print. The customer-deposit lock is the
+standing case: after the merge that introduced it, every non-staging cell needs
+one re-provision with nothing new in `deploy/fineract/.env` (exit 0, 6f
+`LOCKED`), and staging needs `MIDDLEWARE_CUSTOMER_DEPOSITS=1` added first (6f
+`ON`). Until a cell has had that run, its core lock is open (runbook §4,
+"One-time rollout").
 
 ## Slice progression
 
