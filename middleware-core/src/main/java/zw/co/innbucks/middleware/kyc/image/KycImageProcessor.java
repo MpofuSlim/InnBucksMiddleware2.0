@@ -39,7 +39,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *       few cell-wide upload places, or refuses at once (503
  *       {@code kyc_upload_busy}): at most that many upload bodies are ever in
  *       the heap, whatever Tomcat's thread count or the rate-limit bursts
- *       allow.</li>
+ *       allow. That holds only because nothing parses a body before the
+ *       controller: multipart and Boot's {@code FormContentFilter} are both
+ *       off in the shipped {@code application.yaml}.</li>
  *   <li>{@link JpegStructure} walks the markers: a JPEG by its BYTES (never
  *       the Content-Type), whole, baseline, with its dimensions in the
  *       header. The pixel cap and the legibility minimum are checked on those

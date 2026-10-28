@@ -413,10 +413,15 @@ public class KycService {
     }
 
     /**
-     * Reads the body into ONE array. A declared length (already checked
-     * against the cap) is read exactly — the container ends the stream there —
-     * so the body costs its own size and no copy. An undeclared (chunked) body
-     * is read only up to the cap plus one byte: one more is too large.
+     * Reads the body. A declared length (already checked against the cap) is
+     * read exactly into ONE array — the container ends the stream there — so
+     * the body costs its own size and no copy. An undeclared (chunked) body is
+     * read only up to the cap plus one byte (one more is too large), through
+     * {@link InputStream#readNBytes(int)}, which gathers 16 KB chunks and then
+     * copies them: it peaks at twice its size while read. Behind nginx's
+     * request buffering every body arrives with a length; preallocating
+     * cap + 1 instead would cost the same at worst (that array plus the
+     * trimmed copy) and 2 MiB for every small chunked body.
      */
     private byte[] readBounded(InputStream body, int maxBytes, long declaredLength) {
         try {

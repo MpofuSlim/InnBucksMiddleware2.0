@@ -1436,19 +1436,33 @@ commands, with the exact bytes that were running before. Full procedure
      full is an immediate 503 `kyc_upload_busy` + Retry-After, nothing read —
      so at most 4 bodies are ever in the heap whatever Tomcat's 200 threads
      or the rate-limit bursts of several accounts add up to; inside it, a
-     DECODE slot (2, waited for up to 5 s). The body is read into ONE array
-     (exactly `Content-Length` bytes, or up to the cap + 1 for a chunked
-     body) — no growing buffer and copy. nginx's default request buffering is
-     what keeps a slow phone from sitting on a place while it trickles bytes
-     in (runbook). Decode through the JPEG reader only, in-memory streams plus
+     DECODE slot (2, waited for up to 5 s). A declared body is read into ONE
+     array of exactly `Content-Length` bytes, no copy. A chunked body goes
+     through `readNBytes(cap + 1)`, which gathers 16 KB chunks and then copies
+     them into one array, so it peaks at TWICE its size while it is read
+     (4 places x 2 x 2 MiB = 16 MiB at worst, not 8). Behind nginx's default
+     request buffering every body reaches us with a `Content-Length`, and that
+     buffering is also what keeps a slow phone from sitting on a place while
+     it trickles bytes in (runbook). Decode through the JPEG reader only,
+     in-memory streams plus
      `ImageIO.setUseCache(false)` (no temp files), subsampled during decode,
      any decoder warning refused; then scaled (1600 documents, 1080 selfie)
      and re-encoded from pixels at q0.9 with NO metadata — EXIF, ICC, XMP and
      anything after EOI are gone; EXIF orientation is dropped, not applied.
      Byte cap 2 MiB: `Content-Length` over it is a JSON 413
      `kyc_file_too_large` before the body is touched, a chunked body is read
-     only up to it. `spring.servlet.multipart.enabled=false` app-wide: nothing
-     takes a form, and Tomcat would spool every part to a temp file. nginx's
+     only up to it. **Nothing parses a body before a controller**, so nothing
+     reads one before authentication or outside an upload place: both Boot
+     defaults that do are off app-wide. `spring.servlet.multipart.enabled=false`
+     (Tomcat would spool every part to a temp file, a plaintext photo on disk)
+     and `spring.mvc.formcontent.filter.enabled=false` — Boot's
+     `FormContentFilter` reads the WHOLE body of any PUT/PATCH/DELETE sent as
+     `application/x-www-form-urlencoded` into the heap, unlimited and
+     unauthenticated, which made the upload places a bound on uploads only
+     (and would also eat a raw-JPEG PUT mislabelled as a form). No endpoint
+     takes a form. The test profile's `application.yaml` shadows the main one,
+     so no `@SpringBootTest` sees either line: `ServletBodyParsingSwitchesTest`
+     reads the SHIPPED file and proves Boot honours it. nginx's
      upload location sits just above the cap (runbook); a client must treat
      ANY 413 as too large.
    - **Rate limits** per customer AND per address (`ClientIpResolver`) on
@@ -1544,7 +1558,9 @@ commands, with the exact bytes that were running before. Full procedure
    in-memory store with the SQL's semantics, `KycHttpTest` (standalone MockMvc:
    statuses, errorCodes, headers, Swagger examples parse with no duplicate
    keys and carry exactly a real response's fields), `KycSwitchTest` (off = nothing exists; on = key required; on = every
-   bean wires), the guard cases in `ProductionSecretsGuardTest`, and against
+   bean wires), the guard cases in `ProductionSecretsGuardTest`,
+   `ServletBodyParsingSwitchesTest` (the SHIPPED yaml switches multipart and
+   the form filter off, and Boot honours it), and against
    real Postgres by `KycIntakeIntegrationTest` (full flow storing only
    ciphertext, the partial unique index, another customer's id 404, the expiry
    job, rounds and retention in SQL, the composite FK refusing a re-pointed

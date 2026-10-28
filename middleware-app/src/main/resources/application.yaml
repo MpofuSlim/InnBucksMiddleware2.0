@@ -58,6 +58,18 @@ spring:
       # included, outside every control we have. Off: such a body reaches the
       # handler as raw bytes and is refused there.
       enabled: false
+  mvc:
+    formcontent:
+      filter:
+        # The same "parsed before a controller runs" trap, one filter along.
+        # Boot's FormContentFilter reads the WHOLE body of any PUT, PATCH or
+        # DELETE sent as application/x-www-form-urlencoded into the heap, with
+        # no size limit, before Spring Security and before KYC's upload place
+        # is taken — an unauthenticated memory lever on the one replica that
+        # moves money. No endpoint takes a form; the only PUT is the raw-JPEG
+        # KYC upload, whose body that filter would also consume. Pinned by
+        # ServletBodyParsingSwitchesTest.
+        enabled: false
 
 server:
   port: ${SERVER_PORT:8090}
