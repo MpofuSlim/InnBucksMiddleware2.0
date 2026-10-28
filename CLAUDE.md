@@ -1539,7 +1539,10 @@ commands, with the exact bytes that were running before. Full procedure
      on every endpoint that takes it (`BlankIdempotencyKeyException` from
      `IdempotencyKeys`, one handler in `GlobalExceptionHandler`); it used to be
      the catch-all's 500 with an ERROR stack trace on `/register` and
-     `/transactions/*` too. KYC create refuses it before spending the budget.
+     `/transactions/*` too. KYC create and deposit/withdraw/transfer refuse it
+     FIRST, before the budget is spent (and, for a deposit, before the core
+     ownership read): a client stuck sending one must not use up its own next
+     real payment.
    - **When to move the photos to object storage** (`KycFileStore` is the seam;
      an S3 + SSE-KMS implementation keeps the `kyc_file` row and moves only the
      bytes): **before any bulk upgrade, or once `pg_total_relation_size('kyc_file')`

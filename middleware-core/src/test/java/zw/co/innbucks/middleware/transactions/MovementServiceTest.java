@@ -18,6 +18,7 @@ import zw.co.innbucks.middleware.customer.KycTier;
 import zw.co.innbucks.middleware.customer.KycTierResolution;
 import zw.co.innbucks.middleware.customer.KycTierResolver;
 import zw.co.innbucks.middleware.customer.KycTierUnavailableException;
+import zw.co.innbucks.middleware.idempotency.BlankIdempotencyKeyException;
 import zw.co.innbucks.middleware.idempotency.IdempotencyKeys;
 import zw.co.innbucks.middleware.idempotency.IdempotencyService;
 import zw.co.innbucks.middleware.ledger.LedgerOutcome;
@@ -151,6 +152,26 @@ class MovementServiceTest {
                 new WithdrawRequest(WALLET, 1000, "USD", null), null))
                 .isInstanceOf(RateLimitExceededException.class);
         verify(customers, times(2)).findById(CUSTOMER);
+    }
+
+    @Test
+    void aBlankIdempotencyKeyIsRefusedBeforeTheBudgetOrTheCore() {
+        MovementService service = service(BASIC, new CustomerRecordKycTierResolver(meters), 1);
+
+        for (String blank : new String[]{"", "   "}) {
+            assertThatThrownBy(() -> service.deposit(CUSTOMER, blank, new DepositRequest(WALLET, 1000, "USD", null)))
+                    .isInstanceOf(BlankIdempotencyKeyException.class);
+            assertThatThrownBy(() -> service.withdraw(CUSTOMER, blank,
+                    new WithdrawRequest(WALLET, 1000, "USD", null), null))
+                    .isInstanceOf(BlankIdempotencyKeyException.class);
+            assertThatThrownBy(() -> service.transfer(CUSTOMER, blank, transfer(1000), null))
+                    .isInstanceOf(BlankIdempotencyKeyException.class);
+        }
+        verifyNoInteractions(customers);
+        verify(port, never()).listDepositAccountRefs(any());
+        // the customer's one request this minute is still theirs to spend
+        assertThat(service.deposit(CUSTOMER, "k1", new DepositRequest(WALLET, 1000, "USD", null)).body().status())
+                .isEqualTo("SUCCESS");
     }
 
     /** "Check the limits before answering step_up_required, so nobody is sent a code." */

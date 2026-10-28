@@ -94,6 +94,10 @@ public class MovementService {
 
     public IdempotencyService.Result<TransactionResponse> deposit(UUID customerId, String rawKey,
                                                                   DepositRequest request) {
+        // A blank key is the caller's bug, refused (400 missing_header) before
+        // the payment budget is spent or the core asked about ownership: a
+        // client stuck sending one must not use up its own next real payment.
+        IdempotencyKeys.requirePresent(rawKey);
         rateLimiter.enforceCustomerPayment(customerId);
         Customer customer = requireMappedCustomer(customerId);
         requireOwnership(customer, request.accountId());
@@ -115,6 +119,7 @@ public class MovementService {
 
     public IdempotencyService.Result<TransactionResponse> withdraw(UUID customerId, String rawKey,
                                                                    WithdrawRequest request, String stepUpToken) {
+        IdempotencyKeys.requirePresent(rawKey);  // before the budget — see deposit()
         rateLimiter.enforceCustomerPayment(customerId);
         Customer customer = requireMappedCustomer(customerId);
         KycTierResolution tier = tierResolver.resolve(customer);
@@ -150,6 +155,7 @@ public class MovementService {
 
     public IdempotencyService.Result<TransactionResponse> transfer(UUID customerId, String rawKey,
                                                                    TransferRequest request, String stepUpToken) {
+        IdempotencyKeys.requirePresent(rawKey);  // before the budget — see deposit()
         rateLimiter.enforceCustomerPayment(customerId);
         Customer customer = requireMappedCustomer(customerId);
         KycTierResolution tier = tierResolver.resolve(customer);
