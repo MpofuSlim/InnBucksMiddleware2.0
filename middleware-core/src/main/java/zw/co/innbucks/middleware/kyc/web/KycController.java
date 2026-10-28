@@ -210,8 +210,11 @@ public class KycController {
                     + "targetTier must be above the caller's tier. The national ID is checked for shape "
                     + "(spaces, dashes and case ignored) and stored encrypted. An address is required for "
                     + "enhanced and refused otherwise. Only one request may be open: a second one is 409 "
-                    + "kyc_submission_open with the open request's id, so the app resumes it. An ID already "
-                    + "used by another account is NOT refused here — staff see it.")
+                    + "kyc_submission_open with the open request's id. Resume from GET /me/kyc (its "
+                    + "`submission`), never by calling this to find the open one: every call here, replays and "
+                    + "refusals included, spends the customer's small daily budget for new requests (429 "
+                    + "rate_limited once it is gone). An ID already used by another account is NOT refused "
+                    + "here — staff see it.")
     @ApiResponses({
             @ApiResponse(responseCode = "201", description = "Request opened (or replayed)",
                     content = @Content(mediaType = MediaType.APPLICATION_JSON_VALUE,

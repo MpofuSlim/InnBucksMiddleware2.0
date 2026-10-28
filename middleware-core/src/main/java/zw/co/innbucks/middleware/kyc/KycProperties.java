@@ -122,7 +122,10 @@ public record KycProperties(
         static final RateLimits DEFAULTS = new RateLimits(null, null, null);
 
         public RateLimits {
-            // A new submission is rare: a handful a day covers typos.
+            // A new submission is rare: a handful a day covers typos. Every call
+            // spends it, replays and refusals included (a refusal must not be
+            // free); the app resumes from GET /me/kyc, not by probing create.
+            // RateLimiterService keeps a day-long bucket for its whole day.
             create = create == null ? new Pair(limit(5, Duration.ofDays(1)), limit(30, Duration.ofHours(1))) : create;
             // Four files with two retakes each per round; an office NAT shares the address bucket.
             upload = upload == null ? new Pair(limit(12, Duration.ofMinutes(15)), limit(120, Duration.ofMinutes(15))) : upload;

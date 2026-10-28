@@ -1439,7 +1439,14 @@ commands, with the exact bytes that were running before. Full procedure
    - **Rate limits** per customer AND per address (`ClientIpResolver`) on
      create/upload/submit (`KycRateLimiter`, `innbucks.kyc.rate-limit.*`), FIRST,
      through `RateLimiterService` (so `rate-limit.enabled` stays the master
-     switch): 429 `rate_limited` + Retry-After.
+     switch): 429 `rate_limited` + Retry-After. Every call spends, replays and
+     refusals included — a refusal that costs nothing is no limit — so the app
+     RESUMES from `GET /me/kyc`, never by calling create to read the 409's id.
+     The create budget is 5 per customer per DAY, which only holds because
+     `RateLimiterService` now keeps an idle key for its own window or an hour,
+     whichever is longer: the old flat one-hour idle eviction recreated the
+     bucket full, i.e. 5 per quiet hour (and silently shortened any window an
+     operator raised past an hour through the env).
    - **Lifecycle** (`KycLifecycleJob`, daily): drafts and reopened rounds past
      `draft-ttl` (14 d) expire and lose their unsubmitted files; REJECTED rounds'
      files go after `rejected-file-retention` (30 d — a placeholder, compliance's
