@@ -1,6 +1,19 @@
 spring:
   application:
     name: innbucks-middleware
+  datasource:
+    hikari:
+      # Spring caches every test context, and each keeps its pool open for the
+      # whole run. Hikari's default minimum-idle equals the max (10), so about
+      # ten cached contexts hold the 100 connections a stock Postgres allows —
+      # which is what a SHARED database hits: Testcontainers with reuse enabled
+      # (one container for every context) or a local Postgres. Measured: the
+      # app ITs ran out ("too many clients already") once the KYC contexts
+      # joined. One idle connection per context, grown on demand to the same
+      # max of 10 and shrunk 10 s after a burst, keeps the whole run far below
+      # it. CI without reuse starts a container per context and never hit it.
+      minimum-idle: 1
+      idle-timeout: 10000
   profiles:
     active: test
 
