@@ -22,6 +22,8 @@ import zw.co.innbucks.middleware.kyc.web.KycExceptionHandler;
 import zw.co.innbucks.middleware.ratelimit.ClientIpResolver;
 import zw.co.innbucks.middleware.ratelimit.RateLimitExceededException;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -30,6 +32,8 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -179,6 +183,12 @@ class KycHttpTest {
         mvc.perform(post("/me/kyc/submissions").contentType(MediaType.APPLICATION_JSON).content(standard()))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.errorCode").value("missing_header"));
+        // sent but blank: the same 400, and refused before the daily budget is spent
+        mvc.perform(post("/me/kyc/submissions").header("Idempotency-Key", " ")
+                        .contentType(MediaType.APPLICATION_JSON).content(standard()))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.errorCode").value("missing_header"));
+        verify(f.rateLimiter, times(3)).create(any(), any());
 
         UUID enhanced = f.customer("enhanced", null);
         signInAs(enhanced);
@@ -314,8 +324,8 @@ class KycHttpTest {
         assertThat(examples).isEqualTo(3);
     }
 
-    private static java.util.List<String> fieldNames(JsonNode node) {
-        java.util.List<String> names = new java.util.ArrayList<>();
+    private static List<String> fieldNames(JsonNode node) {
+        List<String> names = new ArrayList<>();
         node.fieldNames().forEachRemaining(names::add);
         return names;
     }

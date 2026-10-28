@@ -212,6 +212,8 @@ public class KycService {
     public IdempotencyService.Result<KycSubmissionCreated> create(UUID customerId, String clientIp,
                                                                   String rawIdempotencyKey,
                                                                   CreateKycSubmissionRequest request) {
+        // A blank key is refused before the budget is spent or anything read.
+        IdempotencyKeys.requirePresent(rawIdempotencyKey);
         rateLimiter.create(customerId, clientIp);
         Customer customer = requireCustomer(customerId);
         KycTier current = authoritativeTier(customer);

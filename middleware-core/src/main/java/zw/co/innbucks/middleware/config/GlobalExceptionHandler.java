@@ -84,6 +84,17 @@ public class GlobalExceptionHandler {
                 "missing_header");
     }
 
+    /** A header sent blank is a missing header to the caller: same status, same code. */
+    @ExceptionHandler(zw.co.innbucks.middleware.idempotency.BlankIdempotencyKeyException.class)
+    public ResponseEntity<ProblemDetail> blankIdempotencyKey(
+            zw.co.innbucks.middleware.idempotency.BlankIdempotencyKeyException ex) {
+        log.info("Blank required header: Idempotency-Key");
+        return problem(HttpStatus.BAD_REQUEST,
+                "Missing information",
+                "A required piece of information is missing from your request. Please try again.",
+                "missing_header");
+    }
+
     @ExceptionHandler(HttpMediaTypeNotSupportedException.class)
     public ResponseEntity<ProblemDetail> wrongContentType(HttpMediaTypeNotSupportedException ex) {
         log.info("Unsupported media type: {}", ex.getContentType());

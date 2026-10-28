@@ -1498,6 +1498,27 @@ commands, with the exact bytes that were running before. Full procedure
      upgrade". A submission is SELF-CONTAINED: it carries everything its
      target tier needs even when an earlier approved one holds some of it
      (reusing evidence across submissions is the review step's decision).
+   - **What the FE guide must state** (delivered in chat, per the FE-doc rule
+     above) because it goes beyond the app's request: `submission.status` has a
+     FIFTH value, `expired` (lapsed or cancelled: start a new request) — an app
+     parsing a strict four-value enum breaks on the first lapsed draft;
+     `submission.round`, `.missing`, `.expiresAt` (they drive the resume
+     screen) and `.nationalId` (masked); `onFile` is the evidence of RECORD,
+     not "last sent", and adds `proofOfAddress`; resume from `GET /me/kyc`,
+     never by probing create; uploads are raw `image/jpeg` bodies, POST
+     preferred; ANY 413 means too large; 503 `kyc_upload_busy` means retry
+     after Retry-After; and the cancel endpoint once the owner says go.
+   - **`approve()` is called only once the tier change is in force.** It frees
+     the one-open slot and makes the round the record; on a reviewer's yes
+     alone `/me/kyc` would show `approved` beside the old tier and offer the
+     same upgrade again. The view is deliberately NOT patched to "pending while
+     the tier lags" — a later downgrade also leaves the tier below an old
+     approved target.
+   - **A blank `Idempotency-Key` is 400 `missing_header`**, like an absent one,
+     on every endpoint that takes it (`BlankIdempotencyKeyException` from
+     `IdempotencyKeys`, one handler in `GlobalExceptionHandler`); it used to be
+     the catch-all's 500 with an ERROR stack trace on `/register` and
+     `/transactions/*` too. KYC create refuses it before spending the budget.
    - **When to move the photos to object storage** (`KycFileStore` is the seam;
      an S3 + SSE-KMS implementation keeps the `kyc_file` row and moves only the
      bytes): **before any bulk upgrade, or once `pg_total_relation_size('kyc_file')`

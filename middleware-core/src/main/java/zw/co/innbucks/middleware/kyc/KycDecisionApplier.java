@@ -75,6 +75,22 @@ public class KycDecisionApplier {
                            Integer reopenedRound, Instant resubmitBy) {
     }
 
+    /**
+     * Records an approval of the round. <b>Call it only once the tier change
+     * is IN FORCE</b> — the tier record has landed past its checker and
+     * {@code KycTierResolver} reads the new tier. Approving frees the
+     * customer's one open slot and makes the round their evidence of record;
+     * called on a reviewer's yes alone, {@code GET /me/kyc} would show
+     * {@code approved} beside the OLD tier with {@code nextTier} offering the
+     * same upgrade again, and {@code POST /me/kyc/submissions} would accept a
+     * second request for it. Until then the submission stays
+     * {@code pending_review}, which is the truth.
+     *
+     * <p>Deliberately not papered over in the status view (e.g. "show pending
+     * while the tier is below the approved target"): a later DOWNGRADE — an
+     * expired ID, a compliance decision — also leaves the tier below an old
+     * approved target, and that must never read as a request with staff.
+     */
     public Decision approve(UUID submissionId, int round) {
         Decision decision = transaction.execute(tx -> {
             Instant now = now();

@@ -38,6 +38,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 /**
@@ -511,7 +512,7 @@ class KycServiceTest {
         service.cancel(customer, null, id);
 
         assertThat(service.cancel(customer, null, id)).isEqualTo(new KycCancelled("expired", 1));
-        verify(f.audit, org.mockito.Mockito.times(1)).record(eq(AuditAction.KYC_SUBMISSION_EXPIRED), any(),
+        verify(f.audit, times(1)).record(eq(AuditAction.KYC_SUBMISSION_EXPIRED), any(),
                 any(), any(), any());
     }
 

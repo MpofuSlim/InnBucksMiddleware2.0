@@ -80,6 +80,15 @@ class GlobalExceptionHandlerTest {
     }
 
     @Test
+    void aBlankIdempotencyKeyIsTheSameAnswerAsAMissingOne_neverThe500CatchAll() {
+        ResponseEntity<ProblemDetail> response = handler.blankIdempotencyKey(
+                new zw.co.innbucks.middleware.idempotency.BlankIdempotencyKeyException());
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody().getProperties()).containsEntry("errorCode", "missing_header");
+    }
+
+    @Test
     void missingParamMapsTo400WithFriendlyCopy() {
         MissingServletRequestParameterException ex =
                 new MissingServletRequestParameterException("amount", "Long");

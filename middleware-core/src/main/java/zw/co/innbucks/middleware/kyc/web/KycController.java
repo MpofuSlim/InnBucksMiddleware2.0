@@ -249,7 +249,7 @@ public class KycController {
                             schema = @Schema(implementation = KycSubmissionCreated.class),
                             examples = @ExampleObject(value = CREATED_EXAMPLE))),
             @ApiResponse(responseCode = "400", description = "national_id_invalid, kyc_target_invalid, "
-                    + "kyc_address_invalid, or the Idempotency-Key header is missing (missing_header)",
+                    + "kyc_address_invalid, or the Idempotency-Key header is missing or blank (missing_header)",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class), examples = {
                             @ExampleObject(name = "ID number", value = NATIONAL_ID_INVALID_EXAMPLE),
                             @ExampleObject(name = "Target tier", value = TARGET_INVALID_EXAMPLE),
