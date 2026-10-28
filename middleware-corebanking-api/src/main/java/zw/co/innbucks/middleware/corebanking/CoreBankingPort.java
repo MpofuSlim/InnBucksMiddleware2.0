@@ -58,6 +58,17 @@ public interface CoreBankingPort {
     Set<CoreCapability> capabilities();
 
     /**
+     * The ONE currency this cell transacts in (ISO 4217 alphabetic code,
+     * e.g. {@code USD}). A cell is pinned to one (country, core) pair and
+     * holds exactly one currency: every adapter already refuses a write in
+     * any other currency and a balance reported in one. Exposed so
+     * core-agnostic policy above the port (the per-tier payment limits) can
+     * refuse to boot on a policy written for a different currency, and can
+     * sum the ledger in the currency the limits are written in.
+     */
+    String cellCurrency();
+
+    /**
      * Create the banking relationship for a middleware customer. With
      * {@link CoreCapability#CLIENT_ASSIGNED_EXTERNAL_ID} the adapter sends
      * {@code cmd.requestedExternalId()} (our customer UUID) and the returned

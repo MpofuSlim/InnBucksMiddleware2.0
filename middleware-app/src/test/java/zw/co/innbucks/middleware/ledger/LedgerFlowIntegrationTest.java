@@ -79,6 +79,7 @@ class LedgerFlowIntegrationTest {
 
         @Override public CoreProvider provider() { return CoreProvider.FINERACT; }
         @Override public Set<CoreCapability> capabilities() { return Set.of(); }
+        @Override public String cellCurrency() { return "KES"; }
         @Override public CoreCustomerRef createCustomer(CreateCustomerCommand cmd, IdempotencyKey key) { throw new UnsupportedOperationException(); }
         @Override public CustomerProfile getProfile(CoreCustomerRef ref) { throw new UnsupportedOperationException(); }
         @Override public List<DepositAccountSummary> listDepositAccounts(CoreCustomerRef ref) { throw new UnsupportedOperationException(); }
