@@ -27,6 +27,7 @@ import org.springframework.web.bind.annotation.RequestMethod;
 import org.springframework.web.bind.annotation.RestController;
 import zw.co.innbucks.middleware.idempotency.IdempotencyService;
 import zw.co.innbucks.middleware.kyc.ConditionalOnKycEnabled;
+import zw.co.innbucks.middleware.kyc.KycCancelled;
 import zw.co.innbucks.middleware.kyc.CreateKycSubmissionRequest;
 import zw.co.innbucks.middleware.kyc.KycFileStoredView;
 import zw.co.innbucks.middleware.kyc.KycRequestException;
@@ -47,7 +48,8 @@ import java.util.UUID;
 @RestController
 @RequestMapping("/me/kyc")
 @ConditionalOnKycEnabled
-@Tag(name = "kyc", description = "Apply for a higher KYC tier: open a request, upload its photos, submit. "
+@Tag(name = "kyc", description = "Apply for a higher KYC tier: open a request, upload its photos, submit "
+        + "(or cancel it to start again). "
         + "Staff decide; nothing here changes the tier. Identity is taken from the Bearer JWT.")
 public class KycController {
 
@@ -159,6 +161,16 @@ public class KycController {
 
     static final String ACCEPTED_EXAMPLE = """
             {"status":"pending_review","round":1}
+            """;
+
+    static final String CANCELLED_EXAMPLE = """
+            {"status":"expired","round":1}
+            """;
+
+    static final String NOT_CANCELLABLE_EXAMPLE = """
+            {"type":"about:blank","title":"Request closed","status":409,
+             "detail":"This verification request can't be changed any more.",
+             "errorCode":"kyc_submission_not_open","submissionStatus":"approved"}
             """;
 
     static final String INCOMPLETE_EXAMPLE = """
@@ -371,6 +383,46 @@ public class KycController {
         KycSubmitAccepted accepted = kycService.submit(UUID.fromString(jwt.getSubject()),
                 clientIpResolver.resolve(httpRequest), submissionId(submissionId));
         return ResponseEntity.status(HttpStatus.ACCEPTED).cacheControl(CacheControl.noStore()).body(accepted);
+    }
+
+    @PostMapping("/submissions/{submissionId}/cancel")
+    @Operation(summary = "Cancel a request the customer is still working on",
+            description = "For a draft, or a rejected request reopened for a retake: the way to fix a mistyped "
+                    + "ID number, the wrong level or the wrong address, which a new request is needed for (only "
+                    + "one can be open). The request closes as `expired`; the photos uploaded into its open "
+                    + "round are deleted, photos of rounds already sent to staff follow their own retention. "
+                    + "Then open a new request. Cancelling a request that is already expired answers the same "
+                    + "200. A request with staff (pending_review) or decided cannot be cancelled. Shares the "
+                    + "daily budget of POST /me/kyc/submissions.")
+    @ApiResponses({
+            @ApiResponse(responseCode = "200", description = "Closed (or already was)",
+                    content = @Content(mediaType = MediaType.APPLICATION_JSON_VALUE,
+                            schema = @Schema(implementation = KycCancelled.class),
+                            examples = @ExampleObject(value = CANCELLED_EXAMPLE))),
+            @ApiResponse(responseCode = "401", description = "Missing or invalid Bearer token",
+                    content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
+            @ApiResponse(responseCode = "404", description = "No such request for this customer — another "
+                    + "customer's id answers exactly the same",
+                    content = @Content(schema = @Schema(implementation = ProblemDetail.class),
+                            examples = @ExampleObject(value = NOT_FOUND_EXAMPLE))),
+            @ApiResponse(responseCode = "409", description = "With staff or decided (kyc_submission_not_open, "
+                    + "with submissionStatus)",
+                    content = @Content(schema = @Schema(implementation = ProblemDetail.class), examples = {
+                            @ExampleObject(name = "With staff", value = NOT_OPEN_EXAMPLE),
+                            @ExampleObject(name = "Decided", value = NOT_CANCELLABLE_EXAMPLE)})),
+            @ApiResponse(responseCode = "429", description = "Too many new requests or cancels from this "
+                    + "customer or address (rate_limited); retry after Retry-After seconds",
+                    content = @Content(schema = @Schema(implementation = ProblemDetail.class),
+                            examples = @ExampleObject(value = RATE_LIMITED_EXAMPLE)))
+    })
+    @PreAuthorize("hasAuthority('SCOPE_customer:write')")
+    public ResponseEntity<KycCancelled> cancel(
+            @AuthenticationPrincipal Jwt jwt,
+            @Parameter(example = "b1c2d3e4-5f60-4a7b-8c9d-0e1f2a3b4c5d") @PathVariable String submissionId,
+            HttpServletRequest httpRequest) {
+        KycCancelled cancelled = kycService.cancel(UUID.fromString(jwt.getSubject()),
+                clientIpResolver.resolve(httpRequest), submissionId(submissionId));
+        return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(cancelled);
     }
 
     /** A malformed id is the same 404 as an unknown one (and never a 500 from a type mismatch). */

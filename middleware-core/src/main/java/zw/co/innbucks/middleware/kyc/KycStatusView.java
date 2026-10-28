@@ -63,7 +63,8 @@ public record KycStatusView(
             String nationalId,
             @Schema(description = "draft: collecting files. pending_review: with staff. rejected: see "
                     + "`rejection`; when `missing` is not null the request was reopened — upload only those "
-                    + "files and submit again. approved. expired: not finished in time; start a new one.",
+                    + "files and submit again. approved. expired: not finished in time, or cancelled by the "
+                    + "customer; start a new one.",
                     example = "rejected",
                     allowableValues = {"draft", "pending_review", "approved", "rejected", "expired"})
             String status,

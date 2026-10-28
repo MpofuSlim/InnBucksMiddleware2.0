@@ -42,6 +42,16 @@ public class KycRateLimiter {
         spend("submit", limits.submit(), customerId, clientIp);
     }
 
+    /**
+     * Spends CREATE's budget, in the same buckets: a cancel exists to make
+     * room for a new request, so the two are bounded together and a
+     * cancel-and-recreate loop cannot churn rows and files faster than
+     * creates alone could.
+     */
+    public void cancel(UUID customerId, String clientIp) {
+        spend("create", limits.create(), customerId, clientIp);
+    }
+
     private void spend(String action, KycProperties.Pair pair, UUID customerId, String clientIp) {
         refuseIfDenied(limiter.tryConsume("kyc:" + action + ":customer:" + customerId, pair.perCustomer()));
         if (clientIp != null && !clientIp.isBlank()) {

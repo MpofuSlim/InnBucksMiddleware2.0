@@ -501,6 +501,45 @@ public class KycService {
     private record SubmitOutcome(int round, KycRoundRecord frozen, Integer duplicates, Expired expired) {
     }
 
+    // --- POST /me/kyc/submissions/{id}/cancel ---------------------------------
+
+    /**
+     * Closes a request the customer is still working on — a draft, or a
+     * rejection reopened for a retake — so a mistyped (but well-formed) ID
+     * number or the wrong target tier does not lock them out until the draft
+     * deadline: those are fixed by a NEW request, and only one can be open.
+     * Ends exactly as an expiry does ({@link KycHousekeeping#expire}): status
+     * {@code expired}, the open round's own files deleted, files of earlier,
+     * submitted rounds left to their retention. Idempotent: an already
+     * expired request answers the same. A request with staff or decided is
+     * not the customer's to withdraw (409).
+     */
+    public KycCancelled cancel(UUID customerId, String clientIp, UUID submissionId) {
+        rateLimiter.cancel(customerId, clientIp);
+        CancelOutcome outcome = transaction.execute(tx -> {
+            Instant now = now();
+            KycSubmissionRecord s = owned(store.lockSubmission(submissionId), customerId);
+            if (s.status() == KycSubmissionStatus.EXPIRED) {
+                return new CancelOutcome(s.currentRound(), null, null);
+            }
+            if (!s.acceptingFiles()) {
+                throw KycRequestException.notOpen(s.status());
+            }
+            String trigger = s.lapsed(now) ? "deadline_passed" : "customer_cancelled";
+            return new CancelOutcome(s.currentRound(), new Expired(s, housekeeping.expire(s, now)), trigger);
+        });
+        if (outcome.expired() != null) {
+            auditExpired(outcome.expired(), outcome.trigger());
+            if ("customer_cancelled".equals(outcome.trigger())) {
+                count("cancelled");
+            }
+        }
+        return new KycCancelled(KycSubmissionStatus.EXPIRED.dbValue(), outcome.round());
+    }
+
+    private record CancelOutcome(int round, Expired expired, String trigger) {
+    }
+
     // --- shared ---------------------------------------------------------------
 
     /**

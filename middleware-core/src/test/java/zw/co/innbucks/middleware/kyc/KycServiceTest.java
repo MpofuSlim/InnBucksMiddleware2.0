@@ -475,6 +475,100 @@ class KycServiceTest {
         assertThat(f.store.files).isEmpty();
     }
 
+    // --- cancel -------------------------------------------------------------
+
+    @Test
+    void cancellingADraftClosesItAndDeletesItsFiles_soAMistypedIdCanBeFixedByANewRequest() {
+        UUID customer = f.customer("basic", null);
+        UUID typo = f.open(service, customer, "standard", "63-1234576 X 18", null);
+        f.upload(service, customer, typo, KycFileKind.ID_FRONT);
+        f.upload(service, customer, typo, KycFileKind.SELFIE);
+
+        KycCancelled cancelled = service.cancel(customer, "198.51.100.7", typo);
+
+        assertThat(cancelled).isEqualTo(new KycCancelled("expired", 1));
+        assertThat(f.store.submissions.get(typo).status()).isEqualTo(KycSubmissionStatus.EXPIRED);
+        assertThat(f.store.submissions.get(typo).expiresAt()).isNull();
+        assertThat(f.store.files).isEmpty();
+        assertThat(f.store.evidence(typo, 1)).isEmpty();
+        ArgumentCaptor<Map<String, Object>> metadata = ArgumentCaptor.captor();
+        verify(f.audit).record(eq(AuditAction.KYC_SUBMISSION_EXPIRED), eq(AuditOutcome.SUCCESS), eq(customer),
+                isNull(), metadata.capture());
+        assertThat(metadata.getValue()).containsEntry("trigger", "customer_cancelled")
+                .containsEntry("filesDeleted", 2);
+        verify(f.rateLimiter).cancel(customer, "198.51.100.7");
+        assertThat(service.status(customer).submission().status()).isEqualTo("expired");
+
+        UUID fixed = f.open(service, customer, "standard", KycFixture.ID_TYPED, null);
+        assertThat(fixed).isNotEqualTo(typo);
+        assertThat(f.store.findOpen(customer).orElseThrow().id()).isEqualTo(fixed);
+    }
+
+    @Test
+    void cancellingTwiceAnswersTheSame_andAuditsOnce() {
+        UUID customer = f.customer("basic", null);
+        UUID id = f.open(service, customer, "standard", KycFixture.ID_TYPED, null);
+        service.cancel(customer, null, id);
+
+        assertThat(service.cancel(customer, null, id)).isEqualTo(new KycCancelled("expired", 1));
+        verify(f.audit, org.mockito.Mockito.times(1)).record(eq(AuditAction.KYC_SUBMISSION_EXPIRED), any(),
+                any(), any(), any());
+    }
+
+    @Test
+    void aRequestWithStaffOrDecidedCannotBeCancelled_andAnotherCustomersIs404() {
+        UUID customer = f.customer("basic", null);
+        UUID id = f.completeStandard(service, customer);
+        service.submit(customer, null, id);
+
+        assertThatThrownBy(() -> service.cancel(customer, null, id))
+                .isInstanceOfSatisfying(KycRequestException.class, ex -> {
+                    assertThat(ex.errorCode()).isEqualTo("kyc_submission_not_open");
+                    assertThat(ex.status().value()).isEqualTo(409);
+                    assertThat(ex.properties()).containsEntry("submissionStatus", "pending_review");
+                });
+        f.applier().approve(id, 1);
+        assertThatThrownBy(() -> service.cancel(customer, null, id))
+                .isInstanceOfSatisfying(KycRequestException.class,
+                        ex -> assertThat(ex.properties()).containsEntry("submissionStatus", "approved"));
+        assertThat(f.store.submissions.get(id).status()).isEqualTo(KycSubmissionStatus.APPROVED);
+
+        UUID stranger = f.customer("basic", null);
+        UUID theirs = f.open(service, stranger, "standard", KycFixture.ID_TYPED, null);
+        assertThatThrownBy(() -> service.cancel(customer, null, theirs))
+                .isInstanceOfSatisfying(KycRequestException.class,
+                        ex -> assertThat(ex.errorCode()).isEqualTo("kyc_submission_not_found"));
+        assertThat(f.store.submissions.get(theirs).status()).isEqualTo(KycSubmissionStatus.DRAFT);
+    }
+
+    @Test
+    void cancellingAReopenedRoundKeepsTheSubmittedRoundsFilesForTheirRetention() {
+        UUID customer = f.customer("basic", null);
+        UUID id = f.completeStandard(service, customer);
+        service.submit(customer, null, id);
+        f.applier().reject(id, 1, List.of(KycRejectionReason.ID_PHOTO_UNREADABLE), Set.of(KycFileKind.ID_FRONT));
+        f.upload(service, customer, id, KycFileKind.ID_FRONT);
+        int beforeRetake = f.store.files.size() - 1;
+
+        service.cancel(customer, null, id);
+
+        assertThat(f.store.submissions.get(id).status()).isEqualTo(KycSubmissionStatus.EXPIRED);
+        // the retake is gone; round 1's three photos stay with their (rejected) round
+        assertThat(f.store.files).hasSize(beforeRetake);
+        assertThat(f.store.evidence(id, 1)).hasSize(3);
+        assertThat(f.store.evidence(id, 2)).isEmpty();
+    }
+
+    @Test
+    void theCancelBudgetComesFirst() {
+        UUID customer = f.customer("basic", null);
+        UUID id = f.open(service, customer, "standard", KycFixture.ID_TYPED, null);
+        doThrow(new RateLimitExceededException(30)).when(f.rateLimiter).cancel(customer, null);
+
+        assertThatThrownBy(() -> service.cancel(customer, null, id)).isInstanceOf(RateLimitExceededException.class);
+        assertThat(f.store.submissions.get(id).status()).isEqualTo(KycSubmissionStatus.DRAFT);
+    }
+
     // --- status -------------------------------------------------------------
 
     @Test

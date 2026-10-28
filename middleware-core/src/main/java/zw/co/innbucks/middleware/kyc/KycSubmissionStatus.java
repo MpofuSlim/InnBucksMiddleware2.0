@@ -7,7 +7,7 @@ import java.util.Locale;
  * with a round reopened for redo are the customer's to finish (both have an
  * {@code expires_at}); {@code pending_review} waits for staff;
  * {@code approved} is final; {@code expired} means the customer did not finish
- * in time and its unsubmitted files are gone.
+ * in time, or cancelled it, and its unsubmitted files are gone.
  */
 public enum KycSubmissionStatus {
     DRAFT,

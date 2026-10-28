@@ -232,6 +232,31 @@ class KycHttpTest {
     }
 
     @Test
+    void cancelClosesAnUnfinishedRequest_andRefusesOneWithStaff() throws Exception {
+        String draft = create(standard());
+        mvc.perform(post("/me/kyc/submissions/" + draft + "/cancel"))
+                .andExpect(status().isOk())
+                .andExpect(header().string(HttpHeaders.CACHE_CONTROL, "no-store"))
+                .andExpect(jsonPath("$.status").value("expired"))
+                .andExpect(jsonPath("$.round").value(1));
+
+        String pending = create(standard());
+        byte[] jpeg = TestImages.jpeg(900, 600);
+        for (String kind : new String[]{"id_front", "id_back", "selfie"}) {
+            mvc.perform(post("/me/kyc/submissions/" + pending + "/files/" + kind)
+                    .contentType(MediaType.IMAGE_JPEG).content(jpeg)).andExpect(status().isOk());
+        }
+        mvc.perform(post("/me/kyc/submissions/" + pending + "/submit")).andExpect(status().isAccepted());
+        mvc.perform(post("/me/kyc/submissions/" + pending + "/cancel"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.errorCode").value("kyc_submission_not_open"))
+                .andExpect(jsonPath("$.submissionStatus").value("pending_review"));
+        mvc.perform(post("/me/kyc/submissions/not-a-uuid/cancel"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.errorCode").value("kyc_submission_not_found"));
+    }
+
+    @Test
     void someoneElsesOrAMalformedIdIsTheSame404() throws Exception {
         String id = create(standard());
         signInAs(f.customer("basic", null));

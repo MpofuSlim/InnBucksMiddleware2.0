@@ -1316,7 +1316,7 @@ commands, with the exact bytes that were running before. Full procedure
    in middleware-core: a customer asks for a higher tier from the app —
    `GET /me/kyc`, `POST /me/kyc/submissions`, `PUT|POST
    /me/kyc/submissions/{id}/files/{kind}` (raw `image/jpeg` body), `POST
-   /me/kyc/submissions/{id}/submit`. The typed ID, the typed address (enhanced)
+   /me/kyc/submissions/{id}/submit`, `POST /me/kyc/submissions/{id}/cancel`. The typed ID, the typed address (enhanced)
    and the photos live ENCRYPTED in the middleware's Postgres (V3). Nothing here
    decides: review, approval, the live tier read and the staff read surface are
    the next change; `KycDecisionApplier` is its in-process entry point, unit-
@@ -1378,6 +1378,21 @@ commands, with the exact bytes that were running before. Full procedure
      row pointing at round N's file — no bytes copied), and the ID is re-sealed
      to the new round's binding. A rejection with no redo closes the submission
      (a wrong ID or address is fixed by a new request, not a retake).
+   - **Cancel** (`POST .../{id}/cancel`) — NOT in the app's request; added
+     from review, so it needs the owner's go before the FE guide offers it.
+     Without it a well-formed but WRONG entry (a transposed ZW serial, any 5-9
+     KE digits, the wrong tier or address — none of which a retake can fix)
+     locked the customer out for the 14-day draft TTL, because only one
+     request may be open; the only other exit was submitting known-wrong data
+     for staff to reject. It works only while the customer owns the round (a
+     draft, or a rejection reopened for redo) and ends exactly as an expiry
+     does (`KycHousekeeping.expire`: `expired`, the open round's own files
+     deleted, submitted rounds' files left to retention), audited
+     `KYC_SUBMISSION_EXPIRED` with `trigger: customer_cancelled`. Idempotent on
+     an expired request; 409 `kyc_submission_not_open` with staff or decided
+     (staff decide those). It spends the CREATE budget, so a cancel-and-recreate
+     loop churns no faster than creates alone. POST, not DELETE, like `submit`.
+     No new status: `expired` already means "closed unfinished, start again".
    - **National ID** (`NationalIdValidator` SPI, registry shaped like the MSISDN
      one, one per `Country` — `NationalIdValidatorRegistryTest`). Canonical =
      upper-case ASCII, spaces and every dash variant dropped, anything else

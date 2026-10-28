@@ -299,6 +299,27 @@ class KycIntakeIntegrationTest {
     }
 
     @Test
+    void cancellingADraftDeletesItsFilesInSql_andFreesTheOneOpenSlot() throws Exception {
+        UUID typo = create(bearer, standard("12345687"));
+        upload(bearer, typo, "id_front");
+        upload(bearer, typo, "selfie");
+
+        mvc.perform(post("/me/kyc/submissions/" + typo + "/cancel").header(HttpHeaders.AUTHORIZATION, bearer))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("expired"));
+
+        assertThat(jdbc.queryForObject("SELECT status FROM kyc_submission WHERE id = ?", String.class, typo))
+                .isEqualTo("expired");
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM kyc_file WHERE submission_id = ?", Integer.class,
+                typo)).isZero();
+        assertThat(jdbc.queryForList("SELECT metadata::text FROM audit_event WHERE customer_id = ? "
+                + "AND action = 'kyc_submission_expired'", String.class, customer))
+                .singleElement().satisfies(m -> assertThat(m).contains("customer_cancelled"));
+        // the partial unique index no longer counts it: a corrected request opens
+        assertThat(create(bearer, standard("12345678"))).isNotEqualTo(typo);
+    }
+
+    @Test
     void roundsInSql_redoCarriesFilesByReference_retentionSparesTheApprovedEvidence() throws Exception {
         UUID id = create(bearer, standard("12345678"));
         upload(bearer, id, "id_front");
