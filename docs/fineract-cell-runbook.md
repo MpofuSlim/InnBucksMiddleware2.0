@@ -741,6 +741,15 @@ creation and pruned on compliance's retention schedule (they are plain gzip
 today); the key file's offline copy made. Deleted KYC rows survive as dead
 tuples until VACUUM and in every backup taken before, until those age out.
 
+**Smoke-test one upload in the released image before switching KYC on.**
+The photo pipeline (ImageIO's JPEG codec in `java.desktop`) is tested on the
+build JDK, never inside the `eclipse-temurin:21-jre-alpine` runtime image. On
+staging with `KYC_ENABLED=true`, open a request from a test account and `POST`
+one real phone photo to `/me/kyc/submissions/{id}/files/id_front`: a `200`
+with `width`/`height` proves the decoder, scaler and encoder run there; a
+`500`, or a `kyc_file_invalid` for a photo that is plainly fine, means the
+image is missing something the pipeline needs.
+
 Then start it. **Pull a published, scanned image — do not build on the box.**
 The Release workflow (`.github/workflows/release.yml`) gates on the test
 suite, builds, Trivy-scans CRITICAL/HIGH, pushes to GHCR and attests SLSA

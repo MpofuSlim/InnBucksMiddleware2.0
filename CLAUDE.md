@@ -1530,7 +1530,9 @@ commands, with the exact bytes that were running before. Full procedure
      0.15–0.4 MB, a request 0.5–1.6 MB.
    - **Go-live gates outside the code**: EBS encryption on the box, encrypted and
      pruned backups, an offline copy of the key file, compliance's tier
-     requirements and retention.
+     requirements and retention, and one real photo uploaded through the
+     RELEASED image (the JPEG pipeline is tested on the build JDK, never in
+     the alpine JRE runtime — runbook).
    Contract pinned by `KycCipherTest` + `KycKeyRingTest` (envelope, AAD incl.
    a file opening only as its own submission/round/kind, previous and wrong
    keys, strict parsing), the national-ID tests (ZW/KE
