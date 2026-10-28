@@ -222,7 +222,7 @@ public class InMemoryKycStore implements KycStore, KycFileStore {
         });
         rounds.values().forEach(r -> {
             UUID owner = submissions.get(r.submissionId()).customerId();
-            if (!owner.equals(customerId) && r.nationalIdHmac().equals(canonicalHmac)) {
+            if (!owner.equals(customerId) && r.frozen() && r.nationalIdHmac().equals(canonicalHmac)) {
                 others.add(owner);
             }
         });

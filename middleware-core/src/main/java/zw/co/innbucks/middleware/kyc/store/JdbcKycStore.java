@@ -253,6 +253,7 @@ public class JdbcKycStore implements KycStore {
                     SELECT s.customer_id FROM kyc_round r
                       JOIN kyc_submission s ON s.id = r.submission_id
                      WHERE r.national_id_hmac = ? AND s.customer_id <> ?
+                       AND r.frozen_at IS NOT NULL
                 ) holders
                 """.formatted(placeholders), Integer.class, args.toArray());
         return count == null ? 0 : count;

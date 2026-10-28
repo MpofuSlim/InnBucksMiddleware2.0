@@ -70,8 +70,9 @@ CREATE TABLE kyc_round (
     -- Against the sign-up hash (taken over the number AS TYPED): match | no_match | none_given.
     signup_match            VARCHAR(16)              NOT NULL,
     -- OTHER customers holding the same number (sign-up hash in any common
-    -- spelling, or a KYC round's HMAC). Computed at freeze. For the reviewer
-    -- only: a duplicate is never refused or shown to the customer.
+    -- spelling, or the HMAC of a KYC round they SUBMITTED — a draft never
+    -- sent is no claim to it). Computed at freeze. For the reviewer only: a
+    -- duplicate is never refused or shown to the customer.
     duplicate_count         INTEGER,
     -- Filled by the review step (a later change).
     decision                VARCHAR(16),

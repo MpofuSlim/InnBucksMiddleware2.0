@@ -424,10 +424,10 @@ class KycServiceTest {
     @Test
     void submittingFreezesTheRound_andCountsDuplicatesForTheReviewerOnly() {
         // Two OTHER customers hold this number: one typed it differently at
-        // sign-up, one put it on a KYC request of their own.
+        // sign-up, one SUBMITTED a KYC request with it.
         f.customer("basic", "63 1234567 x 18");
         UUID otherKyc = f.customer("basic", null);
-        f.open(service, otherKyc, "standard", "631234567X18", null);
+        service.submit(otherKyc, "198.51.100.7", f.completeStandard(service, otherKyc));
         UUID unrelated = f.customer("basic", "63-7654321 X 18");
         UUID customer = f.customer("basic", KycFixture.ID_TYPED);
         UUID id = f.completeStandard(service, customer);
@@ -452,6 +452,40 @@ class KycServiceTest {
                 isNull(), metadata.capture());
         assertThat(metadata.getValue()).containsEntry("duplicateCount", 2).containsEntry("round", 1);
         assertThat(unrelated).isNotNull();
+    }
+
+    @Test
+    void aRequestThatWasNeverSubmittedIsNoDuplicate_openCancelledOrLapsed() {
+        // Three other accounts typed this number and never sent it: a typo
+        // they cancelled, a draft left to lapse, a draft still open. None is
+        // a claim to the number, and cancel must not make planting one cheap.
+        UUID typo = f.customer("basic", null);
+        service.cancel(typo, null, f.open(service, typo, "standard", KycFixture.ID_TYPED, null));
+        UUID lapsed = f.customer("basic", null);
+        f.open(service, lapsed, "standard", KycFixture.ID_TYPED, null);
+        f.clock.advance(Duration.ofDays(15));
+        f.job().run();
+        UUID stillOpen = f.customer("basic", null);
+        f.open(service, stillOpen, "standard", KycFixture.ID_TYPED, null);
+
+        UUID customer = f.customer("basic", KycFixture.ID_TYPED);
+        UUID id = f.completeStandard(service, customer);
+        service.submit(customer, null, id);
+
+        assertThat(f.store.findRound(id, 1).orElseThrow().duplicateCount()).isZero();
+
+        // ...and once the open one IS sent, the next submitter sees it (and
+        // the first submitter): two holders, the lapsed and cancelled typos
+        // still not among them.
+        UUID stillOpenId = f.store.findOpen(stillOpen).orElseThrow().id();
+        for (KycFileKind kind : List.of(KycFileKind.ID_FRONT, KycFileKind.ID_BACK, KycFileKind.SELFIE)) {
+            f.upload(service, stillOpen, stillOpenId, kind);
+        }
+        service.submit(stillOpen, null, stillOpenId);
+        UUID later = f.customer("basic", null);
+        UUID laterId = f.completeStandard(service, later);
+        service.submit(later, null, laterId);
+        assertThat(f.store.findRound(laterId, 1).orElseThrow().duplicateCount()).isEqualTo(2);
     }
 
     @Test

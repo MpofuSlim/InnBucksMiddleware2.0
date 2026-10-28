@@ -79,7 +79,11 @@ public interface KycStore {
     /**
      * Distinct OTHER customers holding this ID: by their sign-up hash (any of
      * {@code signupHashes} — the sign-up hash was taken over the number as
-     * typed) or by a KYC round's canonical HMAC.
+     * typed) or by the canonical HMAC of a KYC round they SUBMITTED (frozen).
+     * A draft that was never sent — still open, cancelled or lapsed — is not
+     * a claim to the number: counting it flagged the real holder over someone
+     * else's typo, and with cancel it let any account plant a flag against a
+     * known number for the cost of a create and a cancel.
      */
     int countOtherCustomersWithNationalId(UUID customerId, Collection<String> signupHashes, String canonicalHmac);
 

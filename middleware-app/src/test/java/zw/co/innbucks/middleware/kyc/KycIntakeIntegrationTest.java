@@ -320,6 +320,34 @@ class KycIntakeIntegrationTest {
     }
 
     @Test
+    void theDuplicateCountInSql_countsSubmittedRoundsOnly() throws Exception {
+        // Another account typed this number and cancelled it: never sent, so
+        // never a claim to it — counting it would let anyone plant a flag.
+        String typo = bearerFor(insertCustomer("+254712000503", null));
+        UUID typoId = create(typo, standard("12345678"));
+        mvc.perform(post("/me/kyc/submissions/" + typoId + "/cancel").header(HttpHeaders.AUTHORIZATION, typo))
+                .andExpect(status().isOk());
+        // A third SUBMITS it: at that moment nobody else has sent it.
+        String holder = bearerFor(insertCustomer("+254712000504", null));
+        UUID holderId = create(holder, standard("12345678"));
+        for (String kind : List.of("id_front", "id_back", "selfie")) {
+            upload(holder, holderId, kind);
+        }
+        submit(holder, holderId);
+        assertThat(jdbc.queryForObject("SELECT duplicate_count FROM kyc_round WHERE submission_id = ?",
+                Integer.class, holderId)).isZero();
+
+        UUID id = create(bearer, standard("1234 5678"));
+        for (String kind : List.of("id_front", "id_back", "selfie")) {
+            upload(bearer, id, kind);
+        }
+        submit(bearer, id);
+        // the submitted holder, not the cancelled typo
+        assertThat(jdbc.queryForObject("SELECT duplicate_count FROM kyc_round WHERE submission_id = ?",
+                Integer.class, id)).isEqualTo(1);
+    }
+
+    @Test
     void roundsInSql_redoCarriesFilesByReference_retentionSparesTheApprovedEvidence() throws Exception {
         UUID id = create(bearer, standard("12345678"));
         upload(bearer, id, "id_front");

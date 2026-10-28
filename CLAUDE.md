@@ -1405,9 +1405,16 @@ commands, with the exact bytes that were running before. Full procedure
      the number AS TYPED (trim only): the canonical form and 54 common ZW
      spellings are tried before `no_match` (so `no_match` can still be an odd
      separator). **`duplicate_count`** = other customers holding the number by
-     sign-up hash (any spelling) or by a KYC round's HMAC, computed at FREEZE;
-     never refused, never shown to the customer (`customer.national_id_hash`
-     gained an index for it). Mask: first 2 + last 3 (`63•••••••X18`); a number
+     sign-up hash (any spelling) or by a SUBMITTED (frozen) KYC round's HMAC,
+     computed at FREEZE; never refused, never shown to the customer
+     (`customer.national_id_hash` gained an index for it). A draft that was
+     never sent — open, cancelled or lapsed — is no claim to the number:
+     counting it flagged the real holder over a stranger's typo, and with
+     cancel any account could plant a flag on a known number for one create
+     and one cancel. Such a draft's round still keeps its sealed ID, HMAC and
+     mask after it closes (its submission shows the mask); how long is
+     compliance's call, beside the rejected-file retention. Mask: first 2 +
+     last 3 (`63•••••••X18`); a number
      that would leave fewer than five hidden shows only its last 3.
    - **The idempotency fingerprint carries HMACs, never the number or the
      address** (`KycService.CreateFingerprint`): `IdempotencyService`
@@ -1563,7 +1570,8 @@ commands, with the exact bytes that were running before. Full procedure
    the form filter off, and Boot honours it), and against
    real Postgres by `KycIntakeIntegrationTest` (full flow storing only
    ciphertext, the partial unique index, another customer's id 404, the expiry
-   job, rounds and retention in SQL, the composite FK refusing a re-pointed
+   job, rounds and retention in SQL, a cancelled draft not counted as a
+   duplicate, the composite FK refusing a re-pointed
    evidence row and the seal refusing it with the FK dropped) and
    `KycSwitchedOffIntegrationTest`.
 
