@@ -326,7 +326,12 @@ Build: `./mvnw verify` at the root. Run locally:
   is bounded by the slots. **A slot is a `Semaphore` permit that the read
   gives back as its own last act**, before its future completes, over a
   thread pool that never refuses a task — so `busy` means exactly "every slot
-  holds an unfinished read". Never bound it with a fixed pool over a
+  holds an unfinished read". A read that never reaches a thread gives its
+  permit back at once, at most once (`releaseOnce`): the pool lets an
+  `OutOfMemoryError: unable to create native thread` out of `submit`, and a
+  permit lost that way is never returned — lose them all and every refresh
+  is `busy`, the block check off until a restart, with Fineract healthy.
+  Never bound it with a fixed pool over a
   `SynchronousQueue` + `AbortPolicy`: that pool also refuses the read made just
   after the previous one FINISHED (its thread is not yet back waiting), which
   skipped the block check with the slot free on a few percent of back-to-back

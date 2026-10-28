@@ -6,6 +6,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -34,6 +35,7 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -91,7 +93,10 @@ import java.util.concurrent.atomic.AtomicInteger;
  *   <li>A slot is a {@link Semaphore} permit, taken before the read is handed
  *       to a thread and given back by the read itself as its last act — so it
  *       is free again BEFORE the waiting refresh wakes, and {@code busy} means
- *       exactly that every slot holds a read that has not finished. The
+ *       exactly that every slot holds a read that has not finished. A read
+ *       that never reaches a thread (the pool shut down, or a thread that
+ *       could not be started) gives its slot back at once, exactly once:
+ *       a permit is never released twice and never lost. The
  *       threads come from a pool that never refuses a task (no queue, no
  *       thread cap); the permits keep it near one thread per slot (a thread
  *       still winding down from one read can briefly overlap the next). It
@@ -160,12 +165,25 @@ public class AccountBlockSessionGuard implements DisposableBean {
     private final ThreadPoolExecutor readThreads;
     private final Map<Outcome, Counter> counters = new EnumMap<>(Outcome.class);
 
+    @Autowired
     public AccountBlockSessionGuard(ObjectProvider<CoreBankingPort> corePort,
                                     RefreshTokenService refreshTokenService,
                                     AuditService auditService,
                                     PlatformTransactionManager transactionManager,
                                     MeterRegistry meterRegistry,
                                     RefreshBlockCheckProperties properties) {
+        this(corePort, refreshTokenService, auditService, transactionManager, meterRegistry, properties,
+                daemonThreads());
+    }
+
+    /** With the read threads' factory supplied; for tests that make a thread fail to start. */
+    AccountBlockSessionGuard(ObjectProvider<CoreBankingPort> corePort,
+                             RefreshTokenService refreshTokenService,
+                             AuditService auditService,
+                             PlatformTransactionManager transactionManager,
+                             MeterRegistry meterRegistry,
+                             RefreshBlockCheckProperties properties,
+                             ThreadFactory readThreadFactory) {
         this.corePort = corePort;
         this.refreshTokenService = refreshTokenService;
         this.auditService = auditService;
@@ -180,7 +198,7 @@ public class AccountBlockSessionGuard implements DisposableBean {
         // after 30 s. Daemon threads, so an abandoned read can never hold up
         // a shutdown.
         this.readThreads = new ThreadPoolExecutor(0, Integer.MAX_VALUE,
-                30, TimeUnit.SECONDS, new SynchronousQueue<>(), daemonThreads());
+                30, TimeUnit.SECONDS, new SynchronousQueue<>(), readThreadFactory);
         for (Outcome outcome : Outcome.values()) {
             counters.put(outcome, Counter.builder("innbucks.auth.refresh.block_check")
                     .description("Session-refresh reads of the customer's account block in the core, by outcome")
@@ -227,6 +245,9 @@ public class AccountBlockSessionGuard implements DisposableBean {
             return Outcome.READ_FAILED;
         }
         CoreCustomerRef ref = new CoreCustomerRef(customer.getCoreExternalId());
+        // Built before the slot is taken, so nothing that can fail sits
+        // between taking it and the try below that guarantees its return.
+        Runnable releaseSlot = releaseOnce();
         if (!readSlots.tryAcquire()) {
             // Every slot is held by a read that has not come back: the core is
             // stalling. DEBUG, not WARN — this fires on every refresh for the
@@ -235,13 +256,24 @@ public class AccountBlockSessionGuard implements DisposableBean {
                     customer.getId());
             return Outcome.BUSY;
         }
-        Future<List<DepositAccountRef>> pending;
+        Future<List<DepositAccountRef>> pending = null;
         try {
-            pending = readThreads.submit(holdingSlot(withCallerMdc(() -> port.listDepositAccountRefs(ref))));
+            pending = readThreads.submit(holdingSlot(releaseSlot,
+                    withCallerMdc(() -> port.listDepositAccountRefs(ref))));
         } catch (RejectedExecutionException ex) {
             // Only once the pool is shut down (the context is closing).
-            readSlots.release();
             return Outcome.READ_FAILED;
+        } finally {
+            if (pending == null) {
+                // The read was never handed to a thread: refused above, or an
+                // Error on the way out — in practice "unable to create native
+                // thread" at the process's thread limit, which the pool lets
+                // propagate. Nothing else would ever give this slot back; lose
+                // max-concurrent-reads of them and every refresh is "busy",
+                // the block check off, until a restart. The Error still
+                // propagates; only the slot is put right.
+                releaseSlot.run();
+            }
         }
         try {
             return assess(pending.get(readTimeout.toMillis(), TimeUnit.MILLISECONDS));
@@ -311,17 +343,33 @@ public class AccountBlockSessionGuard implements DisposableBean {
     }
 
     /**
+     * Gives back one slot this refresh took, at most once, whichever of the
+     * read and a failed hand-off gets there first. The pool can in principle
+     * both run a task and throw from {@code submit} (a successful hand-off
+     * followed by a failed attempt to start a replacement thread); a second
+     * release there would raise the bound above max-concurrent-reads for good.
+     */
+    private Runnable releaseOnce() {
+        AtomicBoolean released = new AtomicBoolean();
+        return () -> {
+            if (released.compareAndSet(false, true)) {
+                readSlots.release();
+            }
+        };
+    }
+
+    /**
      * Gives the read's slot back as the read's own last act — inside the
      * task, so BEFORE its future completes and the waiting refresh wakes.
      * Released any later (after the future completes) and a refresh made right
      * after the previous one finished could still find the slot taken.
      */
-    private <T> Callable<T> holdingSlot(Callable<T> task) {
+    private static <T> Callable<T> holdingSlot(Runnable releaseSlot, Callable<T> task) {
         return () -> {
             try {
                 return task.call();
             } finally {
-                readSlots.release();
+                releaseSlot.run();
             }
         };
     }

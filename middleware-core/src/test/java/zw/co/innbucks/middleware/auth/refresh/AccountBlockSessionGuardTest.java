@@ -32,6 +32,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -102,6 +103,27 @@ class AccountBlockSessionGuardTest {
                 transactionManager, meters, properties);
         guards.add(created);
         return created;
+    }
+
+    @SuppressWarnings("unchecked")
+    private AccountBlockSessionGuard guardWith(CoreBankingPort available, RefreshBlockCheckProperties properties,
+                                               ThreadFactory readThreads) {
+        ObjectProvider<CoreBankingPort> provider = mock(ObjectProvider.class);
+        when(provider.getIfAvailable()).thenReturn(available);
+        AccountBlockSessionGuard created = new AccountBlockSessionGuard(provider, refreshTokenService, audit,
+                transactionManager, meters, properties, readThreads);
+        guards.add(created);
+        return created;
+    }
+
+    /** Until {@code thread} is parked waiting for work (the pool's timed poll), or 5 s pass. */
+    private static void awaitWaitingForWork(Thread thread) {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (thread.getState() != Thread.State.TIMED_WAITING && System.nanoTime() < deadline) {
+            Thread.onSpinWait();
+        }
+        assertThat(thread.getState()).as("the read thread is back waiting for work")
+                .isEqualTo(Thread.State.TIMED_WAITING);
     }
 
     /** A core that answers nothing until the test releases it (or 10 s pass). */
@@ -372,6 +394,43 @@ class AccountBlockSessionGuardTest {
     }
 
     @Test
+    void aReadWhoseThreadCannotStartGivesItsSlotBack() {
+        // At the process's thread limit the pool's submit throws
+        // OutOfMemoryError("unable to create native thread") — the read never
+        // reaches a thread, so it can never give its slot back itself. That
+        // refresh fails; the slot must not go with it, or once every slot is
+        // lost each later refresh is "busy" and a FULL block never ends a
+        // session again until a restart, with Fineract perfectly healthy.
+        AtomicBoolean failNextStart = new AtomicBoolean(true);
+        ThreadFactory atTheThreadLimitOnce = runnable -> {
+            if (failNextStart.getAndSet(false)) {
+                throw new OutOfMemoryError("unable to create native thread: possibly out of memory "
+                        + "or process/resource limits reached");
+            }
+            Thread thread = new Thread(runnable, "refresh-block-check-test");
+            thread.setDaemon(true);
+            return thread;
+        };
+        AccountBlockSessionGuard oneSlot = guardWith(port,
+                new RefreshBlockCheckProperties(Duration.ofSeconds(5), 1), atTheThreadLimitOnce);
+        walletIs(AccountRestriction.FULLY_BLOCKED);
+        when(refreshTokenService.revokeAllSessions(customer.getId(), "account_blocked")).thenReturn(2);
+
+        assertThatThrownBy(() -> oneSlot.requireSessionAllowed(customer, DEVICE))
+                .isInstanceOf(OutOfMemoryError.class);
+        assertThat(oneSlot.freeReadSlots()).isEqualTo(1);
+
+        // Threads start again: the block is read and ends the session.
+        assertThatThrownBy(() -> oneSlot.requireSessionAllowed(customer, DEVICE))
+                .isInstanceOf(AccountRestrictedSessionException.class);
+        assertThat(count("busy")).isZero();
+        assertThat(count("fully_blocked")).isEqualTo(1.0);
+        verify(port, times(1)).listDepositAccountRefs(any());
+        // Given back once, never twice: the bound is still one.
+        assertThat(oneSlot.freeReadSlots()).isEqualTo(1);
+    }
+
+    @Test
     void theReadCarriesTheCallersCorrelationIdAndLeavesNoneBehind() {
         // The adapter puts MDC's correlation id on the outbound call; a read
         // on a pool thread must still carry the refresh's — and must not leak
@@ -379,16 +438,26 @@ class AccountBlockSessionGuardTest {
         AccountBlockSessionGuard oneSlot = guardWith(port,
                 new RefreshBlockCheckProperties(Duration.ofSeconds(5), 1));
         List<String> seen = Collections.synchronizedList(new ArrayList<>());
+        List<Thread> readers = Collections.synchronizedList(new ArrayList<>());
         when(port.listDepositAccountRefs(any())).thenAnswer(inv -> {
             seen.add(String.valueOf(MDC.get("correlationId")));
+            readers.add(Thread.currentThread());
             return List.of(account(customer.getId() + ":wallet", AccountRestriction.NONE));
         });
 
         MDC.put("correlationId", "corr-refresh-1");
         oneSlot.requireSessionAllowed(customer, DEVICE);
         MDC.clear();
+        // The second read must run on the SAME thread, or the leak half proves
+        // nothing: a new thread starts with an empty MDC whether or not the
+        // first read cleaned up (and this pool starts one whenever no thread
+        // is idle yet). A thread takes the next read only once it is back
+        // waiting for work, so wait for that first.
+        Thread firstReader = readers.get(0);
+        awaitWaitingForWork(firstReader);
         oneSlot.requireSessionAllowed(customer, DEVICE);
 
+        assertThat(readers).containsExactly(firstReader, firstReader);
         assertThat(seen).containsExactly("corr-refresh-1", "null");
     }
 
