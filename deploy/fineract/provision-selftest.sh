@@ -344,7 +344,13 @@ is "the names are the script's users" "${MW_READ_ROLE} ${MW_WRITE_ROLE}" "innbuc
 # would refuse it and fail; this fails the change that adds it.
 MW_GRANTS_IN_CELL_FILES=""
 for f in ../cells/*.env; do
-  grants=$( set -a; . "$f" >/dev/null 2>&1; printf '%s' "${BANK_ROLE_GRANTS:-}" )
+  # Sourced WITHOUT -u (the operator's shell has none), and a file that cannot
+  # be read fails the check: under this script's -u a ${HOST_VALUE} anywhere
+  # after the grants line killed the subshell silently, so the grants came
+  # back empty and a middleware-role grant passed.
+  if ! grants=$( set +u; set -a; . "$f" >/dev/null 2>&1 || exit 97; printf '%s' "${BANK_ROLE_GRANTS:-}" ); then
+    MW_GRANTS_IN_CELL_FILES+="${f##*/}:unreadable "; continue
+  fi
   while IFS=$'\t' read -r role _; do
     if is_middleware_role "$role"; then MW_GRANTS_IN_CELL_FILES+="${f##*/}:${role} "; fi
   done < <(parse_role_grants "$grants" 2>/dev/null)
