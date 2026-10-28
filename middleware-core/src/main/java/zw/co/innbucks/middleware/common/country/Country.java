@@ -10,7 +10,10 @@ import java.time.ZoneId;
  *
  * <p>Adding a market means adding the enum constant AND its
  * {@code MsisdnNormalizer} — the registry's startup check makes a half-done
- * addition fail loudly at boot rather than at the first customer registration.
+ * addition fail loudly at boot rather than at the first customer registration
+ * — and its {@code NationalIdValidator} for KYC (whose registry checks the same
+ * way once KYC is on; {@code NationalIdValidatorRegistryTest} requires one per
+ * constant).
  */
 public enum Country {
 
