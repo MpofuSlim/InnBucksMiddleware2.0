@@ -123,17 +123,13 @@ public class LedgerService {
      * that on return) before the core call is made. INSERT goes through
      * JdbcTemplate — client-assigned {@code @Id}, the save()-emits-UPDATE
      * gotcha.
-     */
-    @Transactional(propagation = Propagation.REQUIRES_NEW, isolation = Isolation.READ_COMMITTED)
-    public LedgerTransaction openPending(LedgerDraft draft) {
-        return insertPending(draft, PendingReservationGuard.NONE);
-    }
-
-    /**
-     * Open the PENDING row only if {@code guard} lets it, in ONE transaction:
+     *
+     * <p>The row is opened only if {@code guard} lets it, in ONE transaction:
      * the guard runs first (inside this transaction, before the INSERT) and
      * may throw to refuse, in which case nothing is written. This is what
      * makes the row itself the reservation for the per-tier payment limits.
+     * There is no guard-free overload: a caller with nothing to check passes
+     * {@link PendingReservationGuard#NONE} explicitly.
      *
      * <p>Isolation is pinned to READ COMMITTED, not merely inherited from
      * Postgres' default: the limits guard takes a per-customer lock and THEN
@@ -144,10 +140,6 @@ public class LedgerService {
      */
     @Transactional(propagation = Propagation.REQUIRES_NEW, isolation = Isolation.READ_COMMITTED)
     public LedgerTransaction openPending(LedgerDraft draft, PendingReservationGuard guard) {
-        return insertPending(draft, guard);
-    }
-
-    private LedgerTransaction insertPending(LedgerDraft draft, PendingReservationGuard guard) {
         UUID id = UUID.randomUUID();
         Instant now = clock.instant();
         // The guard judges the period on the SAME instant the row is stamped

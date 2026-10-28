@@ -165,6 +165,18 @@ class MovementServiceTest {
         verifyNoInteractions(consumedTokens, executor);
     }
 
+    /** The same promise on withdrawals — each endpoint carries its own pre-check call. */
+    @Test
+    void aWithdrawalTheLimitsRefuseIsNeverAnsweredStepUpRequired() {
+        assertThatThrownBy(() -> service().withdraw(CUSTOMER, "k1",
+                new WithdrawRequest(WALLET, 120000, "USD", null), null))
+                .isInstanceOf(PaymentLimitExceededException.class)
+                .satisfies(ex -> assertThat(((PaymentLimitExceededException) ex).refusal().kind())
+                        .isEqualTo(LimitKind.PER_PAYMENT));
+        verify(port, never()).listDepositAccountRefs(any());
+        verifyNoInteractions(consumedTokens, executor);
+    }
+
     @Test
     void aPaymentWithinTheLimitsStillNeedsItsApproval() {
         assertThatThrownBy(() -> service().transfer(CUSTOMER, "k1", transfer(60000), null))

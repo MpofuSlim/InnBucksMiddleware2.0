@@ -135,7 +135,7 @@ class LedgerFlowIntegrationTest {
 
     @Test
     void completedMovementIsLedgeredJournalledAndAudited() {
-        LedgerOutcome outcome = executor.execute(draft("ref-completed-1"),
+        LedgerOutcome outcome = executor.execute(draft("ref-completed-1"), PendingReservationGuard.NONE,
                 ref -> new TransactionResult(new TxRef("CORE-1"), TransactionState.COMPLETED));
 
         assertThat(outcome.status()).isEqualTo(LedgerStatus.COMPLETED);
@@ -150,7 +150,7 @@ class LedgerFlowIntegrationTest {
 
     @Test
     void unknownOutcomeParksThenReconcilerResolvesIt() {
-        LedgerOutcome outcome = executor.execute(draft("ref-unknown-1"), ref -> {
+        LedgerOutcome outcome = executor.execute(draft("ref-unknown-1"), PendingReservationGuard.NONE, ref -> {
             throw new CoreUnknownOutcomeException(CoreProvider.FINERACT, ref, "timeout mid-flight", null);
         });
         assertThat(outcome.status()).isEqualTo(LedgerStatus.UNKNOWN);
@@ -171,7 +171,7 @@ class LedgerFlowIntegrationTest {
 
     @Test
     void unresolvableRowStaysParkedWithBackoffNeverExpired() {
-        LedgerOutcome outcome = executor.execute(draft("ref-unknown-2"), ref -> {
+        LedgerOutcome outcome = executor.execute(draft("ref-unknown-2"), PendingReservationGuard.NONE, ref -> {
             throw new CoreUnknownOutcomeException(CoreProvider.FINERACT, ref, "reset after send", null);
         });
         stubPort.onGetTransaction =
@@ -217,7 +217,7 @@ class LedgerFlowIntegrationTest {
 
     @Test
     void terminalRowsRefuseFurtherTransitions() {
-        LedgerOutcome outcome = executor.execute(draft("ref-terminal-1"),
+        LedgerOutcome outcome = executor.execute(draft("ref-terminal-1"), PendingReservationGuard.NONE,
                 ref -> new TransactionResult(ref, TransactionState.COMPLETED));
 
         ledgerService.markFailed(outcome.transactionId(), "late", "must be refused");
@@ -228,10 +228,10 @@ class LedgerFlowIntegrationTest {
 
     @Test
     void externalRefIsUniqueAcrossRows() {
-        executor.execute(draft("ref-dup-1"),
+        executor.execute(draft("ref-dup-1"), PendingReservationGuard.NONE,
                 ref -> new TransactionResult(ref, TransactionState.COMPLETED));
 
-        assertThatThrownBy(() -> executor.execute(draft("ref-dup-1"),
+        assertThatThrownBy(() -> executor.execute(draft("ref-dup-1"), PendingReservationGuard.NONE,
                 ref -> new TransactionResult(ref, TransactionState.COMPLETED)))
                 .isInstanceOf(DuplicateKeyException.class);
     }

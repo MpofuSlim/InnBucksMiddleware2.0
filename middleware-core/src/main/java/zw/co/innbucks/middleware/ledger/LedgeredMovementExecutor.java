@@ -43,18 +43,17 @@ public class LedgeredMovementExecutor {
 
     private final LedgerService ledgerService;
 
-    public LedgerOutcome execute(LedgerDraft draft,
-                                 Function<TxRef, TransactionResult> coreCall) {
-        // Write-ahead: committed (REQUIRES_NEW) before the core call goes out.
-        return callCore(draft, ledgerService.openPending(draft), coreCall);
-    }
-
     /**
-     * As {@link #execute(LedgerDraft, Function)}, but the PENDING row is only
-     * opened if {@code reservationGuard} lets it — checked inside the same
-     * transaction as the INSERT (see {@link LedgerService#openPending(LedgerDraft,
-     * PendingReservationGuard)}). A refusal propagates from HERE, before the
-     * try block below: no row, no core call, nothing to reconcile.
+     * Opens the write-ahead PENDING row — committed (REQUIRES_NEW) before the
+     * core call goes out — but only if {@code reservationGuard} lets it,
+     * checked inside the same transaction as the INSERT (see
+     * {@link LedgerService#openPending}). A refusal propagates from HERE,
+     * before the try block below: no row, no core call, nothing to reconcile.
+     *
+     * <p>There is deliberately no overload without a guard: every caller names
+     * one, so a withdrawal or transfer opened with
+     * {@link PendingReservationGuard#NONE} — i.e. past the per-tier payment
+     * limits — is visible in review rather than a default.
      */
     public LedgerOutcome execute(LedgerDraft draft,
                                  PendingReservationGuard reservationGuard,
