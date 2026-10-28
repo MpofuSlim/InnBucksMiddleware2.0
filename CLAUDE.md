@@ -87,7 +87,11 @@ Build: `./mvnw verify` at the root. Run locally:
 * Adapters map upstream failures to the core-neutral taxonomy
   (`CoreAuthException` / `CoreClientException` / `CoreServerException` /
   `CoreTransientException` / `CoreUnknownOutcomeException`); nothing upstream
-  of an adapter sees a core-specific exception or raw body.
+  of an adapter sees a core-specific exception or raw body. `CoreAuthException`
+  means the core refused OUR service credentials or a permission they lack —
+  never anyone else's. The operator port's refusal of an OPERATOR's credential
+  is its own type, `CoreOperatorAuthException`, so no handler can mistake one
+  for the other (slice 10b).
 * **A maker-checker-PARKED command is UNKNOWN, never a success.** Fineract
   answers a parked command with a success-shaped
   `200 {"commandId":N,"rollbackTransaction":true}` and no resourceId/echo —
@@ -1090,6 +1094,16 @@ one re-provision with nothing new in `deploy/fineract/.env` (exit 0, 6f
      still ride our read-only AppUser; only the account authz read carries the
      operator's credential. Fineract serves both search path variants from the
      same method (read from the fork, `SavingsAccountTransactionsApiResource`).
+   - **Whose credential was refused decides the answer.** The 401
+     `operator_unauthorized` is for the OPERATOR's credential only
+     (`CoreOperatorAuthException`, from `FineractOperatorGateway`). A refusal
+     of OUR read AppUser during the transaction reads (a permission missing
+     from its role, a wrong password in `.env`) is `CoreAuthException` and
+     answers `502 core_banking_unavailable` "Your credential was accepted…",
+     logged at ERROR. When both were `CoreAuthException`, a provisioning gap on
+     our side told the operator their working password had been rejected.
+     Pinned by `ConsoleStatementAuthSplitTest` (standalone) and
+     `ConsoleStatementFlowIntegrationTest`.
    - **Throttled BEFORE the credential is touched** — the endpoint would
      otherwise be an operator-password oracle. Keyed per source ADDRESS
      deliberately (per-operator keying would let a spray widen itself by
