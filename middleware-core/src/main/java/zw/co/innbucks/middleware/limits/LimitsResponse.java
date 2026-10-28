@@ -29,7 +29,7 @@ public record LimitsResponse(
                 + "now: the smallest of per_payment, the daily remainder and the monthly remainder; 0 when "
                 + "today's payment count is used up. NULL when no money limit is configured for this tier "
                 + "(do not render a number then — there is no cap to show).",
-                example = "100000", nullable = true)
+                example = "37500", nullable = true)
         Long sendableNowMinor,
 
         @Schema(description = "Only the limits configured for this tier; a kind the tier does not have is "
@@ -51,14 +51,14 @@ public record LimitsResponse(
             Long limitMinor,
 
             @Schema(description = "Sent in the period so far — SUCCESS and PROCESSING payments, never "
-                    + "FAILED ones (daily/monthly).", example = "12500")
+                    + "FAILED ones (daily/monthly).", example = "112500")
             Long usedMinor,
 
             @Schema(description = "The part of usedMinor still PROCESSING. It counts; if it later fails it "
                     + "stops counting (daily/monthly).", example = "0")
             Long processingMinor,
 
-            @Schema(description = "limitMinor - usedMinor, never below 0 (daily/monthly).", example = "137500")
+            @Schema(description = "limitMinor - usedMinor, never below 0 (daily/monthly).", example = "37500")
             Long remainingMinor,
 
             @Schema(description = "Payments allowed per day (daily_count).", example = "10")

@@ -49,18 +49,26 @@ public class TransactionController {
              "status":"SUCCESS","coreTxRef":"501","failureCode":null,"failureMessage":null}
             """;
 
-    /** Consistent with the GET /me/limits example: basic tier, 12,500 of 150,000 used today. */
+    /**
+     * The customer of the GET /me/limits example (basic, 112,500 of 150,000
+     * sent today, 37,500 sendable now) paying 50,000. remainingMinor is the
+     * screen's sendableNowMinor.
+     */
     private static final String LIMIT_DAILY_EXAMPLE = """
             {"type":"about:blank","title":"Payment limit reached","status":422,
              "detail":"This payment would take you over your daily sending limit.",
-             "errorCode":"limit_exceeded","limit":"daily","limitMinor":150000,"remainingMinor":137500,
+             "errorCode":"limit_exceeded","limit":"daily","limitMinor":150000,"remainingMinor":37500,
              "resetsAt":"2026-10-29T00:00:00+02:00","kycTier":"basic","nextTier":"standard"}
             """;
 
+    /**
+     * The same customer paying 120,000. remainingMinor is what passes NOW
+     * (37,500 — the day has less left than the 100,000 cap), not the cap.
+     */
     private static final String LIMIT_PER_PAYMENT_EXAMPLE = """
             {"type":"about:blank","title":"Payment limit reached","status":422,
              "detail":"This amount is more than you can send in one payment.",
-             "errorCode":"limit_exceeded","limit":"per_payment","limitMinor":100000,"remainingMinor":100000,
+             "errorCode":"limit_exceeded","limit":"per_payment","limitMinor":100000,"remainingMinor":37500,
              "resetsAt":null,"kycTier":"basic","nextTier":"standard"}
             """;
 
@@ -85,6 +93,8 @@ public class TransactionController {
     private static final String LIMITS_422_DESCRIPTION = "Refused before anything was written. "
             + "errorCode limit_exceeded: the payment would break the caller's per-tier limit (fields "
             + "limit, limitMinor/limitCount, remainingMinor/remainingCount, resetsAt, kycTier, nextTier; "
+            + "remainingMinor is the most that passes NOW, the same figure as GET /me/limits "
+            + "sendableNowMinor — for per_payment it can be below limitMinor; "
             + "checked BEFORE step-up, so a payment that will be refused never gets step_up_required). "
             + "Also: key reused with a different body (idempotency_conflict), or the core rejected the "
             + "movement (core_rejected).";

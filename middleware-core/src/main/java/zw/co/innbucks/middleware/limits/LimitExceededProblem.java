@@ -13,6 +13,8 @@ import java.net.URI;
  * limit           per_payment | daily | monthly | daily_count
  * limitMinor      money kinds only          limitCount      daily_count only
  * remainingMinor  money kinds only          remainingCount  daily_count only
+ *                 (the most that passes NOW = /me/limits sendableNowMinor;
+ *                 for per_payment it can be below limitMinor)
  * resetsAt        ISO-8601 at the market offset; null for per_payment
  * kycTier         the tier the limit belongs to
  * nextTier        the tier above; null at the top ("Raise my limits" only when set)

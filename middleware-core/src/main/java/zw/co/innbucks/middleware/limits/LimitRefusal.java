@@ -7,12 +7,15 @@ import zw.co.innbucks.middleware.customer.KycTier;
  * body. Exactly one of the money pair ({@code limitMinor}/{@code remainingMinor})
  * or the count pair ({@code limitCount}/{@code remainingCount}) is set.
  *
- * @param remainingMinor for daily/monthly: what is left in the period. For
- *                       per_payment: the limit itself — a single payment's
- *                       allowance never depletes; {@code GET /me/limits}
- *                       {@code sendableNowMinor} is the combined figure.
+ * @param remainingMinor the largest payment that would pass every limit now —
+ *                       the same figure as {@code GET /me/limits}
+ *                       {@code sendableNowMinor}. For daily/monthly that is what
+ *                       is left in the reported period; for per_payment it can
+ *                       be BELOW {@code limitMinor} when the day or month has
+ *                       less left (0 when the day's payment count is used up)
  * @param resetsAt       when the allowance comes back, ISO-8601 at the market
- *                       offset; {@code null} for per_payment (it never resets)
+ *                       offset; {@code null} for per_payment (the cap itself
+ *                       never resets)
  * @param nextTier       the tier above, or {@code null} at the top — the app
  *                       offers "Raise my limits" only when it is present
  */

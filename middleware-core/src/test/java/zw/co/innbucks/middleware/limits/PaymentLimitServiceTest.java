@@ -36,6 +36,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -110,8 +111,80 @@ class PaymentLimitServiceTest {
                 windows, KycTier.BASIC).orElseThrow();
         assertThat(refusal.kind()).isEqualTo(LimitKind.PER_PAYMENT);
         assertThat(refusal.limitMinor()).isEqualTo(100000L);
-        assertThat(refusal.remainingMinor()).as("a per-payment allowance never depletes").isEqualTo(100000L);
+        assertThat(refusal.remainingMinor()).as("the count is used up: nothing passes now").isZero();
         assertThat(refusal.resetsAt()).isNull();
+    }
+
+    /**
+     * per_payment 1,000.00, daily 1,500.00 with 1,300.00 sent, a payment of
+     * 1,500.00: offering 1,000.00 would be refused again on the daily, so the
+     * refusal offers what actually passes.
+     */
+    @Test
+    void aPerPaymentRefusalOffersWhatPassesNowNotTheCap() {
+        LimitUsage usage = used(130000, 130000, 1);
+        LimitRefusal refusal = PaymentLimitService.evaluate(BASIC, usage, 150000, windows, KycTier.BASIC)
+                .orElseThrow();
+        assertThat(refusal.kind()).isEqualTo(LimitKind.PER_PAYMENT);
+        assertThat(refusal.limitMinor()).isEqualTo(100000L);
+        assertThat(refusal.remainingMinor()).isEqualTo(20000L);
+        assertThat(PaymentLimitService.evaluate(BASIC, usage, refusal.remainingMinor(), windows, KycTier.BASIC))
+                .as("the offered amount passes").isEmpty();
+        // With room in the day and month, the cap itself is what passes.
+        assertThat(PaymentLimitService.evaluate(BASIC, used(0, 0, 0), 150000, windows, KycTier.BASIC)
+                .orElseThrow().remainingMinor()).isEqualTo(100000L);
+    }
+
+    /**
+     * Every money refusal's remainingMinor is /me/limits' sendableNowMinor for
+     * the same usage — so the app can offer it and it passes, whichever limit
+     * the refusal names.
+     */
+    @Test
+    void everyMoneyRefusalOffersExactlySendableNow() {
+        long[] used = {0, 1, 50000, 99999, 100000, 130000, 149999, 150000, 170000};
+        long[] amounts = {1, 20000, 50000, 100000, 100001, 150001};
+        int moneyRefusals = 0;
+        for (long day : used) {
+            for (long monthExtra : used) {
+                for (long count : new long[] {0, 9, 10}) {
+                    LimitUsage usage = used(day, day + monthExtra, count);
+                    for (long amount : amounts) {
+                        Optional<LimitRefusal> refusal = PaymentLimitService.evaluate(BASIC, usage, amount,
+                                windows, KycTier.BASIC);
+                        if (refusal.isPresent() && refusal.get().kind().isMoney()) {
+                            moneyRefusals++;
+                            assertThat(refusal.get().remainingMinor())
+                                    .as("day=%d month=%d count=%d amount=%d %s", day, day + monthExtra, count,
+                                            amount, refusal.get().kind())
+                                    .isEqualTo(PaymentLimitService.sendableNow(BASIC, usage));
+                        }
+                    }
+                }
+            }
+        }
+        assertThat(moneyRefusals).as("the grid exercises refusals").isGreaterThan(100);
+    }
+
+    /**
+     * The Swagger examples (GET /me/limits and the two money refusals on
+     * withdraw/transfer) describe ONE customer at one moment; this pins that
+     * the refusals are what that customer would actually get.
+     */
+    @Test
+    void theSwaggerRefusalExamplesFollowFromTheLimitsExample() {
+        LimitUsage example = new LimitUsage(112500, 0, 3, 181000, 5000);
+        assertThat(PaymentLimitService.sendableNow(BASIC, example)).isEqualTo(37500L);
+
+        LimitRefusal daily = PaymentLimitService.evaluate(BASIC, example, 50000, windows, KycTier.BASIC)
+                .orElseThrow();
+        assertThat(daily).isEqualTo(LimitRefusal.money(LimitKind.DAILY, 150000, 37500,
+                "2026-10-29T00:00:00+02:00", KycTier.BASIC));
+
+        LimitRefusal perPayment = PaymentLimitService.evaluate(BASIC, example, 120000, windows, KycTier.BASIC)
+                .orElseThrow();
+        assertThat(perPayment).isEqualTo(LimitRefusal.money(LimitKind.PER_PAYMENT, 100000, 37500, null,
+                KycTier.BASIC));
     }
 
     @Test
@@ -218,20 +291,20 @@ class PaymentLimitServiceTest {
     @Test
     void theViewListsOnlyConfiguredKindsWithTheSwaggerExamplesNumbers() {
         LimitsResponse view = PaymentLimitService.assemble(KycTier.BASIC, "USD", 50000L, BASIC,
-                new LimitUsage(12500, 0, 3, 81000, 5000), windows);
+                new LimitUsage(112500, 0, 3, 181000, 5000), windows);
 
         assertThat(view.kycTier()).isEqualTo("basic");
         assertThat(view.currency()).isEqualTo("USD");
         assertThat(view.stepUpAtOrAboveMinor()).isEqualTo(50000L);
-        assertThat(view.sendableNowMinor()).isEqualTo(100000L);
+        assertThat(view.sendableNowMinor()).isEqualTo(37500L);
         assertThat(view.limits()).extracting(LimitsResponse.LimitView::kind)
                 .containsExactly("per_payment", "daily", "monthly", "daily_count");
         assertThat(view.limits().get(0)).isEqualTo(new LimitsResponse.LimitView(
                 "per_payment", 100000L, null, null, null, null, null, null, null));
         assertThat(view.limits().get(1)).isEqualTo(new LimitsResponse.LimitView(
-                "daily", 150000L, 12500L, 0L, 137500L, null, null, null, "2026-10-29T00:00:00+02:00"));
+                "daily", 150000L, 112500L, 0L, 37500L, null, null, null, "2026-10-29T00:00:00+02:00"));
         assertThat(view.limits().get(2)).isEqualTo(new LimitsResponse.LimitView(
-                "monthly", 500000L, 81000L, 5000L, 419000L, null, null, null, "2026-11-01T00:00:00+02:00"));
+                "monthly", 500000L, 181000L, 5000L, 319000L, null, null, null, "2026-11-01T00:00:00+02:00"));
         assertThat(view.limits().get(3)).isEqualTo(new LimitsResponse.LimitView(
                 "daily_count", null, null, null, null, 10L, 3L, 7L, "2026-10-29T00:00:00+02:00"));
     }
@@ -308,6 +381,38 @@ class PaymentLimitServiceTest {
                 150000, KEY);
 
         verify(usageStore, never()).usage(any(), any(), any());
+    }
+
+    /**
+     * The double-tap race: B (same key as A) finds no row, A then commits its
+     * PENDING row, and B's usage query counts A's 60.00 against B. B must not
+     * answer limit_exceeded for a payment that is going through.
+     */
+    @Test
+    void theAdvisoryCheckDropsARefusalWhenTheKeyAppearedMeanwhile() {
+        when(ledger.findByExternalRef(KEY))
+                .thenReturn(Optional.empty())                       // the skip check: nothing yet
+                .thenReturn(Optional.of(new LedgerTransaction()));  // A committed before the sum
+        when(usageStore.usage(CUSTOMER, "USD", windows)).thenReturn(used(100000, 100000, 1));
+
+        service.precheck(CUSTOMER, KycTierResolution.of(KycTier.BASIC), LedgerTransactionType.TRANSFER,
+                60000, KEY);
+
+        InOrder order = inOrder(ledger, usageStore);
+        order.verify(ledger).findByExternalRef(KEY);
+        order.verify(usageStore).usage(CUSTOMER, "USD", windows);
+        order.verify(ledger).findByExternalRef(KEY);
+        assertThat(meters.find("innbucks.payment_limits.refused").counter()).isNull();
+    }
+
+    @Test
+    void aRefusalIsStillARefusalWhenTheKeyIsStillAbsent() {
+        when(usageStore.usage(CUSTOMER, "USD", windows)).thenReturn(used(100000, 100000, 1));
+
+        assertThatThrownBy(() -> service.precheck(CUSTOMER, KycTierResolution.of(KycTier.BASIC),
+                LedgerTransactionType.TRANSFER, 60000, KEY))
+                .isInstanceOf(PaymentLimitExceededException.class);
+        verify(ledger, times(2)).findByExternalRef(KEY);
     }
 
     @Test

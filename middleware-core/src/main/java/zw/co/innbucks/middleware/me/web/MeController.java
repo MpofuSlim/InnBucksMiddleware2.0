@@ -52,17 +52,20 @@ public class MeController {
 
     /**
      * Internally consistent on purpose: sendableNowMinor = min(per_payment
-     * 100000, daily remaining 137500, monthly remaining 419000) = 100000, and
-     * the step-up threshold sits below per_payment so approval can fire.
+     * 100000, daily remaining 37500, monthly remaining 319000) = 37500; the
+     * month's use includes the day's; the step-up threshold sits below
+     * per_payment so approval can fire. The two money refusal examples on
+     * POST /transactions/withdraw and /transfer are what THIS customer gets
+     * (pinned by PaymentLimitServiceTest#theSwaggerRefusalExamplesFollowFromTheLimitsExample).
      */
     private static final String LIMITS_EXAMPLE = """
-            {"kycTier":"basic","currency":"USD","stepUpAtOrAboveMinor":50000,"sendableNowMinor":100000,
+            {"kycTier":"basic","currency":"USD","stepUpAtOrAboveMinor":50000,"sendableNowMinor":37500,
              "limits":[
                {"kind":"per_payment","limitMinor":100000},
-               {"kind":"daily","limitMinor":150000,"usedMinor":12500,"processingMinor":0,
-                "remainingMinor":137500,"resetsAt":"2026-10-29T00:00:00+02:00"},
-               {"kind":"monthly","limitMinor":500000,"usedMinor":81000,"processingMinor":5000,
-                "remainingMinor":419000,"resetsAt":"2026-11-01T00:00:00+02:00"},
+               {"kind":"daily","limitMinor":150000,"usedMinor":112500,"processingMinor":0,
+                "remainingMinor":37500,"resetsAt":"2026-10-29T00:00:00+02:00"},
+               {"kind":"monthly","limitMinor":500000,"usedMinor":181000,"processingMinor":5000,
+                "remainingMinor":319000,"resetsAt":"2026-11-01T00:00:00+02:00"},
                {"kind":"daily_count","limit":10,"used":3,"remaining":7,
                 "resetsAt":"2026-10-29T00:00:00+02:00"}]}
             """;

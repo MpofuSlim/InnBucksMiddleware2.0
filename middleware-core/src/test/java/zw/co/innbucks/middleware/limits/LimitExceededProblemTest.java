@@ -15,7 +15,7 @@ class LimitExceededProblemTest {
 
     @Test
     void aDailyRefusalCarriesTheMoneyFieldsAndTheReset() {
-        ProblemDetail body = LimitExceededProblem.of(LimitRefusal.money(LimitKind.DAILY, 150000, 137500,
+        ProblemDetail body = LimitExceededProblem.of(LimitRefusal.money(LimitKind.DAILY, 150000, 37500,
                 "2026-10-29T00:00:00+02:00", KycTier.BASIC));
 
         assertThat(body.getStatus()).isEqualTo(422);
@@ -24,7 +24,7 @@ class LimitExceededProblemTest {
                 .containsEntry("errorCode", "limit_exceeded")
                 .containsEntry("limit", "daily")
                 .containsEntry("limitMinor", 150000L)
-                .containsEntry("remainingMinor", 137500L)
+                .containsEntry("remainingMinor", 37500L)
                 .containsEntry("resetsAt", "2026-10-29T00:00:00+02:00")
                 .containsEntry("kycTier", "basic")
                 .containsEntry("nextTier", "standard")
@@ -33,13 +33,13 @@ class LimitExceededProblemTest {
 
     @Test
     void aPerPaymentRefusalSaysItNeverResets() {
-        ProblemDetail body = LimitExceededProblem.of(LimitRefusal.money(LimitKind.PER_PAYMENT, 100000, 100000,
+        ProblemDetail body = LimitExceededProblem.of(LimitRefusal.money(LimitKind.PER_PAYMENT, 100000, 37500,
                 null, KycTier.STANDARD));
 
         assertThat(body.getProperties())
                 .containsEntry("limit", "per_payment")
                 .containsEntry("limitMinor", 100000L)
-                .containsEntry("remainingMinor", 100000L)
+                .containsEntry("remainingMinor", 37500L)
                 .containsEntry("resetsAt", null)
                 .containsEntry("nextTier", "enhanced");
         assertThat(body.getProperties()).containsKey("resetsAt");

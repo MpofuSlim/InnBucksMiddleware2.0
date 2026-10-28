@@ -37,7 +37,8 @@ import java.util.UUID;
  *       {@code step_up_required} (nobody is sent to fetch an SMS code for it).
  *       It SKIPS when the ledger already holds a row for this namespaced
  *       Idempotency-Key: a replay must return its recorded outcome, not be
- *       counted against itself.</li>
+ *       counted against itself. The key is read again before any refusal,
+ *       for a duplicate whose original commits in between.</li>
  *   <li><b>Binding</b> ({@link #reservationGuard}) — inside the ONE
  *       transaction that opens the PENDING ledger row: per-customer advisory
  *       lock, sum, then refuse (nothing written) or let the INSERT proceed.
@@ -117,6 +118,19 @@ public class PaymentLimitService {
                 ? usageStore.usage(customerId, policy.currency(), windows) : LimitUsage.NONE;
         Optional<LimitRefusal> refusal = evaluate(limits, usage, amountMinor, windows, tier.tier());
         if (refusal.isPresent()) {
+            if (ledgerRepository.findByExternalRef(externalRef).isPresent()) {
+                // A same-key duplicate (a double-tap) whose original committed
+                // its PENDING row between the skip above and the usage query:
+                // the sum may be counting that very row. Read AFTER the usage
+                // query, so any row the sum saw is visible here. Its outcome
+                // (or 409 idempotency_in_progress) is the answer, not a
+                // refusal of a payment that is going through. Paid for only on
+                // the refusal path, and keeps ONE usage predicate for every
+                // check.
+                log.debug("Limit pre-check refusal dropped: externalRef={} appeared in the ledger meanwhile",
+                        externalRef);
+                return;
+            }
             refuse(refusal.get(), tier, "advisory", customerId, amountMinor);
         }
     }
@@ -190,12 +204,21 @@ public class PaymentLimitService {
      *   <li>of daily and monthly, the one with LESS left (it is the real
      *       ceiling); on a tie, monthly, whose reset is the truthful one.</li>
      * </ol>
+     *
+     * <p>{@code remainingMinor} of every MONEY refusal is the largest payment
+     * that would pass now — exactly {@link #sendableNow}, i.e. what
+     * {@code GET /me/limits} shows as {@code sendableNowMinor}. For daily and
+     * monthly that falls out of the precedence above (the reported period has
+     * the smallest remainder). For per_payment it is set explicitly: the cap
+     * itself never depletes, but offering it when the day or month has less
+     * left would send the customer straight into a second refusal.
      */
     static Optional<LimitRefusal> evaluate(TierLimits limits, LimitUsage usage, long amountMinor,
                                            LimitWindows windows, KycTier tier) {
         Long perPayment = limits.perPaymentMinor();
         if (perPayment != null && amountMinor > perPayment) {
-            return Optional.of(LimitRefusal.money(LimitKind.PER_PAYMENT, perPayment, perPayment, null, tier));
+            return Optional.of(LimitRefusal.money(LimitKind.PER_PAYMENT, perPayment,
+                    sendableNow(limits, usage), null, tier));
         }
         Integer count = limits.dailyCount();
         if (count != null && usage.dayCount() >= count) {

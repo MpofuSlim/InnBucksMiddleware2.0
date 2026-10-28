@@ -339,6 +339,15 @@ class PaymentLimitsIntegrationTest {
         assertThat(body.get("resetsAt").asText()).isEqualTo(daily.get("resetsAt").asText());
         assertThat(body.get("kycTier").asText()).isEqualTo("basic");
         assertThat(body.get("nextTier").asText()).isEqualTo("standard");
+        assertThat(body.get("remainingMinor").asLong()).isEqualTo(view.get("sendableNowMinor").asLong());
+
+        // Over the per-payment cap (60000): it offers what passes now, the
+        // screen's sendableNowMinor, not the cap.
+        JsonNode perPayment = json(transfer(60001, "agree-pp"));
+        assertThat(perPayment.get("limit").asText()).isEqualTo("per_payment");
+        assertThat(perPayment.get("limitMinor").asLong()).isEqualTo(60000L);
+        assertThat(perPayment.get("remainingMinor").asLong()).isEqualTo(view.get("sendableNowMinor").asLong());
+        assertThat(perPayment.get("resetsAt").isNull()).isTrue();
 
         // ...and exactly what it offered passes the limits (and, being at the
         // step-up threshold, is then asked for its SMS approval — not refused).
