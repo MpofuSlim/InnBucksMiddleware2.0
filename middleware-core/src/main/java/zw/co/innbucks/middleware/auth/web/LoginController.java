@@ -102,12 +102,14 @@ public class LoginController {
         // 2. The bank's block, read while the presented token is still UNSPENT
         //    and with no transaction open (rotate() holds a pooled connection
         //    and the customer-row lock; an HTTP call must not run inside it).
-        //    Spending the token first would let a slow core sign customers out:
-        //    a client that gave up waiting never received the successor, and
-        //    its next refresh with the old token reads as a replay that kills
-        //    the family. The guard also waits at most its timeout and fails
-        //    open. On a full block it revokes every family — this token's
-        //    included — and throws; nothing is rotated.
+        //    On a full block the guard revokes every family — this token's
+        //    included — and throws, so nothing is rotated; a failure in the
+        //    guard's own path leaves the token unspent too. This order does
+        //    NOT save a client that gives up waiting: nothing here stops when
+        //    it does, step 3 still spends the token, and its retry with the
+        //    old one is a replay. What keeps a slow core from signing anyone
+        //    out is the guard's timeout (well under the app's HTTP timeout)
+        //    and its failing open.
         Customer customer = null;
         if (liveCustomerId.isPresent()) {
             customer = loadCustomer(liveCustomerId.get());

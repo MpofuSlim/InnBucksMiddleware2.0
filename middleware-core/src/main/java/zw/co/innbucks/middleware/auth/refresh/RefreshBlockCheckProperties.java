@@ -17,7 +17,10 @@ public record RefreshBlockCheckProperties(
          * session through (fail open, {@code outcome=timed_out}). A healthy
          * account listing answers in a few hundred ms; this is a ceiling on a
          * sick one, far below a mobile client's own HTTP timeout, so a client
-         * is never left waiting long enough to give up on its refresh.
+         * is never left waiting long enough to give up on its refresh. That
+         * margin IS the protection: a client that does give up loses its
+         * session, because the refresh still rotates the token after it has
+         * gone (the check running before rotation does not change that).
          */
         Duration timeout,
 

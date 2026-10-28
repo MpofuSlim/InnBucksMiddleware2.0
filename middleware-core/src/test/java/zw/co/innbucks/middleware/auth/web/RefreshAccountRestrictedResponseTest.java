@@ -3,6 +3,7 @@ package zw.co.innbucks.middleware.auth.web;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
+import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
@@ -22,6 +23,7 @@ import java.time.Duration;
 import java.util.Optional;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doThrow;
@@ -39,11 +41,12 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * {@code POST /auth/refresh} and a bank block, through the real controller and
  * the real advice (standalone MockMvc, no Spring context, no Docker): the
  * block check runs only once the token has been READ as live and BEFORE
- * rotation spends it — so a slow core can never cost the client its session —
- * a full block is 403 {@code account_restricted} with fixed copy, rotates
- * nothing and mints no token, and a token that is not live never reaches the
- * check (rotation refuses it, as it always did). The Postgres half is
- * {@code RefreshAccountBlockIntegrationTest}.
+ * rotation spends it — so a full block, or a failure in the check's own path,
+ * rotates nothing (it does NOT save a client that gives up waiting; the
+ * guard's timeout does that) — a full block is 403 {@code account_restricted}
+ * with fixed copy and mints no token, and a token that is not live never
+ * reaches the check (rotation refuses it, as it always did). The Postgres half
+ * is {@code RefreshAccountBlockIntegrationTest}.
  */
 class RefreshAccountRestrictedResponseTest {
 
@@ -102,11 +105,11 @@ class RefreshAccountRestrictedResponseTest {
 
     @Test
     void theBlockCheckRunsBeforeTheTokenIsSpent() throws Exception {
-        // The order that keeps a slow core from signing anyone out: while the
-        // core is being read, the presented token is still unspent, so a
-        // client that gives up waiting can present it again. Spent first, its
-        // successor would be lost with the response and the retry would read
-        // as a replay that revokes the family.
+        // While the core is read the presented token is still unspent, so a
+        // check that ends the session, or fails in its own path, has rotated
+        // nothing. (Not a defence against a slow core: a client that gives up
+        // waiting still has its token spent by step 3, and its retry is a
+        // replay. The guard's bounded wait is that defence.)
         mockMvc.perform(post("/auth/refresh").contentType(MediaType.APPLICATION_JSON).content(BODY))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.accessToken").value("access-token"));
@@ -118,6 +121,24 @@ class RefreshAccountRestrictedResponseTest {
         order.verify(jwtIssuer).issue(any());
         // One customer read serves the check and the claims.
         verify(customerRepository).findById(customer.getId());
+    }
+
+    @Test
+    void aFailureInTheChecksOwnPathSpendsNothing() {
+        // What reading before rotating actually buys: the revocation's own
+        // transaction failing (the database gone mid-refresh), or any other
+        // fault in the guard path, leaves the presented token unspent — the
+        // client can present it again once the fault clears. Spent first,
+        // its successor would be lost with the error and the retry a replay.
+        doThrow(new DataAccessResourceFailureException("connection refused"))
+                .when(guard).requireSessionAllowed(customer, "device-1");
+
+        assertThatThrownBy(() -> mockMvc.perform(
+                        post("/auth/refresh").contentType(MediaType.APPLICATION_JSON).content(BODY)))
+                .hasRootCauseInstanceOf(DataAccessResourceFailureException.class);
+
+        verify(refreshTokenService, never()).rotate(anyString(), anyString());
+        verify(jwtIssuer, never()).issue(any());
     }
 
     @Test

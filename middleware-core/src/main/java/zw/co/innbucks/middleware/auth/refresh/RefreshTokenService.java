@@ -85,13 +85,17 @@ public class RefreshTokenService {
      * and nothing revoked. Empty for every other case.
      *
      * <p>It exists so {@code /auth/refresh} can ask the core about a bank block
-     * BEFORE the token is spent: a slow core then costs the client a slow
-     * answer, never its session (an unspent token can simply be presented
-     * again; a spent one whose successor never arrived reads as a replay and
-     * kills the family). It decides nothing on its own: {@link #rotate} still
-     * re-checks every condition, under its lock, and is the ONE place a replay
-     * or a device mismatch revokes the family and is audited — so a caller that
-     * gets empty here just calls {@link #rotate} and lets it refuse.
+     * BEFORE the token is spent: a full block then rotates nothing, and a
+     * refresh that fails in the check leaves the token unspent for the client
+     * to present again. It does not make a slow core harmless — a refresh whose
+     * client gave up still goes on to rotate, so that client's retry is a
+     * replay; the check's timeout is what bounds that (see
+     * {@link AccountBlockSessionGuard}).
+     *
+     * <p>It decides nothing on its own: {@link #rotate} still re-checks every
+     * condition, under its lock, and is the ONE place a replay or a device
+     * mismatch revokes the family and is audited — so a caller that gets empty
+     * here just calls {@link #rotate} and lets it refuse.
      */
     public Optional<UUID> liveSessionCustomer(String presentedSecret, String deviceHash) {
         return repository.findByTokenHash(sha256HexLower(presentedSecret))

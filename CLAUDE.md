@@ -294,18 +294,25 @@ Build: `./mvnw verify` at the root. Run locally:
   (`revokeAllSessions`, reason `account_blocked`, in its own short
   transaction), audits `REFRESH_BLOCKED_ACCOUNT_RESTRICTED`
   (`refreshTokensRevoked`) and answers 403 `account_restricted`; nothing is
-  rotated. **Order is load-bearing: read the token, read the core, THEN
-  spend the token.** `RefreshTokenService.liveSessionCustomer` is a single
-  read (no lock, nothing spent) that lets only a live token (known,
-  unrevoked, unexpired, not a replay, on its own device) cost a core read or
-  learn of a block; the core is read with no transaction open; only then does
-  `rotate()` spend the token, re-checking everything under its lock — it stays
-  the ONE place a replay or device mismatch revokes a family. Never move the
-  core read after `rotate()`: rotation has no replay grace, so a client whose
-  response was lost to a slow core (it never got the successor) would present
-  the old token again and be treated as a thief — family revoked,
-  `REFRESH_REPLAY_DETECTED` — i.e. a Fineract slowdown would sign customers
-  out. **Latency is bounded as well as errors**: the read runs off the request
+  rotated. **Sequence: read the token, read the core, THEN spend the
+  token.** `RefreshTokenService.liveSessionCustomer` is a single read (no
+  lock, nothing spent) that lets only a live token (known, unrevoked,
+  unexpired, not a replay, on its own device) cost a core read or learn of a
+  block; the core is read with no transaction open; only then does `rotate()`
+  spend the token, re-checking everything under its lock — it stays the ONE
+  place a replay or device mismatch revokes a family. What the order buys is
+  narrow: nothing is rotated on a full block, and a refresh that fails in the
+  guard's own path (the revoke transaction cannot commit, say) leaves the
+  token unspent for the client to present again. **It does NOT protect a
+  client that gives up waiting**: nothing stops the refresh when the client
+  does, so `rotate()` still spends the token after a client timeout or a
+  dropped connection, the successor is lost with the response, and the retry
+  with the old token is a replay that revokes the family — whichever order
+  the read and the rotation run in, and exactly as any lost refresh response
+  always has. **The bound is the only thing keeping a slow core from signing
+  customers out**: a refresh answers within `…timeout` plus a rotation, which
+  must stay well under the app's HTTP timeout — never raise `…timeout` towards
+  it on the strength of the ordering. **Latency is bounded as well as errors**: the read runs off the request
   thread, at most `innbucks.auth.refresh-block-check.max-concurrent-reads` (8)
   at once and NEVER queued, and the refresh waits at most `…timeout` (2s) —
   far under a mobile client's HTTP timeout. Without it, one hung listing (the
@@ -324,10 +331,12 @@ Build: `./mvnw verify` at the root. Run locally:
   after the previous one FINISHED (its thread is not yet back waiting), which
   skipped the block check with the slot free on a few percent of back-to-back
   refreshes and made the MDC test flaky in CI.
-  The remaining exposure is the double submit every single-use rotation has: a
-  client whose own timeout is shorter than the budget, and which retries the
-  same token while the first request is still running, is a replay — as
-  before this check existed, only with a window up to the budget wide. A DEBIT- or CREDIT-only block does NOT
+  What remains is the exposure every single-use rotation has: a lost refresh
+  response costs the session. A client whose own timeout is shorter than the
+  server's answer, and which retries the same token, is a replay whether the
+  retry lands after the first rotation or overlaps it (see the guarded
+  `markReplaced` above) — as before this check existed, only with up to the
+  budget added to how long a refresh can take. A DEBIT- or CREDIT-only block does NOT
   end sessions: it is the bank's payment pause, and the customer may still
   need balances, statements and incoming money — signing out would make a
   pause a lockout. **Fails OPEN** on every read failure (Fineract down,
@@ -347,9 +356,9 @@ Build: `./mvnw verify` at the root. Run locally:
   back-to-back refreshes on one slot, never one `busy` — no interrupt, MDC
   carried),
   `RefreshTokenServiceTest` (the liveness read spends and revokes nothing),
-  `RefreshAccountRestrictedResponseTest` (the order) and
-  `RefreshAccountBlockIntegrationTest` (the token is unspent while the core is
-  read; a hung core answers within the budget).
+  `RefreshAccountRestrictedResponseTest` (the order; a fault in the guard path
+  rotates nothing) and `RefreshAccountBlockIntegrationTest` (the token is
+  unspent while the core is read; a hung core answers within the budget).
 * **Idempotency claim-row**: `IdempotencyService` claims the key with
   `INSERT … ON CONFLICT DO NOTHING` (status 0 sentinel) BEFORE running work —
   concurrent same-key requests can never double-execute. Replays return the

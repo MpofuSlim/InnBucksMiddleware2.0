@@ -47,9 +47,11 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * refresh — every device's, not just the one asking — while a debit-only
  * block, a core outage, a SLOW core and a customer with no core mapping all
  * keep the session. The core is read while the presented token is still
- * unspent, so a slow core can never cost a client its session. Real Postgres
- * (refresh_token rows, audit chain), real controller and guard; the core is
- * the settable stub. The read budget is shortened so the slow case is quick.
+ * unspent, so a full block rotates nothing; what keeps a slow core from
+ * costing a session is the bounded wait (a client that gave up would lose it
+ * either way — the refresh still rotates). Real Postgres (refresh_token rows,
+ * audit chain), real controller and guard; the core is the settable stub. The
+ * read budget is shortened so the slow case is quick.
  */
 @SpringBootTest(properties = "innbucks.auth.refresh-block-check.timeout=300ms")
 @Import({PostgresTestContainer.class, RefreshAccountBlockIntegrationTest.StubConfig.class})
@@ -213,10 +215,12 @@ class RefreshAccountBlockIntegrationTest {
 
     @Test
     void theCoreIsReadWhileThePresentedTokenIsStillUnspent() throws Exception {
-        // The property that keeps a slow core from signing anyone out: if the
-        // client gives up waiting, the token it holds still works. Spent
-        // before the read, its successor would be lost with the response and
-        // the next refresh would read as a replay that revokes the family.
+        // Read before rotate: a check that ends the session (or fails in its
+        // own path) has spent nothing. This is NOT what keeps a slow core
+        // from signing anyone out — the refresh still rotates after a client
+        // gives up, so that client's retry is a replay whichever order these
+        // run in. The bound, aSlowCoreNeitherHoldsTheRefreshNorSignsAnyoneOut,
+        // is what does.
         String phone = login(PHONE);
         AtomicInteger rotatedDuringRead = new AtomicInteger(-1);
         stubPort.onListAccounts = ref -> {

@@ -106,10 +106,17 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <p><b>Ordering and transactions.</b> {@code LoginController.refresh} calls
  * this AFTER {@link RefreshTokenService#liveSessionCustomer} has shown the
  * token live and BEFORE {@link RefreshTokenService#rotate} spends it, with no
- * transaction and no pooled connection held. The presented token is therefore
- * still unspent while the core is read: a client that gives up waiting
- * presents it again and loses nothing. On a full block nothing is rotated at
- * all; the revocation runs in its own short transaction.
+ * transaction and no pooled connection held. What that order buys: on a full
+ * block nothing is rotated at all (the revocation runs in its own short
+ * transaction), and a refresh that fails in this guard's own path leaves the
+ * presented token unspent. What it does NOT buy: a client that gives up
+ * waiting is not saved by it. The refresh carries on without the client and
+ * {@code rotate()} spends the token anyway, so the successor is lost with the
+ * response and the client's retry with the old token is a replay that revokes
+ * the family — the same as if the core were read after rotation, and the same
+ * as any lost refresh response. The only protection against a slow core
+ * signing customers out is the timeout, which must stay well under the app's
+ * HTTP timeout; never raise it on the strength of this ordering.
  *
  * <p>Metric: {@code innbucks.auth.refresh.block_check{outcome}} with outcomes
  * {@code none}, {@code debits_blocked}, {@code credits_blocked},
