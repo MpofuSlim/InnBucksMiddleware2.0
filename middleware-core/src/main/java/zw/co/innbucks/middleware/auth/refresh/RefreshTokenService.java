@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import zw.co.innbucks.middleware.audit.AuditAction;
 import zw.co.innbucks.middleware.audit.AuditOutcome;
@@ -40,6 +41,23 @@ public class RefreshTokenService {
             """;
 
     /**
+     * The two locks that make "sign out everywhere" race-free against a
+     * rotation in flight. They CONFLICT with each other (SHARE vs NO KEY
+     * UPDATE) and with nothing else that matters: concurrent rotations of one
+     * customer take SHARE together, and the FK checks behind every
+     * refresh_token / ledger_transaction INSERT take KEY SHARE, which neither
+     * blocks. Never FOR UPDATE on the revoke side (it would queue those
+     * INSERTs) — same reasoning as the deferred login re-read in CLAUDE.md.
+     */
+    private static final String LOCK_CUSTOMER_FOR_ROTATION_SQL = """
+            SELECT id FROM customer WHERE id = ? FOR SHARE
+            """;
+
+    private static final String LOCK_CUSTOMER_FOR_REVOKE_ALL_SQL = """
+            SELECT id FROM customer WHERE id = ? FOR NO KEY UPDATE
+            """;
+
+    /**
      * How long after a refresh token's expiry we keep its row around. Tokens
      * are invalid the moment {@code expires_at} passes — the post-expiry
      * grace window is purely forensic ("which session was active at time X")
@@ -57,7 +75,7 @@ public class RefreshTokenService {
 
     @Transactional
     public RefreshToken issueNewFamily(UUID customerId, String deviceHash) {
-        return persist(customerId, UUID.randomUUID(), deviceHash);
+        return persist(UUID.randomUUID(), customerId, UUID.randomUUID(), deviceHash);
     }
 
     /**
@@ -115,9 +133,26 @@ public class RefreshTokenService {
             throw new RefreshTokenInvalidException();
         }
 
-        RefreshToken next = persist(current.getCustomerId(), current.getFamilyId(), deviceHash);
-        current.setReplacedByJti(next.getJti());
-        repository.save(current);
+        // Serialise against revokeAllSessions (PIN set/reset). Without it a
+        // rotation straddling the revocation survives it: the revoking UPDATE
+        // reads from a snapshot taken when it STARTS, so a successor this
+        // transaction inserts and commits after that moment is never seen —
+        // and a client refreshing in a loop is inside that window most of the
+        // time. Holding SHARE on the customer row means either the revocation
+        // committed before this line (markReplaced below then sees it) or it
+        // waits for this commit and then sees the successor.
+        jdbcTemplate.queryForList(LOCK_CUSTOMER_FOR_ROTATION_SQL, current.getCustomerId());
+
+        // Mark the presented row replaced BEFORE inserting its successor, and
+        // only while it is still unrevoked: a revocation (logout, replay,
+        // sign-out-everywhere) that committed after the read above must win,
+        // and the successor must not exist if it does — this method's
+        // noRollbackFor would otherwise commit an orphan.
+        UUID successorJti = UUID.randomUUID();
+        if (repository.markReplaced(current.getJti(), successorJti) != 1) {
+            throw new RefreshTokenInvalidException();
+        }
+        RefreshToken next = persist(successorJti, current.getCustomerId(), current.getFamilyId(), deviceHash);
 
         auditService.record(
                 AuditAction.REFRESH_SUCCESS,
@@ -134,6 +169,25 @@ public class RefreshTokenService {
         maybe.ifPresent(token ->
                 repository.revokeFamily(token.getFamilyId(), clock.instant(), reason));
         return maybe;
+    }
+
+    /**
+     * Sign out everywhere: revokes every refresh-token family the customer
+     * holds, in the CALLER's transaction (MANDATORY — the revocation must
+     * commit or roll back with the change that motivates it, e.g. the new
+     * PIN). Returns the number of rows revoked (a family's rotated ancestors
+     * count too; 0 = nothing was signed in).
+     *
+     * <p>Takes the customer row {@code FOR NO KEY UPDATE} first, which
+     * conflicts with the {@code FOR SHARE} every {@link #rotate} takes before
+     * minting a successor — see there for why that ordering is the guarantee.
+     * Access tokens already issued are NOT revoked: they are self-contained
+     * JWTs and live out their TTL (10 minutes by default).
+     */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public int revokeAllSessions(UUID customerId, String reason) {
+        jdbcTemplate.queryForList(LOCK_CUSTOMER_FOR_REVOKE_ALL_SQL, customerId);
+        return repository.revokeAllForCustomer(customerId, clock.instant(), reason);
     }
 
     /**
@@ -158,11 +212,10 @@ public class RefreshTokenService {
                 deleted, cutoff, FORENSIC_RETENTION_DAYS);
     }
 
-    private RefreshToken persist(UUID customerId, UUID familyId, String deviceHash) {
+    private RefreshToken persist(UUID jti, UUID customerId, UUID familyId, String deviceHash) {
         // INSERT via JdbcTemplate: Spring Data JDBC's CrudRepository.save() treats
         // an entity with a manually-assigned @Id as already-existing and emits UPDATE
         // that affects zero rows, so the new row never lands in the DB.
-        UUID jti = UUID.randomUUID();
         // The client secret is a fresh random UUID, separate from the internal jti:
         // a DB read yields only token_hash, never a usable token. ~122 bits of entropy
         // makes unsalted SHA-256 at rest safe (no brute force / rainbow table).

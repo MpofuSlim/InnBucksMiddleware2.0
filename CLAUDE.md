@@ -108,7 +108,8 @@ Build: `./mvnw verify` at the root. Run locally:
   (slice 5 — flip in the staged order in `.env.example`). Issued by
   `POST /auth/login` (MSISDN + Argon2id PIN → 10-min access + 30-day
   rotating opaque refresh, family revocation on replay AND on device
-  mismatch — the refresh token only rotates on the device it was issued to).
+  mismatch — the refresh token only rotates on the device it was issued to;
+  a PIN set or reset revokes EVERY family the customer holds).
   `sub` = customer UUID; claims: `country`, `kyc_tier`, `scopes`, `did`,
   `nid_hash`, `auth_time`. High-value withdrawals/transfers additionally
   need a step-up SMS approval bound to the exact transaction
@@ -165,6 +166,22 @@ Build: `./mvnw verify` at the root. Run locally:
   `innbucks.audit.chain.broken` (ticket). This chain carries the real customer
   identity per money movement — it is the compensating control for Fineract
   attributing everything to the service account. Launch gate, not polish.
+* **A PIN change signs the customer out everywhere, and a rotation in flight
+  cannot outrun it.** `PinService` revokes every refresh family in the PIN
+  change's own transaction (`RefreshTokenService.revokeAllSessions`,
+  `MANDATORY`; audited on the `PIN_SET`/`PIN_RESET` row as
+  `refreshTokensRevoked`). Two halves make it hold: the revoke takes the
+  customer row `FOR NO KEY UPDATE` and every rotation takes it `FOR SHARE`
+  before minting (they conflict; neither blocks the KEY SHARE behind FK
+  INSERTs), so the revoking UPDATE either sees the successor or the rotation
+  sees the revocation — without it, a successor committed after the revoking
+  statement's snapshot survives, and a client refreshing in a loop sits in
+  that window most of the time. And rotation marks the presented row with a
+  guarded `markReplaced` (`… AND revoked_at IS NULL`), never a whole-row
+  `save()`, which wrote the stale `revoked_at = NULL` it had read back over a
+  committed revocation (logout included). Access tokens are NOT revoked —
+  see the deferred list. Pinned by `PinResetSignOutIntegrationTest` (both
+  interleavings, forced with an open transaction) and `RefreshTokenServiceTest`.
 * **Idempotency claim-row**: `IdempotencyService` claims the key with
   `INSERT … ON CONFLICT DO NOTHING` (status 0 sentinel) BEFORE running work —
   concurrent same-key requests can never double-execute. Replays return the
@@ -901,7 +918,9 @@ commands, with the exact bytes that were running before. Full procedure
    refuse any of them. The counter is now honest (the account does lock) but the
    ladder's RATE is not enforced *within* a burst. (b) **PIN-changed-mid-login**
    — a login racing a PIN reset can still accept the OLD `pin_hash` it read
-   before hashing. Both close with a `SELECT … FOR NO KEY UPDATE` re-read of the
+   before hashing (the reset's sign-out-everywhere does not catch it: the
+   family that login mints lands AFTER the revocation, so it is simply new).
+   Both close with a `SELECT … FOR NO KEY UPDATE` re-read of the
    row inside the settling statement's transaction. It MUST be `FOR NO KEY
    UPDATE`, not `FOR UPDATE`: `refresh_token.customer_id` and
    `ledger_transaction.customer_id` both FK to `customer`, so their INSERTs take
@@ -1135,7 +1154,11 @@ restore therefore points at the backup being torn, not at the restore being
 normal. Rotating `AUDIT_HMAC_SECRET` is the other benign cause, and it is
 benign only if you actually rotated it.
 
-Deferred (documented, not forgotten): KMS/Secrets Manager custody + rotation
+Deferred (documented, not forgotten): **revocable access tokens** — a PIN
+reset ends every refresh family, but an access token already issued is a
+self-contained JWT and keeps working until it expires (`JWT_ACCESS_TTL`, 10
+minutes); cutting it short needs a per-customer `token_version` claim checked
+on every request. KMS/Secrets Manager custody + rotation
 runbook; per-customer namespacing of inbound Idempotency-Keys
 (HMAC(customerUuid ‖ key)) before propagation; velocity/amount limit tables;
 **offsite/automated** backup scheduling (the scripts are manual and write to the
