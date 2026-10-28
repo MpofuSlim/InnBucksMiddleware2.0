@@ -68,7 +68,7 @@ public class KycExceptionHandler {
 
     @ExceptionHandler(KycUploadBusyException.class)
     public ResponseEntity<ProblemDetail> busy(KycUploadBusyException ex) {
-        log.warn("KYC upload refused: every decode slot busy");
+        log.warn("KYC upload refused: every upload place or decode slot busy");
         ProblemDetail body = problem(HttpStatus.SERVICE_UNAVAILABLE, "Busy",
                 "We're processing a lot of photos right now. Please send it again in a moment.", "kyc_upload_busy");
         body.setProperty("retryAfterSeconds", ex.retryAfterSeconds());

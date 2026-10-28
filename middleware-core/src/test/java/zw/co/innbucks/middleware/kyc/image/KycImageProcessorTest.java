@@ -21,7 +21,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class KycImageProcessorTest {
 
     private static final KycProperties.Image LIMITS = new KycProperties.Image(
-            2 * 1024 * 1024, 16_000_000L, 200, 1600, 1080, 0.9f, 2, Duration.ofSeconds(1));
+            2 * 1024 * 1024, 16_000_000L, 200, 1600, 1080, 0.9f, 2, 4, Duration.ofSeconds(1));
 
     private final KycImageProcessor processor = new KycImageProcessor(LIMITS);
 
@@ -88,6 +88,45 @@ class KycImageProcessorTest {
     }
 
     @Test
+    void aSequentialJpegSplitIntoOneScanPerComponentIsRefusedBeforeAnyDecode() {
+        // Baseline, within every byte and pixel cap — but non-interleaved, the
+        // shape that makes libjpeg allocate a whole-image coefficient buffer in
+        // NATIVE memory (measured: +93 MB RSS for a 187 KB 4000x4000 file).
+        byte[] split = TestImages.sequentialScans(800, 600, false);
+        KycImageProcessor noSlots = new KycImageProcessor(LIMITS, new Semaphore(0));
+
+        assertThatThrownBy(() -> noSlots.process(split, KycFileKind.ID_FRONT))
+                .isInstanceOfSatisfying(KycImageRejectedException.class,
+                        ex -> assertThat(ex.reason()).isEqualTo(Reason.UNSUPPORTED_ENCODING));
+    }
+
+    @Test
+    void theSameHandBuiltJpegInOneInterleavedScanIsAccepted() {
+        // The control for the case above: the generator writes valid JPEGs, so
+        // the refusal there is about the scan layout and nothing else.
+        ProcessedImage out = processor.process(TestImages.sequentialScans(800, 600, true), KycFileKind.ID_FRONT);
+
+        assertThat(out.width()).isEqualTo(800);
+        assertThat(out.height()).isEqualTo(600);
+    }
+
+    @Test
+    void aScanHeaderThatDisagreesWithItsLengthIsCorrupt() {
+        byte[] jpeg = TestImages.sequentialScans(800, 600, true);
+        for (int i = 2; i < jpeg.length - 4; i++) {
+            if ((jpeg[i] & 0xFF) == 0xFF && (jpeg[i + 1] & 0xFF) == 0xDA) {
+                jpeg[i + 4] = 2; // Ns: two components, in a header sized for three
+                break;
+            }
+        }
+        byte[] tampered = jpeg;
+
+        assertThatThrownBy(() -> processor.process(tampered, KycFileKind.ID_FRONT))
+                .isInstanceOfSatisfying(KycImageRejectedException.class,
+                        ex -> assertThat(ex.reason()).isEqualTo(Reason.CORRUPT));
+    }
+
+    @Test
     void anImageTooSmallToReadIsRefused() {
         assertThatThrownBy(() -> processor.process(TestImages.jpeg(640, 150), KycFileKind.ID_FRONT))
                 .isInstanceOfSatisfying(KycImageRejectedException.class,
@@ -145,7 +184,7 @@ class KycImageProcessorTest {
     @Test
     void whenEveryDecodeSlotStaysBusyTheUploadIsToldToRetry() {
         KycImageProcessor busy = new KycImageProcessor(new KycProperties.Image(
-                2 * 1024 * 1024, 16_000_000L, 200, 1600, 1080, 0.9f, 1, Duration.ofMillis(50)), new Semaphore(0));
+                2 * 1024 * 1024, 16_000_000L, 200, 1600, 1080, 0.9f, 1, 4, Duration.ofMillis(50)), new Semaphore(0));
 
         assertThatThrownBy(() -> busy.process(TestImages.jpeg(800, 600), KycFileKind.ID_FRONT))
                 .isInstanceOfSatisfying(KycUploadBusyException.class,

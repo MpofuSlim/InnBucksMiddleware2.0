@@ -10,9 +10,13 @@ import zw.co.innbucks.middleware.kyc.image.KycImageRejectedException.Reason;
  * <p>It exists because the decoder is the dangerous part. A header can declare
  * 30000 x 30000 pixels in a few hundred bytes (a decompression bomb that would
  * take the single-replica money path's heap); a progressive JPEG can carry
- * thousands of scans that each re-walk the whole image (CPU for minutes); and
- * the JDK decoder answers a truncated file with a half-grey image and a
- * warning rather than an error. So, before decoding, this requires:
+ * thousands of scans that each re-walk the whole image (CPU for minutes); a
+ * sequential JPEG split into one scan per component makes the JDK's native
+ * libjpeg buffer the WHOLE image's coefficients outside the Java heap (2 bytes
+ * per pixel per component: ~96 MB at the 16 MP cap, measured +93 MB RSS for a
+ * 187 KB 4000x4000 file); and the JDK decoder answers a truncated file with a
+ * half-grey image and a warning rather than an error. So, before decoding,
+ * this requires:
  *
  * <ul>
  *   <li>SOI first, then a well-formed segment chain ending in EOI (a file
@@ -20,8 +24,12 @@ import zw.co.innbucks.middleware.kyc.image.KycImageRejectedException.Reason;
  *   <li>exactly one frame, and only baseline or extended-sequential Huffman
  *       ({@code SOF0}/{@code SOF1}) at 8-bit precision with 1 or 3
  *       components — what every phone camera writes;</li>
- *   <li>at most one scan per component (the sequential-mode rule), which
- *       bounds decode work to one pass;</li>
+ *   <li>exactly ONE scan, interleaving every component of the frame. That
+ *       is what a camera writes, and it is the only shape libjpeg decodes
+ *       one MCU row at a time: any scan that leaves a component out sets its
+ *       {@code has_multiple_scans}, and the whole-image coefficient buffer
+ *       comes with it — native memory that neither the pixel cap nor the
+ *       Java heap limit bounds;</li>
  *   <li>a height in the frame header (never deferred to a DNL marker).</li>
  * </ul>
  *
@@ -88,9 +96,10 @@ final class JpegStructure {
                 if (frame == null) {
                     throw corrupt("a scan before the frame header");
                 }
-                if (++scans > frame.components()) {
-                    throw unsupported("more scans than a sequential JPEG can have");
+                if (++scans > 1) {
+                    throw unsupported("more than one scan (only single-scan, interleaved JPEGs are accepted)");
                 }
+                requireInterleaved(data, pos, length, frame);
                 pos = skipEntropyCodedData(data, pos + length);
                 continue;
             }
@@ -127,6 +136,24 @@ final class JpegStructure {
             throw unsupported("the image dimensions are not in the frame header");
         }
         return new Frame(width, height, components);
+    }
+
+    /**
+     * The scan header ({@code Ls, Ns, Ns x (Cs, Td/Ta), Ss, Se, Ah/Al}) must
+     * name every component of the frame: one interleaved scan. A scan that
+     * names fewer is how a sequential file gets split across several scans.
+     */
+    private static void requireInterleaved(byte[] data, int pos, int length, Frame frame) {
+        if (length < 3) {
+            throw corrupt("the scan header is too short");
+        }
+        int componentsInScan = u8(data, pos + 2);
+        if (length != 6 + 2 * componentsInScan) {
+            throw corrupt("the scan header length does not match its components");
+        }
+        if (componentsInScan != frame.components()) {
+            throw unsupported("a scan that does not interleave every component");
+        }
     }
 
     /** From the first byte after an SOS header to the next real marker. */

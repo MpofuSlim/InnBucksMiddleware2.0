@@ -1392,22 +1392,39 @@ commands, with the exact bytes that were running before. Full procedure
      Content-Type. `JpegStructure` walks the markers before any decoder sees
      the bytes: whole (EOI present — the JDK decoder answers truncation with a
      half-grey image and a warning), one baseline/extended-sequential frame,
-     8-bit, 1 or 3 components, at most one scan per component (progressive is
-     refused: thousands of scans is a CPU bomb), dimensions in the header. The
-     pixel cap (16 MP) and minimum side (200 px) are checked on those declared
-     dimensions — a 30000x30000 header is refused before a pixel is allocated.
-     Decode under a cell-wide semaphore (2; one replica, 768 MB, it moves
-     money; busy → 503 `kyc_upload_busy` + Retry-After), JPEG reader only,
-     in-memory streams plus `ImageIO.setUseCache(false)` (no temp files),
-     subsampled during decode, any decoder warning refused; then scaled (1600
-     documents, 1080 selfie) and re-encoded from pixels at q0.9 with NO
-     metadata — EXIF, ICC, XMP and anything after EOI are gone; EXIF
-     orientation is dropped, not applied. Byte cap 2 MiB: `Content-Length` over
-     it is a JSON 413 `kyc_file_too_large` before the body is touched, a chunked
-     body is read only up to it. `spring.servlet.multipart.enabled=false`
-     app-wide: nothing takes a form, and Tomcat would spool every part to a
-     temp file. nginx's upload location sits just above the cap (runbook); a
-     client must treat ANY 413 as too large.
+     8-bit, 1 or 3 components, **exactly ONE scan interleaving every
+     component** (progressive is refused: thousands of scans is a CPU bomb),
+     dimensions in the header. The one-scan rule is a MEMORY rule, not a
+     tidiness one: a sequential file split into one scan per component sets
+     libjpeg's `has_multiple_scans`, and the JDK's native decoder then
+     mallocs a coefficient buffer for the WHOLE image — 2 bytes per pixel per
+     component, ~96 MB at the 16 MP cap, outside the Java heap where no cap
+     here reaches it (measured: +93 MB RSS for a 187 KB 4000x4000 file vs
+     +4 MB for the same image in one scan; two decode slots of that OOM-kill
+     the 768 MB container). Cameras write one interleaved scan, so nothing
+     real is lost. The pixel cap (16 MP) and minimum side (200 px) are
+     checked on the declared dimensions — a 30000x30000 header is refused
+     before a pixel is allocated. **Two cell-wide semaphores bound upload
+     memory** (one replica, 768 MB, it moves money): an UPLOAD place (4) is
+     taken before the body is read and held until the image is processed —
+     full is an immediate 503 `kyc_upload_busy` + Retry-After, nothing read —
+     so at most 4 bodies are ever in the heap whatever Tomcat's 200 threads
+     or the rate-limit bursts of several accounts add up to; inside it, a
+     DECODE slot (2, waited for up to 5 s). The body is read into ONE array
+     (exactly `Content-Length` bytes, or up to the cap + 1 for a chunked
+     body) — no growing buffer and copy. nginx's default request buffering is
+     what keeps a slow phone from sitting on a place while it trickles bytes
+     in (runbook). Decode through the JPEG reader only, in-memory streams plus
+     `ImageIO.setUseCache(false)` (no temp files), subsampled during decode,
+     any decoder warning refused; then scaled (1600 documents, 1080 selfie)
+     and re-encoded from pixels at q0.9 with NO metadata — EXIF, ICC, XMP and
+     anything after EOI are gone; EXIF orientation is dropped, not applied.
+     Byte cap 2 MiB: `Content-Length` over it is a JSON 413
+     `kyc_file_too_large` before the body is touched, a chunked body is read
+     only up to it. `spring.servlet.multipart.enabled=false` app-wide: nothing
+     takes a form, and Tomcat would spool every part to a temp file. nginx's
+     upload location sits just above the cap (runbook); a client must treat
+     ANY 413 as too large.
    - **Rate limits** per customer AND per address (`ClientIpResolver`) on
      create/upload/submit (`KycRateLimiter`, `innbucks.kyc.rate-limit.*`), FIRST,
      through `RateLimiterService` (so `rate-limit.enabled` stays the master
@@ -1452,8 +1469,9 @@ commands, with the exact bytes that were running before. Full procedure
    previous and wrong keys, strict parsing), the national-ID tests (ZW/KE
    canonicalisation, refusals, spellings, mask, registry), `KycImageProcessorTest`
    (good JPEG, PNG, truncated, bomb header refused with no decode slot,
-   progressive, EXIF and trailing data gone, downscale, slot released on
-   failure), `KycServiceTest` / `KycRoundsTest` / `KycLifecycleJobTest` over an
+   progressive, one scan per component refused with no decode slot beside the
+   same hand-built file in one scan accepted, EXIF and trailing data gone,
+   downscale, slot released on failure), `KycServiceTest` / `KycRoundsTest` / `KycLifecycleJobTest` over an
    in-memory store with the SQL's semantics, `KycHttpTest` (standalone MockMvc:
    statuses, errorCodes, headers, Swagger examples parse with no duplicate
    keys), `KycSwitchTest` (off = nothing exists; on = key required; on = every

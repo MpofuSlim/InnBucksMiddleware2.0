@@ -8,7 +8,9 @@ import zw.co.innbucks.middleware.audit.AuditOutcome;
 import zw.co.innbucks.middleware.customer.KycTierResolution;
 import zw.co.innbucks.middleware.customer.KycTierUnavailableException;
 import zw.co.innbucks.middleware.kyc.crypto.KycAad;
+import zw.co.innbucks.middleware.kyc.image.KycImageProcessor;
 import zw.co.innbucks.middleware.kyc.image.KycImageRejectedException;
+import zw.co.innbucks.middleware.kyc.image.KycUploadBusyException;
 import zw.co.innbucks.middleware.kyc.image.TestImages;
 import zw.co.innbucks.middleware.kyc.nationalid.InvalidNationalIdException;
 import zw.co.innbucks.middleware.kyc.store.KycRoundRecord;
@@ -20,6 +22,8 @@ import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -314,6 +318,51 @@ class KycServiceTest {
         assertThatThrownBy(() -> service.upload(customer, null, id, "id_front", -1, new ByteArrayInputStream(big)))
                 .isInstanceOfSatisfying(KycRequestException.class,
                         ex -> assertThat(ex.errorCode()).isEqualTo("kyc_file_too_large"));
+    }
+
+    @Test
+    void whenEveryUploadPlaceIsTakenTheNextIsTurnedAwayBeforeItsBodyIsRead() {
+        UUID customer = f.customer("basic", null);
+        UUID id = f.open(service, customer, "standard", KycFixture.ID_TYPED, null);
+        InputStream mustNotBeRead = new InputStream() {
+            @Override
+            public int read() {
+                throw new AssertionError("the body was read");
+            }
+        };
+        List<KycImageProcessor.Admission> held = new ArrayList<>();
+        for (int i = 0; i < f.properties.image().maxConcurrentUploads(); i++) {
+            held.add(f.images.admit());
+        }
+
+        assertThatThrownBy(() -> service.upload(customer, null, id, "id_front", 300_000, mustNotBeRead))
+                .isInstanceOfSatisfying(KycUploadBusyException.class,
+                        ex -> assertThat(ex.retryAfterSeconds()).isPositive());
+        assertThat(f.meters.counter("innbucks.kyc.events", "event", "file_busy").count()).isEqualTo(1.0);
+
+        held.forEach(KycImageProcessor.Admission::close);
+        assertThat(f.upload(service, customer, id, KycFileKind.ID_FRONT).kind()).isEqualTo("id_front");
+    }
+
+    @Test
+    void everyUploadGivesItsPlaceBack_storedRefusedOrCutShort() {
+        UUID customer = f.customer("basic", null);
+        UUID id = f.open(service, customer, "standard", KycFixture.ID_TYPED, null);
+        byte[] jpeg = TestImages.jpeg(800, 600);
+        byte[] png = TestImages.png(400, 300);
+        int places = f.properties.image().maxConcurrentUploads();
+
+        // More attempts than there are places: a leak would turn the last into a 503.
+        for (int i = 0; i < places + 1; i++) {
+            f.upload(service, customer, id, KycFileKind.ID_FRONT);
+            assertThatThrownBy(() -> service.upload(customer, null, id, "id_back", png.length,
+                    new ByteArrayInputStream(png))).isInstanceOf(KycImageRejectedException.class);
+            // declares more than it sends: the stream ends early
+            assertThatThrownBy(() -> service.upload(customer, null, id, "id_back", jpeg.length + 10,
+                    new ByteArrayInputStream(jpeg))).isInstanceOfSatisfying(KycImageRejectedException.class,
+                    ex -> assertThat(ex.reason()).isEqualTo(KycImageRejectedException.Reason.CORRUPT));
+        }
+        assertThat(f.upload(service, customer, id, KycFileKind.ID_BACK).kind()).isEqualTo("id_back");
     }
 
     @Test

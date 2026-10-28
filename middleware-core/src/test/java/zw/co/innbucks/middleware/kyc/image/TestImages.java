@@ -13,6 +13,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 
 /** Synthetic images built in memory — no image fixture is ever committed. */
 public final class TestImages {
@@ -70,6 +71,62 @@ public final class TestImages {
             return bytes.toByteArray();
         } catch (IOException ex) {
             throw new UncheckedIOException(ex);
+        }
+    }
+
+    /**
+     * A hand-built baseline (SOF0) 3-component JPEG of flat grey, written
+     * byte by byte because ImageIO never writes a sequential file split
+     * across scans. {@code interleaved} = one scan carrying all three
+     * components (what cameras write); otherwise one scan PER component —
+     * the shape that makes libjpeg buffer the whole image's coefficients in
+     * native memory. Every block is DC category 0 + EOB, so the scan data is
+     * two bits a block and the file stays tiny whatever its dimensions.
+     */
+    public static byte[] sequentialScans(int width, int height, boolean interleaved) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        out.write(0xFF);
+        out.write(0xD8);
+        byte[] quant = new byte[65];
+        Arrays.fill(quant, 1, 65, (byte) 1);
+        segment(out, 0xDB, quant);
+        segment(out, 0xC0, new byte[]{8, (byte) (height >> 8), (byte) height, (byte) (width >> 8), (byte) width,
+                3, 1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0});
+        // DC table 0 and AC table 0: one code of length 1 each (category 0 / EOB).
+        segment(out, 0xC4, new byte[]{0x00, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00});
+        segment(out, 0xC4, new byte[]{0x10, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00});
+        long blocks = (long) ((width + 7) / 8) * ((height + 7) / 8);
+        if (interleaved) {
+            segment(out, 0xDA, new byte[]{3, 1, 0x00, 2, 0x00, 3, 0x00, 0, 63, 0});
+            scanData(out, blocks * 3 * 2);
+        } else {
+            for (int component = 1; component <= 3; component++) {
+                segment(out, 0xDA, new byte[]{1, (byte) component, 0x00, 0, 63, 0});
+                scanData(out, blocks * 2);
+            }
+        }
+        out.write(0xFF);
+        out.write(0xD9);
+        return out.toByteArray();
+    }
+
+    private static void segment(ByteArrayOutputStream out, int marker, byte[] payload) {
+        int length = payload.length + 2;
+        out.write(0xFF);
+        out.write(marker);
+        out.write(length >> 8);
+        out.write(length & 0xFF);
+        out.write(payload, 0, payload.length);
+    }
+
+    /** {@code bits} zero bits (every code is "0"), padded to a byte with 1-bits. */
+    private static void scanData(ByteArrayOutputStream out, long bits) {
+        for (long i = 0; i < bits / 8; i++) {
+            out.write(0);
+        }
+        int used = (int) (bits % 8);
+        if (used != 0) {
+            out.write(0xFF >> used);
         }
     }
 

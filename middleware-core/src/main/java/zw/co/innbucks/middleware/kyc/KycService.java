@@ -39,7 +39,6 @@ import zw.co.innbucks.middleware.kyc.store.KycSubmissionRecord;
 import zw.co.innbucks.middleware.kyc.store.LatestFrozenRound;
 import zw.co.innbucks.middleware.me.ProfileNotFoundException;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.time.Clock;
@@ -348,9 +347,13 @@ public class KycService {
             throw KycRequestException.fileNotNeeded(kind, uploadable);
         }
 
-        byte[] upload = readBounded(body, maxBytes);
         ProcessedImage image;
-        try {
+        // The admission comes BEFORE the body is read and is held until the
+        // image is processed: it is what bounds how many upload bodies sit in
+        // the heap at once (the decode semaphore inside it only bounds decodes,
+        // and a request waiting for one would otherwise hold its body).
+        try (KycImageProcessor.Admission admitted = images.admit()) {
+            byte[] upload = readBounded(body, maxBytes, declaredLength);
             image = images.process(upload, kind);
         } catch (KycImageRejectedException rejected) {
             count("file_rejected_" + rejected.reason().code());
@@ -402,24 +405,34 @@ public class KycService {
     private record StoreOutcome(StoredKycFile file, boolean replaced, Set<KycFileKind> missing) {
     }
 
-    private byte[] readBounded(InputStream body, int maxBytes) {
-        ByteArrayOutputStream out = new ByteArrayOutputStream(Math.min(maxBytes, 512 * 1024));
-        byte[] buffer = new byte[16 * 1024];
-        long total = 0;
+    /**
+     * Reads the body into ONE array. A declared length (already checked
+     * against the cap) is read exactly — the container ends the stream there —
+     * so the body costs its own size and no copy. An undeclared (chunked) body
+     * is read only up to the cap plus one byte: one more is too large.
+     */
+    private byte[] readBounded(InputStream body, int maxBytes, long declaredLength) {
         try {
-            int n;
-            while ((n = body.read(buffer)) != -1) {
-                total += n;
-                if (total > maxBytes) {
-                    count("file_too_large");
-                    throw KycRequestException.fileTooLarge(maxBytes);
+            if (declaredLength >= 0) {
+                byte[] exact = new byte[(int) declaredLength];
+                if (body.readNBytes(exact, 0, exact.length) < exact.length) {
+                    throw cutShort();
                 }
-                out.write(buffer, 0, n);
+                return exact;
             }
+            byte[] read = body.readNBytes(maxBytes + 1);
+            if (read.length > maxBytes) {
+                count("file_too_large");
+                throw KycRequestException.fileTooLarge(maxBytes);
+            }
+            return read;
         } catch (IOException ex) {
-            throw new KycImageRejectedException(KycImageRejectedException.Reason.CORRUPT, "the upload was cut short");
+            throw cutShort();
         }
-        return out.toByteArray();
+    }
+
+    private static KycImageRejectedException cutShort() {
+        return new KycImageRejectedException(KycImageRejectedException.Reason.CORRUPT, "the upload was cut short");
     }
 
     // --- POST /me/kyc/submissions/{id}/submit ---------------------------------

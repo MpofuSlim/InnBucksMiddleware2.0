@@ -29,11 +29,17 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Turns an uploaded file into a JPEG we are willing to keep: pixels only.
  *
  * <ol>
+ *   <li>Before the caller reads the body, {@link #admit()} takes one of a
+ *       few cell-wide upload places, or refuses at once (503
+ *       {@code kyc_upload_busy}): at most that many upload bodies are ever in
+ *       the heap, whatever Tomcat's thread count or the rate-limit bursts
+ *       allow.</li>
  *   <li>{@link JpegStructure} walks the markers: a JPEG by its BYTES (never
  *       the Content-Type), whole, baseline, with its dimensions in the
  *       header. The pixel cap and the legibility minimum are checked on those
@@ -60,6 +66,7 @@ import java.util.concurrent.TimeUnit;
 public class KycImageProcessor {
 
     private final KycProperties.Image limits;
+    private final Semaphore uploadSlots;
     private final Semaphore decodeSlots;
 
     @Autowired
@@ -68,15 +75,51 @@ public class KycImageProcessor {
     }
 
     public KycImageProcessor(KycProperties.Image limits) {
-        this(limits, new Semaphore(limits.maxConcurrentDecodes(), true));
+        this(limits, new Semaphore(limits.maxConcurrentUploads()), new Semaphore(limits.maxConcurrentDecodes(), true));
     }
 
     KycImageProcessor(KycProperties.Image limits, Semaphore decodeSlots) {
+        this(limits, new Semaphore(limits.maxConcurrentUploads()), decodeSlots);
+    }
+
+    KycImageProcessor(KycProperties.Image limits, Semaphore uploadSlots, Semaphore decodeSlots) {
         this.limits = limits;
+        this.uploadSlots = uploadSlots;
         this.decodeSlots = decodeSlots;
         // Belt and braces: the streams below are in-memory already, but any
         // other ImageIO use in this JVM must not spool to java.io.tmpdir either.
         ImageIO.setUseCache(false);
+    }
+
+    /**
+     * Takes one of the cell-wide upload places for as long as the caller holds
+     * an upload body: call it BEFORE reading the body, and close it once the
+     * image is processed. Never waits — a full house is 503
+     * {@code kyc_upload_busy} straight away, so no thread sits on a body (or
+     * on nothing) while it queues.
+     */
+    public Admission admit() {
+        if (!uploadSlots.tryAcquire()) {
+            throw new KycUploadBusyException(retryAfterSeconds());
+        }
+        return new Admission(uploadSlots);
+    }
+
+    /** One upload place; closing it more than once gives it back once. */
+    public static final class Admission implements AutoCloseable {
+        private final Semaphore slots;
+        private final AtomicBoolean held = new AtomicBoolean(true);
+
+        private Admission(Semaphore slots) {
+            this.slots = slots;
+        }
+
+        @Override
+        public void close() {
+            if (held.compareAndSet(true, false)) {
+                slots.release();
+            }
+        }
     }
 
     public ProcessedImage process(byte[] upload, KycFileKind kind) {

@@ -300,8 +300,8 @@ public class KycController {
                     + "(rate_limited); retry after Retry-After seconds",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class),
                             examples = @ExampleObject(value = RATE_LIMITED_EXAMPLE))),
-            @ApiResponse(responseCode = "503", description = "Every photo-processing slot is busy "
-                    + "(kyc_upload_busy); send it again after Retry-After",
+            @ApiResponse(responseCode = "503", description = "Too many photos are being received or "
+                    + "processed right now (kyc_upload_busy); send it again after Retry-After",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class),
                             examples = @ExampleObject(value = BUSY_EXAMPLE)))
     })

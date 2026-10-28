@@ -61,9 +61,11 @@ public record KycProperties(
 
     /**
      * Upload ceilings. The byte cap is checked BEFORE the body is read; the
-     * pixel cap BEFORE anything is decoded. Decodes run under a small
-     * semaphore: the cell is one replica in a 768 MB container that also
-     * moves money.
+     * pixel cap BEFORE anything is decoded. Two cell-wide semaphores bound the
+     * memory uploads can hold at once — the cell is one replica in a 768 MB
+     * container that also moves money: one admits an upload BEFORE its body is
+     * read (so at most that many bodies are ever in the heap), the other, inside
+     * it, bounds decodes.
      */
     public record Image(
             /** Largest accepted body. nginx's client_max_body_size on the upload location sits just above it. */
@@ -80,10 +82,17 @@ public record KycProperties(
             float jpegQuality,
             /** Decodes allowed at once, cell-wide. */
             int maxConcurrentDecodes,
+            /**
+             * Uploads allowed to hold a body in memory at once, cell-wide —
+             * from before the body is read until its image is processed. Full
+             * means 503 kyc_upload_busy at once, before a byte is read: a
+             * waiting request would hold a Tomcat thread for nothing.
+             */
+            int maxConcurrentUploads,
             /** How long an upload waits for a decode slot before 503 kyc_upload_busy. */
             Duration decodeWait
     ) {
-        static final Image DEFAULTS = new Image(0, 0, 0, 0, 0, 0f, 0, null);
+        static final Image DEFAULTS = new Image(0, 0, 0, 0, 0, 0f, 0, 0, null);
 
         public Image {
             maxBytes = maxBytes <= 0 ? 2 * 1024 * 1024 : maxBytes;
@@ -93,6 +102,7 @@ public record KycProperties(
             selfieMaxSide = selfieMaxSide <= 0 ? 1080 : selfieMaxSide;
             jpegQuality = jpegQuality <= 0f || jpegQuality > 1f ? 0.9f : jpegQuality;
             maxConcurrentDecodes = maxConcurrentDecodes <= 0 ? 2 : maxConcurrentDecodes;
+            maxConcurrentUploads = maxConcurrentUploads <= 0 ? 4 : maxConcurrentUploads;
             decodeWait = positiveOr(decodeWait, Duration.ofSeconds(5));
         }
     }
@@ -114,8 +124,8 @@ public record KycProperties(
         public RateLimits {
             // A new submission is rare: a handful a day covers typos.
             create = create == null ? new Pair(limit(5, Duration.ofDays(1)), limit(30, Duration.ofHours(1))) : create;
-            // Four files plus retakes per round; an office NAT shares the address bucket.
-            upload = upload == null ? new Pair(limit(30, Duration.ofMinutes(15)), limit(120, Duration.ofMinutes(15))) : upload;
+            // Four files with two retakes each per round; an office NAT shares the address bucket.
+            upload = upload == null ? new Pair(limit(12, Duration.ofMinutes(15)), limit(120, Duration.ofMinutes(15))) : upload;
             submit = submit == null ? new Pair(limit(10, Duration.ofMinutes(15)), limit(60, Duration.ofMinutes(15))) : submit;
         }
     }

@@ -855,6 +855,12 @@ location /middleware/me/kyc/ {
 }
 ```
 
+Keep nginx's default `proxy_request_buffering on` for this location: nginx
+then receives the WHOLE body before it opens the upstream request, so a slow
+phone on a bad network never holds one of the middleware's few upload places
+(`KYC_IMAGE_MAX_CONCURRENT_UPLOADS`, default 4 — a full house is an immediate
+`503 kyc_upload_busy` with `Retry-After`) while it trickles bytes in.
+
 Raise both together with `KYC_IMAGE_MAX_BYTES`, never alone. Clients must treat
 ANY 413 as "too large", whatever its body — a body far over the limit is
 answered by nginx (or Cloudflare) before the app sees it. Uploads should use

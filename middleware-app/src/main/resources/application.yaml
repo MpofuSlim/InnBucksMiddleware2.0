@@ -277,6 +277,12 @@ innbucks:
       # Decodes at once, cell-wide: one replica, 768 MB, and it moves money.
       max-concurrent-decodes: ${KYC_IMAGE_MAX_CONCURRENT_DECODES:2}
       decode-wait: 5s
+      # Uploads allowed to hold a body in the heap at once, cell-wide — taken
+      # BEFORE the body is read, held until its image is processed; full is
+      # 503 kyc_upload_busy straight away. This, not the rate limits (whose
+      # bursts several accounts can add up) or Tomcat's 200 threads, is what
+      # bounds upload memory: about 2 MiB a place plus the decodes inside it.
+      max-concurrent-uploads: ${KYC_IMAGE_MAX_CONCURRENT_UPLOADS:4}
     # Per customer AND per client address, on top of rate-limit.enabled
     # (the master switch). 429 rate_limited + Retry-After.
     rate-limit:
@@ -288,8 +294,9 @@ innbucks:
           capacity: 30
           refill-period: 1h
       upload:
+        # Four files with two retakes each per round.
         per-customer:
-          capacity: 30
+          capacity: 12
           refill-period: 15m
         per-ip:
           capacity: 120

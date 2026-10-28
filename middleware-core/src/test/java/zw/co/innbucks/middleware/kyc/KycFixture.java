@@ -64,7 +64,7 @@ class KycFixture {
                     new CountryProperties(Country.ZW)), hasher);
     final KycProperties properties = new KycProperties(true, "/run/secrets/innbucks-kyc-keys",
             Duration.ofDays(14), Duration.ofDays(30), null, 0, new KycProperties.Image(
-            2 * 1024 * 1024, 16_000_000L, 200, 1600, 1080, 0.9f, 2, Duration.ofSeconds(1)), null);
+            2 * 1024 * 1024, 16_000_000L, 200, 1600, 1080, 0.9f, 2, 4, Duration.ofSeconds(1)), null);
     final KycImageProcessor images = new KycImageProcessor(properties.image());
     final KycHousekeeping housekeeping = new KycHousekeeping(store, store);
     final KycRateLimiter rateLimiter = mock(KycRateLimiter.class);
