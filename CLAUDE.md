@@ -1393,8 +1393,14 @@ one re-provision with nothing new in `deploy/fineract/.env` (exit 0, 6f
      rotating usernames), so a branch behind one NAT shares a bucket; budget
      per cell via `innbucks.statement.console-requests-per-minute` (default
      30) — every raise is also a faster spray, and this throttle is the ONLY
-     brute-force control in front of Fineract Basic auth (Fineract has no
-     lockout).
+     brute-force control in front of Fineract Basic auth on our cells.
+     Fineract can lock an account after repeated wrong passwords since
+     `innbucks-cell-8`, Basic-auth API calls included, but only when BOTH the
+     global `max-login-retry-attempts` configuration and the user's
+     `isLoginRetriesEnabled` flag are on, and both are off on our cells.
+     **Never set that flag on `innbucks-mw-read` / `innbucks-mw-write`**:
+     wrong passwords sent with their usernames (through `/console/**`, or
+     straight at Fineract) would lock the middleware out of the core.
    - CORS exposes `Content-Disposition` (else cross-origin JS reads the
      statement filename as null).
    Contract pinned by `FineractOperatorGatewayContractTest` (incl.

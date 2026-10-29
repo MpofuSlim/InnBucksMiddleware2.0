@@ -189,13 +189,32 @@ browser. The origin limit does not change this either.
 history.** Role grants, the maker-checker task list, control-account glCodes —
 anything that should be identical every time this market's cell is stood up —
 belongs in that file, which is committed and reviewable as a diff. Secrets stay
-in the gitignored `.env`. Source both, then run the script:
+in the gitignored `.env`. From `deploy/fineract`, source both, add the three
+passwords the script needs, and run it, all inside the parentheses:
 
 ```sh
-set -a; source ../cells/cell.zw.env; set +a     # policy, committed, NON-SECRET
-set -a; source .env;                 set +a     # secrets, gitignored
-./provision-cell.sh
+( set -a; source ../cells/cell.zw.env; source .env; set +a   # policy, then secrets
+  export MW_READ_PASSWORD="$(grep '^FINERACT_READ_PASSWORD=' ../../.env | cut -d= -f2-)"
+  export MW_WRITE_PASSWORD="$(grep '^FINERACT_WRITE_PASSWORD=' ../../.env | cut -d= -f2-)"
+  read -rsp 'admin password: ' ADMIN_PASSWORD; echo; export ADMIN_PASSWORD
+  export CURL_OPTS="--cacert ssl/cell-ca.crt"
+  ./provision-cell.sh )
 ```
+
+The AppUser passwords come from the middleware's `.env`, the one place they
+are kept. The script never changes an existing user's password, so they only
+need to be the values the middleware already uses. The admin password is typed,
+never stored on the box.
+
+**Keep the parentheses.** They run the whole thing in a subshell, so nothing the
+two files export outlives the run. A leftover export is not harmless:
+- `.env` holds `FINERACT_IMAGE_TAG`, and `docker compose` prefers an exported
+  variable over `.env`. So the next upgrade in that shell silently pulls the
+  old image after you have edited `.env` (it did, on staging, 2026-10-29).
+- It also leaves the cell's database, master and keystore passwords in the
+  shell's environment, for every later command to inherit.
+- `exec bash -l` does not clear any of it (`exec` hands the environment on); a
+  new SSH session does.
 
 Everything the script does is idempotent and **additive** — a re-run re-asserts
 the cell file's intent and never revokes a grant the file does not name, because
@@ -252,6 +271,12 @@ read-back reads the wallet (see "Customer deposits at the core" above). It
 prints the values the
 middleware's `.env` needs. **Store the rotated admin password in your
 password manager** — it is the break-glass credential for this cell.
+
+That block exports into your shell on purpose: you need `$MW_READ_PASSWORD`
+and `$MW_WRITE_PASSWORD` afterwards for the middleware's `.env`, and
+`$ROTATE_ADMIN_PASSWORD` for your password manager. Once all three are stored,
+**end the SSH session** (`exit`). Until then every command in that shell
+inherits the cell's admin password.
 
 ### Customer deposits at the core: staging opts in, production never
 
@@ -353,9 +378,12 @@ nothing else will do it.
 
    ```sh
    cd deploy/fineract
-   set -a; source ../cells/cell.zw.env; set +a     # policy, committed
-   set -a; source .env;                 set +a     # secrets, gitignored
-   ./provision-cell.sh
+   ( set -a; source ../cells/cell.zw.env; source .env; set +a   # policy, then secrets
+     export MW_READ_PASSWORD="$(grep '^FINERACT_READ_PASSWORD=' ../../.env | cut -d= -f2-)"
+     export MW_WRITE_PASSWORD="$(grep '^FINERACT_WRITE_PASSWORD=' ../../.env | cut -d= -f2-)"
+     read -rsp 'admin password: ' ADMIN_PASSWORD; echo; export ADMIN_PASSWORD
+     export CURL_OPTS="--cacert ssl/cell-ca.crt"
+     ./provision-cell.sh )
    ```
 
    Done means BOTH: the run exits 0, and step 6f prints
@@ -1233,7 +1261,9 @@ is set — login before that is supposed to fail.
 - Every credential in `.env`, rotated from defaults; the tenant-store master
   password encrypts tenant creds at rest.
 - The middleware rides two least-privilege AppUsers; the admin account is
-  break-glass only.
+  break-glass only. Neither AppUser ever has `isLoginRetriesEnabled` on: with
+  Fineract's login lockout switched on globally, wrong passwords sent with
+  their usernames would lock the middleware out of the core.
 - The write AppUser holds `DEPOSIT_SAVINGSACCOUNT` only on a box provisioned
   with `MIDDLEWARE_CUSTOMER_DEPOSITS=1` (staging). Production never sets it,
   and `provision-cell.sh` step 6f must print `LOCKED` there. A cell provisioned
