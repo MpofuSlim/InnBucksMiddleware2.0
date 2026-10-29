@@ -3,6 +3,8 @@ package zw.co.innbucks.middleware.ledger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import zw.co.innbucks.middleware.corebanking.CoreProvider;
+import zw.co.innbucks.middleware.corebanking.exception.CoreAccountRestrictedException;
+import zw.co.innbucks.middleware.corebanking.exception.CoreAuthException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreClientException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreTransientException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreUnknownOutcomeException;
@@ -151,6 +153,48 @@ class LedgeredMovementExecutorTest {
         })).isInstanceOf(CoreClientException.class);
 
         verify(ledgerService).markFailed(eq(rowId), eq("core_rejected"), anyString());
+    }
+
+    @Test
+    void aRestrictedAccountIsStillAProvenFailureCodedForOps() {
+        // A CoreClientException subtype: FAILED (nothing applied), rethrown for
+        // the 403, and coded so a same-key retry replays the fixed copy.
+        assertThatThrownBy(() -> executor.execute(draft, PendingReservationGuard.NONE, ref -> {
+            throw new CoreAccountRestrictedException(CoreProvider.FINERACT,
+                    "Fineract refused to debit a restricted account", null);
+        })).isInstanceOf(CoreAccountRestrictedException.class);
+
+        verify(ledgerService).markFailed(eq(rowId), eq("account_restricted"), anyString());
+        verify(ledgerService, never()).markUnknown(any(), any());
+    }
+
+    @Test
+    void authorityRefusalMarksFailedAndRethrowsNeverParks() {
+        // A permission the core refuses our AppUser (e.g. a deposit on a cell
+        // provisioned without customer deposits) is refused before the command
+        // runs, so FAILED is provable. Parking it UNKNOWN would page an
+        // operator to reconcile a movement that never existed.
+        assertThatThrownBy(() -> executor.execute(draft, PendingReservationGuard.NONE, ref -> {
+            throw new CoreAuthException(CoreProvider.FINERACT,
+                    "Fineract refused the middleware AppUser a permission: error.msg.not.authorized: "
+                            + "User has no authority to: DEPOSIT_SAVINGSACCOUNT", null);
+        })).isInstanceOf(CoreAuthException.class);
+
+        verify(ledgerService).markFailed(eq(rowId), eq("core_auth_failed"), anyString());
+        verify(ledgerService, never()).markUnknown(any(), any());
+    }
+
+    @Test
+    void onlyOurOwnFailuresCountAsOperational() {
+        // These rows hold operator detail that a replay must not show the customer.
+        assertThat(LedgeredMovementExecutor.isOperationalFailure("core_auth_failed")).isTrue();
+        assertThat(LedgeredMovementExecutor.isOperationalFailure("core_unreachable")).isTrue();
+        assertThat(LedgeredMovementExecutor.isOperationalFailure("core_server_error")).isTrue();
+        // A refusal of the request itself keeps its wording ("Insufficient account balance.").
+        assertThat(LedgeredMovementExecutor.isOperationalFailure("core_rejected")).isFalse();
+        assertThat(LedgeredMovementExecutor.isOperationalFailure("core_reported_failed")).isFalse();
+        assertThat(LedgeredMovementExecutor.isOperationalFailure("reconciled_failed")).isFalse();
+        assertThat(LedgeredMovementExecutor.isOperationalFailure(null)).isFalse();
     }
 
     @Test

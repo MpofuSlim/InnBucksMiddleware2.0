@@ -11,17 +11,27 @@
 #   4d. seed the client Constitution / Main Business Line code values (the CBS
 #       console's Entity-client dropdowns)              CLIENT_CONSTITUTIONS etc
 #   5. create TWO least-privilege roles (read / write) after verifying every
-#      permission code exists on this build — never ALL_FUNCTIONS
+#      permission code exists on this build — never ALL_FUNCTIONS. The write
+#      role gets DEPOSIT_SAVINGSACCOUNT only on a box that opts in, and has it
+#      REVOKED everywhere else                        MIDDLEWARE_CUSTOMER_DEPOSITS
 #   6. create the two AppUsers the middleware rides     innbucks-mw-read / -write
-#   6b. grant the BANK's operational roles                BANK_ROLE_GRANTS
+#   6b. grant the BANK's operational roles — never the middleware's own two,
+#       which this script alone defines                   BANK_ROLE_GRANTS
 #   6c. make GL control accounts refuse manual journals   CONTROL_ACCOUNT_GLCODES
 #   6d. warn on loan products with accounting = None      ASSERT_LOAN_PRODUCT_ACCOUNTING
 #   6e. maker-checker: flag tasks, ASSERT the middleware's own codes are NOT
 #       flagged (always, not configurable), then optionally flip the global
 #       switch                        MAKER_CHECKER_TASKS / ENABLE_MAKER_CHECKER
+#   6f. verify the customer-deposit lock: what innbucks-mw-write can ACTUALLY
+#       do across every role it holds. Not configurable, runs every time, and
+#       runs LAST, after every step that writes a role (5 and 6b), so it reads
+#       the state the run leaves behind
 #   7. (optional, RUN_SMOKE=1) drive the EXACT adapter call sequence with the
 #      new write credentials: client -> wallet create/approve/activate ->
-#      deposit -> read the transaction back by external id
+#      deposit -> read the transaction back by external id. On a box that has
+#      not opted in to customer deposits, the deposit is replaced by a
+#      ZERO-amount deposit that the core must refuse on permission, and the
+#      read-back reads the wallet instead.
 #
 # Steps 6b-6e are per-market POLICY and belong in a cell file, not in your
 # shell history:
@@ -32,6 +42,17 @@
 #
 # See deploy/cells/cell.example.env. Everything is additive and idempotent: a
 # re-run re-asserts the file's intent and never revokes a grant it doesn't name.
+# The one revoke is the middleware's OWN: innbucks-mw-write loses
+# DEPOSIT_SAVINGSACCOUNT on every box that has not opted in, so re-running on
+# an older cell closes the lock with no other change. A cell file cannot grant
+# the middleware's two roles anything: 6b refuses such an entry and the run
+# fails, because the file is shared by every box of the market.
+#
+# MIDDLEWARE_CUSTOMER_DEPOSITS is a PER-BOX value, like the secrets: it goes in
+# that box's gitignored deploy/fineract/.env, which is sourced after the cell
+# file. Never in a cell file. One cell file serves every box of its market
+# (staging and production both source cell.zw.env), and the script refuses to
+# run while a committed cell file assigns it.
 #
 # Required env:
 #   ADMIN_PASSWORD        current password of ADMIN_USER (default mifos)
@@ -51,6 +72,12 @@
 #                         Set either to '' to skip seeding that code.
 #   CURL_OPTS             e.g. --cacert cell-ca.crt  (avoid -k outside first-boot checks)
 #   RUN_SMOKE             1 to run the probe sequence (leaves a SMOKE-Probe client behind)
+#   MIDDLEWARE_CUSTOMER_DEPOSITS
+#                         1 = let the middleware's write AppUser post customer
+#                         deposits (STAGING ONLY: POST /transactions/deposit is
+#                         an unfunded cash-in). Unset or 0 = withheld AND
+#                         revoked. Any other value stops the run before it
+#                         writes anything.
 #
 # Deps: curl, jq. (grep -P is used for the password-policy pre-check; without
 # it the check is skipped, not fatal.)
@@ -102,28 +129,51 @@ PRODUCT_SHORT="${PRODUCT_SHORT:-IBWL}"
 PAYMENT_TYPE_NAME="${PAYMENT_TYPE_NAME:-InnBucks Wallet}"
 CURL_OPTS="${CURL_OPTS:-}"
 
-# Every code below is checked against the running build before the roles are
-# written (step 5). Notes on the two non-obvious ones:
-#   * There is NO READ_SAVINGSACCOUNTTRANSACTION permission — the transaction
-#     endpoints validate READ against the SAVINGSACCOUNT resource, so
-#     READ_SAVINGSACCOUNT already covers the reconciliation read-back.
-#   * ACTIVATE_CLIENT is required because the adapter creates clients with
-#     active:true, and Fineract's createClient runs the activate command
-#     inline (ClientWritePlatformServiceJpaRepositoryImpl ->
-#     validateRollbackCommand(activateClient) -> validateHasPermissionTo).
-READ_PERMS=(READ_CLIENT READ_SAVINGSACCOUNT READ_ACCOUNTTRANSFER)
-WRITE_PERMS=(CREATE_CLIENT ACTIVATE_CLIENT CREATE_SAVINGSACCOUNT APPROVE_SAVINGSACCOUNT
-             ACTIVATE_SAVINGSACCOUNT DEPOSIT_SAVINGSACCOUNT WITHDRAWAL_SAVINGSACCOUNT
-             CREATE_ACCOUNTTRANSFER)
-
 log()  { printf '>> %s\n' "$*" >&2; }
 fail() { printf 'FATAL: %s\n' "$*" >&2; exit 1; }
 
-# Parsing + set arithmetic for steps 6b/6e. Kept in a lib so
-# provision-selftest.sh can cover it without a cell — mc_violations in
+# The middleware's role names and permission codes (MW_READ_ROLE / MW_WRITE_ROLE,
+# READ_PERMS / WRITE_PERMS, with the notes on the non-obvious codes), plus the
+# parsing and set arithmetic for steps 5, 6b, 6e and 6f. Kept in a lib so
+# provision-selftest.sh can cover them without a cell — mc_violations in
 # particular is the one function here whose false negative costs money.
 # shellcheck source=provision-lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/provision-lib.sh"
+
+# ─── Customer deposits: the core-side lock ──────────────────────────────────
+# Decided here, before the first network call, so a bad value or a committed
+# opt-in stops the run before it writes anything. See provision-lib.sh for why
+# the opt-in is per box and why only the literal 1 counts.
+mapfile -t COMMITTED_OPT_INS < <(committed_deposit_opt_ins "$(dirname "${BASH_SOURCE[0]}")"/../cells/*.env)
+if ((${#COMMITTED_OPT_INS[@]})); then
+  fail "a committed cell file assigns MIDDLEWARE_CUSTOMER_DEPOSITS: ${COMMITTED_OPT_INS[*]}
+       A cell file is shared by every box of its market, production included, so an
+       opt-in there grants production's middleware the power to post deposits from
+       nothing. Remove the line from the cell file. A STAGING box opts in through
+       its own gitignored deploy/fineract/.env (runbook section 4)."
+fi
+MW_DEPOSITS=$(parse_deposit_opt_in "${MIDDLEWARE_CUSTOMER_DEPOSITS-}") || fail \
+  "MIDDLEWARE_CUSTOMER_DEPOSITS='${MIDDLEWARE_CUSTOMER_DEPOSITS-}' is neither 1 (opt in) nor 0/unset (off).
+       Only the literal 1 opts in; anything else is refused rather than guessed."
+mapfile -t WRITE_GRANTS  < <(mw_write_grants "$MW_DEPOSITS")
+mapfile -t WRITE_REVOKES < <(write_role_revokes "$MW_DEPOSITS")
+if [[ "$MW_DEPOSITS" == 1 ]]; then
+  log "!! customer deposits: ON at the core (MIDDLEWARE_CUSTOMER_DEPOSITS=1) — STAGING ONLY."
+  log "!!   innbucks-mw-write keeps ${CUSTOMER_DEPOSIT_PERMISSION}: once the middleware's own"
+  log "!!   TRANSACTIONS_DEPOSIT_ENABLED is on too, any customer can credit their wallet from nothing."
+else
+  log "customer deposits: OFF at the core — ${CUSTOMER_DEPOSIT_PERMISSION} is withheld from, and"
+  log "  revoked off, innbucks-mw-write. (A staging box opts in with MIDDLEWARE_CUSTOMER_DEPOSITS=1.)"
+fi
+
+# Problems with the deposit lock, and cell-file entries this script refuses to
+# apply, are collected rather than fatal on the spot, so every other step (the
+# maker-checker assertion above all, and the step-5 revoke that closes the lock)
+# still runs. The run FAILS at the end if any were found.
+LOCK_FAILURES=()
+lock_failure() { LOCK_FAILURES+=("$1"); log "  !! $1"; }
+POLICY_REFUSALS=()
+policy_refusal() { POLICY_REFUSALS+=("$1"); log "  !! $1"; }
 
 # api METHOD PATH [JSON_BODY] [USER PASS] — prints the response body; nonzero on >=400.
 api() {
@@ -150,6 +200,18 @@ probe() {
   curl -sS ${CURL_OPTS} -o /dev/null -w '%{http_code}' \
        -u "${1}:${2}" -H "Fineract-Platform-TenantId: ${TENANT}" \
        "${FINERACT_URL}/v1/offices" 2>/dev/null || true
+}
+
+# api_probe METHOD PATH JSON_BODY USER PASS — prints "<status> <body>" and NEVER
+# fails: for the one call (step 7's deposit-lock probe) whose REFUSAL is the
+# answer we want, which api() would turn into an error. Status 000 = no answer.
+api_probe() {
+  local out
+  out=$(curl -sS ${CURL_OPTS} -X "$1" -u "${4}:${5}" \
+             -H "Fineract-Platform-TenantId: ${TENANT}" -H "Content-Type: application/json" \
+             -w '\n%{http_code}' -d "$3" "${FINERACT_URL}${2}" 2>/dev/null) || true
+  [[ "$out" == *$'\n'* ]] || out=$'\n000'
+  printf '%s %s' "${out##*$'\n'}" "${out%$'\n'*}"
 }
 
 log "1/7 waiting for Fineract at ${FINERACT_URL} ..."
@@ -476,8 +538,30 @@ ensure_role() { # NAME DESCRIPTION PERMS...
   printf '%s' "$id"
 }
 
-READ_ROLE_ID=$(ensure_role "innbucks-mw-read"  "InnBucks middleware read-only"  "${READ_PERMS[@]}")
-WRITE_ROLE_ID=$(ensure_role "innbucks-mw-write" "InnBucks middleware commands" "${WRITE_PERMS[@]}")
+READ_ROLE_ID=$(ensure_role "$MW_READ_ROLE"  "InnBucks middleware read-only"  "${READ_PERMS[@]}")
+WRITE_ROLE_ID=$(ensure_role "$MW_WRITE_ROLE" "InnBucks middleware commands" "${WRITE_GRANTS[@]}")
+
+# The deposit lock's revoke. Withholding the grant only covers a NEW role: PUT
+# /roles/{id}/permissions merges, so a role an earlier run (or an older script)
+# granted keeps the code until it is sent as false, which Fineract applies as a
+# removal (RoleWritePlatformServiceJpaRepositoryImpl.updateRolePermissions ->
+# Role.updatePermission(false) -> removePermission). Absent already is a no-op.
+# Step 6f reads the result back; this call's 200 alone proves nothing, because
+# a maker-checker-parked command also answers 200.
+if ((${#WRITE_REVOKES[@]})); then
+  if api PUT "/v1/roles/${WRITE_ROLE_ID}/permissions" "$(json_flag_map false "${WRITE_REVOKES[@]}")" >/dev/null; then
+    log "role ${MW_WRITE_ROLE}: revoked ${WRITE_REVOKES[*]} (a no-op where it was already absent)"
+  else
+    lock_failure "could not revoke ${WRITE_REVOKES[*]} from role ${MW_WRITE_ROLE} (API error above)"
+  fi
+fi
+
+# role_held_codes ROLE_ID — the codes ROLE_ID actually holds, read back from the
+# unfiltered role listing (see ALL_CODES in 6b for why that listing).
+role_held_codes() {
+  api GET "/v1/roles/${1}/permissions" \
+    | jq -r '.permissionUsageData[]? | select(.selected == true) | .code // empty'
+}
 
 log "6/7 ensuring AppUsers ..."
 ensure_user() { # USERNAME PASSWORD ROLE_ID
@@ -495,17 +579,21 @@ ensure_user() { # USERNAME PASSWORD ROLE_ID
       }')" >/dev/null
   log "created user ${username}"
 }
-ensure_user "innbucks-mw-read"  "$MW_READ_PASSWORD"  "$READ_ROLE_ID"
-ensure_user "innbucks-mw-write" "$MW_WRITE_PASSWORD" "$WRITE_ROLE_ID"
+ensure_user "$MW_READ_ROLE"  "$MW_READ_PASSWORD"  "$READ_ROLE_ID"
+ensure_user "$MW_WRITE_ROLE" "$MW_WRITE_PASSWORD" "$WRITE_ROLE_ID"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 6b–6e: the BANK's operational policy, driven from deploy/cells/cell.<iso>.env.
 #
-# Everything below is per-market POLICY and lives in that file as data, with one
-# deliberate exception: step 6e's assertion that the middleware's own permission
-# codes are never maker-checkerable is derived from READ_PERMS/WRITE_PERMS above
-# and is NOT configurable. A cell file can widen what the bank dual-controls; it
-# can never switch off the thing that keeps the customer rail moving.
+# Everything below is per-market POLICY and lives in that file as data, with
+# deliberate exceptions that are NOT configurable: 6b never grants the
+# middleware's own two roles anything (their codes are READ_PERMS / WRITE_PERMS
+# in provision-lib.sh, and the file is shared by every box of the market); 6e's
+# assertion that the middleware's own permission codes are never
+# maker-checkerable is derived from what step 5 grants (mw_protected_codes); and
+# 6f, after all of them, proves the customer-deposit lock from the final state.
+# A cell file can widen what the bank dual-controls; it can never switch off
+# the thing that keeps the customer rail moving, nor open money creation.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Cache the build's permission codes once — 6b and 6e both check against it.
@@ -536,6 +624,17 @@ if [[ -n "${BANK_ROLE_GRANTS:-}" ]]; then
   ALL_ROLE_NAMES=$(jq -r '.[]?.name // empty' <<<"$ALL_ROLES")
   while IFS=$'\t' read -r role_name role_codes; do
     [[ -n "$role_name" ]] || continue
+    # Never the middleware's own roles, on any box. Their codes are code
+    # (READ_PERMS / WRITE_PERMS), and this file is shared by staging and
+    # production alike: 'innbucks-mw-write=DEPOSIT_SAVINGSACCOUNT' here would
+    # re-grant on production the very code step 5 just revoked, past the
+    # per-box opt-in. Refused before the role is even looked up, so nothing of
+    # the entry is applied, and the run fails at the end so the line is removed
+    # rather than ignored on every run.
+    if is_middleware_role "$role_name"; then
+      policy_refusal "BANK_ROLE_GRANTS names '${role_name}', one of the middleware's own roles: NOT granted (${role_codes}). Its codes are set by provision-cell.sh alone; remove the entry from the cell file. (A box whose middleware must post deposits opts in with its own MIDDLEWARE_CUSTOMER_DEPOSITS=1, runbook section 4.)"
+      continue
+    fi
     # The role must ALREADY EXIST. A grant names a role this bank's operators
     # are assigned to; if the name does not match one, the right answer is to
     # say so, never to create it.
@@ -682,8 +781,14 @@ fi
 # never completes. (The middleware refuses that response as an UNKNOWN outcome
 # rather than mis-reporting success — see FineractClient.failIfParkedByMakerChecker
 # — but the rail is still stalled until the flag comes off.)
+#
+# The protected set is what step 5 GRANTS (mw_protected_codes: READ_PERMS plus
+# mw_write_grants), so it follows the deposit opt-in: DEPOSIT_SAVINGSACCOUNT is
+# protected only on a box whose middleware can issue it. Elsewhere it is the
+# bank's code like any other, and the bank may put teller deposits under dual
+# control without this step undoing it.
 log "  asserting the middleware's own permission codes are NOT maker-checkerable ..."
-PROTECTED_CODES=("${READ_PERMS[@]}" "${WRITE_PERMS[@]}")
+mapfile -t PROTECTED_CODES < <(mw_protected_codes "$MW_DEPOSITS")
 FLAGGED_CODES=$(api GET "/v1/permissions?makerCheckerable=true" \
   | jq -r '.[]? | select(.selected == true) | .code // empty')
 mapfile -t VIOLATIONS < <(mc_violations "$FLAGGED_CODES" "${PROTECTED_CODES[@]}")
@@ -706,6 +811,55 @@ if [[ "${ENABLE_MAKER_CHECKER:-0}" == "1" ]]; then
   fi
 else
   log "  ENABLE_MAKER_CHECKER=0 — global switch left OFF (every per-task flag above is inert until it is on)"
+fi
+
+# 6f. Prove the deposit lock from what Fineract will actually ENFORCE, not from
+# what step 5 asked for. AppUser.hasPermissionTo checks every role the user
+# holds and lets ALL_FUNCTIONS stand in for any code, so the question is the
+# union over ALL of innbucks-mw-write's roles. A second role added in the
+# console (or a revoke that maker-checker parked) is exactly what this catches.
+#
+# It runs HERE, after every step that writes a role (5 and 6b), so it reads the
+# state the run leaves behind. It used to run straight after step 5, and then
+# 6b granted DEPOSIT_SAVINGSACCOUNT back to innbucks-mw-write from a cell file
+# and the run printed LOCKED and exited 0 with the lock open. 6b now refuses the
+# middleware's own roles, but it still grants bank roles, and the AppUser may
+# hold one of those. provision-selftest.sh pins the order: no role or user
+# write may come after this step. Not configurable, and run on every provision.
+log "6f/7 verifying the customer-deposit lock on ${MW_WRITE_ROLE} ..."
+if MW_WRITE_ROLES=$(api GET "/v1/users" | jq -r --arg u "$MW_WRITE_ROLE" \
+     'first(.[] | select(.username == $u)) | .selectedRoles[]? | "\(.id)\t\(.name)"'); then
+  [[ -n "$MW_WRITE_ROLES" ]] \
+    || lock_failure "user ${MW_WRITE_ROLE} was not found or holds no role — the lock cannot be proven"
+  DEPOSIT_CAPABLE_ROLES=()
+  while IFS=$'\t' read -r rid rname; do
+    [[ -n "$rid" ]] || continue
+    if held=$(role_held_codes "$rid"); then
+      capable=$(deposit_capable_codes "$held" | paste -sd' ' -)
+      if [[ -n "$capable" ]]; then DEPOSIT_CAPABLE_ROLES+=("'${rname}' (id=${rid}) via ${capable}"); fi
+    else
+      lock_failure "could not read the permissions of role '${rname}' (id=${rid}) — the lock cannot be proven"
+    fi
+  done <<<"$MW_WRITE_ROLES"
+  if [[ "$MW_DEPOSITS" == 1 ]]; then
+    if ((${#DEPOSIT_CAPABLE_ROLES[@]})); then
+      log "  ON: the core accepts ${MW_WRITE_ROLE}'s deposits — ${DEPOSIT_CAPABLE_ROLES[*]}"
+    else
+      lock_failure "MIDDLEWARE_CUSTOMER_DEPOSITS=1, yet no role of ${MW_WRITE_ROLE} grants ${CUSTOMER_DEPOSIT_PERMISSION}: the grant did not apply, and the core will refuse this box's deposits"
+    fi
+  elif ((${#DEPOSIT_CAPABLE_ROLES[@]})); then
+    for r in "${DEPOSIT_CAPABLE_ROLES[@]}"; do
+      lock_failure "deposit lock OPEN: ${MW_WRITE_ROLE} can still post deposits through role ${r}"
+    done
+    log "  !!   On role '${MW_WRITE_ROLE}' the step-5 revoke did not apply: a 200 that changed"
+    log "  !!   nothing is maker-checker parking it (PERMISSIONS_ROLE flagged, admin not a checker"
+    log "  !!   super user). On any OTHER role, remove that role from the user ${MW_WRITE_ROLE}"
+    log "  !!   in the console; this script never removes a role the bank assigned."
+  else
+    log "  LOCKED: no role of ${MW_WRITE_ROLE} grants ${CUSTOMER_DEPOSIT_PERMISSION} or ALL_FUNCTIONS — the core refuses its deposits"
+  fi
+else
+  lock_failure "could not list users — the deposit lock cannot be proven"
 fi
 
 if [[ "${RUN_SMOKE:-0}" == "1" ]]; then
@@ -732,10 +886,10 @@ if [[ "${RUN_SMOKE:-0}" == "1" ]]; then
          ${BD_SQL} \\
            -c \"SELECT name, enabled FROM c_configuration WHERE name = 'maker-checker';\"
          ${BD_SQL} \\
-           -c \"SELECT code, can_maker_checker FROM m_permission WHERE code IN ('${WRITE_PERMS[0]}'$(printf ", '%s'" "${WRITE_PERMS[@]:1}"));\"
+           -c \"SELECT code, can_maker_checker FROM m_permission WHERE code IN ('${WRITE_GRANTS[0]}'$(printf ", '%s'" "${WRITE_GRANTS[@]:1}"));\"
        Exempt ONLY the codes this middleware issues, then restart Fineract:
          ${BD_SQL} \\
-           -c \"UPDATE m_permission SET can_maker_checker = false WHERE code IN ('${WRITE_PERMS[0]}'$(printf ", '%s'" "${WRITE_PERMS[@]:1}"));\"
+           -c \"UPDATE m_permission SET can_maker_checker = false WHERE code IN ('${WRITE_GRANTS[0]}'$(printf ", '%s'" "${WRITE_GRANTS[@]:1}"));\"
          docker compose restart fineract"
   fi
   SAVINGS_ID=$(api POST "/v1/savingsaccounts" "$(jq -n \
@@ -749,17 +903,64 @@ if [[ "${RUN_SMOKE:-0}" == "1" ]]; then
   api POST "/v1/savingsaccounts/${SAVINGS_ID}?command=activate" \
     "$(jq -n --arg d "$TODAY" '{activatedOnDate:$d, locale:"en", dateFormat:"yyyy-MM-dd"}')" \
     innbucks-mw-write "$MW_WRITE_PASSWORD" >/dev/null
-  api POST "/v1/savingsaccounts/external-id/${CLIENT_EXT}%3Awallet/transactions?command=deposit" \
-    "$(jq -n --arg d "$TODAY" --arg ref "$REF" --argjson pt "$PAYMENT_TYPE_ID" '{
-        transactionDate:$d, transactionAmount:1.00, externalId:$ref, paymentTypeId:$pt,
-        locale:"en", dateFormat:"yyyy-MM-dd"}')" \
-    innbucks-mw-write "$MW_WRITE_PASSWORD" >/dev/null
-  # Reconciliation read with the READ credential — proves both AppUsers.
-  api GET "/v1/savingsaccounts/external-id/${CLIENT_EXT}%3Awallet/transactions/external-id/${REF}" \
-    "" innbucks-mw-read "$MW_READ_PASSWORD" | jq '{id, amount, reversed}' >&2
-  log "smoke passed (probe client '${CLIENT_EXT}' left behind — Fineract clients aren't hard-deletable)"
+  if [[ "$MW_DEPOSITS" == 1 ]]; then
+    api POST "/v1/savingsaccounts/external-id/${CLIENT_EXT}%3Awallet/transactions?command=deposit" \
+      "$(jq -n --arg d "$TODAY" --arg ref "$REF" --argjson pt "$PAYMENT_TYPE_ID" '{
+          transactionDate:$d, transactionAmount:1.00, externalId:$ref, paymentTypeId:$pt,
+          locale:"en", dateFormat:"yyyy-MM-dd"}')" \
+      innbucks-mw-write "$MW_WRITE_PASSWORD" >/dev/null
+    # Reconciliation read with the READ credential — proves both AppUsers.
+    api GET "/v1/savingsaccounts/external-id/${CLIENT_EXT}%3Awallet/transactions/external-id/${REF}" \
+      "" innbucks-mw-read "$MW_READ_PASSWORD" | jq '{id, amount, reversed}' >&2
+  else
+    # No 1.00 deposit: this box has not opted in, and posting money from
+    # nothing is exactly what it must not be able to do. The step proves THAT
+    # instead, end to end, with the real write credential. The amount is ZERO,
+    # which Fineract's validator refuses (positiveAmount) if the permission
+    # check ever lets the command through, so the probe cannot move money even
+    # when the lock it tests is open. The permission check runs first
+    # (logCommandSource), so a held lock answers 403 error.msg.not.authorized.
+    log "  customer deposits are OFF on this box: skipping the 1.00 deposit; probing the lock"
+    log "  with a ZERO-amount deposit as innbucks-mw-write (it cannot move money either way) ..."
+    PROBE=$(api_probe POST "/v1/savingsaccounts/external-id/${CLIENT_EXT}%3Awallet/transactions?command=deposit" \
+      "$(jq -n --arg d "$TODAY" --arg ref "${REF}-lock-probe" --argjson pt "$PAYMENT_TYPE_ID" '{
+          transactionDate:$d, transactionAmount:0, externalId:$ref, paymentTypeId:$pt,
+          locale:"en", dateFormat:"yyyy-MM-dd"}')" \
+      innbucks-mw-write "$MW_WRITE_PASSWORD")
+    PROBE_STATUS="${PROBE%% *}" PROBE_BODY="${PROBE#* }"
+    case "$(classify_deposit_probe "$PROBE_STATUS" "$PROBE_BODY")" in
+      refused)
+        log "  the core REFUSED it: 403 error.msg.not.authorized — the deposit lock holds" ;;
+      allowed)
+        lock_failure "deposit lock OPEN: the core let innbucks-mw-write's deposit past its permission check (HTTP ${PROBE_STATUS}; the zero amount is all that stopped it)" ;;
+      *)
+        lock_failure "the deposit-lock probe was inconclusive (HTTP ${PROBE_STATUS}): ${PROBE_BODY:0:300}" ;;
+    esac
+    # The READ credential is still proven: read the probe wallet back with it.
+    api GET "/v1/savingsaccounts/external-id/${CLIENT_EXT}%3Awallet" \
+      "" innbucks-mw-read "$MW_READ_PASSWORD" \
+      | jq '{id, accountNo, status: .status.value, balance: .summary.accountBalance}' >&2
+  fi
+  if ((${#LOCK_FAILURES[@]})); then
+    log "smoke ran, but the deposit lock is NOT as this box asked (the !! lines above; the run fails below)"
+  else
+    log "smoke passed (probe client '${CLIENT_EXT}' left behind — Fineract clients aren't hard-deletable)"
+  fi
 else
   log "7/7 skipping smoke (set RUN_SMOKE=1 to run it)."
+fi
+
+if ((${#LOCK_FAILURES[@]} + ${#POLICY_REFUSALS[@]})); then
+  REPORT=""
+  if ((${#POLICY_REFUSALS[@]})); then
+    REPORT+="the cell file asks for something this script refuses to apply:"$'\n'
+    REPORT+="$(printf '         - %s\n' "${POLICY_REFUSALS[@]}")"$'\n'
+  fi
+  if ((${#LOCK_FAILURES[@]})); then
+    REPORT+="the customer-deposit lock is NOT as this box asked (MIDDLEWARE_CUSTOMER_DEPOSITS=${MW_DEPOSITS}):"$'\n'
+    REPORT+="$(printf '         - %s\n' "${LOCK_FAILURES[@]}")"$'\n'
+  fi
+  fail "${REPORT}       Every other step ran. Fix the above and re-run; the run is idempotent."
 fi
 
 log "DONE. Middleware .env values:"
@@ -772,3 +973,13 @@ cat >&2 <<EOF
   FINERACT_WRITE_USERNAME=innbucks-mw-write
   (passwords: the values you provided in MW_READ_PASSWORD / MW_WRITE_PASSWORD)
 EOF
+if [[ "$MW_DEPOSITS" == 1 ]]; then
+  cat >&2 <<EOF
+  TRANSACTIONS_DEPOSIT_ENABLED=true   # STAGING ONLY: this box opted in at the core too
+EOF
+else
+  cat >&2 <<EOF
+  (leave TRANSACTIONS_DEPOSIT_ENABLED unset: the core refuses this box's deposits, so
+   turning it on would only swap the clean 403 deposit_disabled for a 502)
+EOF
+fi

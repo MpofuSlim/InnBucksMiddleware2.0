@@ -21,6 +21,7 @@ import zw.co.innbucks.middleware.auth.CustomerScopes;
 import zw.co.innbucks.middleware.auth.jwt.JwtIssuer;
 import zw.co.innbucks.middleware.common.country.Country;
 import zw.co.innbucks.middleware.corebanking.value.AccountRef;
+import zw.co.innbucks.middleware.corebanking.value.AccountRestriction;
 import zw.co.innbucks.middleware.corebanking.value.DepositAccountSummary;
 import zw.co.innbucks.middleware.corebanking.value.MinorUnits;
 import zw.co.innbucks.middleware.corebanking.value.TransactionResult;
@@ -100,14 +101,14 @@ class StepUpFlowIntegrationTest {
                 VALUES (?, 'KE', ?, 'x', 'basic', 'FINERACT', ?, 'active', 0, ?, ?)
                 """, customerId, MSISDN, customerId.toString(), Timestamp.from(now), Timestamp.from(now));
         bearer = "Bearer " + issuer.issue(new JwtIssuer.IssueRequest(
-                customerId.toString(), Country.KE, "basic", CustomerScopes.DEFAULT, null, null));
+                customerId.toString(), Country.KE, "basic", CustomerScopes.DEFAULT, null));
 
         coreTransfers.set(0);
         coreAccountListings.set(0);
         stubPort.onListAccounts = ref -> {
             coreAccountListings.incrementAndGet();
             return List.of(new DepositAccountSummary(
-                    new AccountRef(wallet), "InnBucks Wallet", "KES", new MinorUnits(500000L, "KES")));
+                    new AccountRef(wallet), "InnBucks Wallet", "KES", new MinorUnits(500000L, "KES"), AccountRestriction.NONE));
         };
         stubPort.onTransfer = (cmd, key) -> {
             coreTransfers.incrementAndGet();

@@ -16,6 +16,7 @@ import org.springframework.web.context.WebApplicationContext;
 import zw.co.innbucks.middleware.corebanking.CoreProvider;
 import zw.co.innbucks.middleware.corebanking.exception.CoreAuthException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreClientException;
+import zw.co.innbucks.middleware.corebanking.exception.CoreOperatorAuthException;
 import zw.co.innbucks.middleware.corebanking.value.DepositAccountKind;
 import zw.co.innbucks.middleware.corebanking.value.LoanEntryKind;
 import zw.co.innbucks.middleware.corebanking.value.LoanTransactionEntry;
@@ -266,7 +267,7 @@ class ConsoleStatementFlowIntegrationTest {
     @Test
     void coreRejectedCredentialIs401() throws Exception {
         stubOperatorPort.onAuthorize = (credential, accountId) -> {
-            throw new CoreAuthException(CoreProvider.FINERACT, "bad operator credential", null);
+            throw new CoreOperatorAuthException(CoreProvider.FINERACT, "bad operator credential", null);
         };
 
         mockMvc.perform(get("/console/savings-accounts/{id}/statement", "17")
@@ -274,6 +275,40 @@ class ConsoleStatementFlowIntegrationTest {
                         .header(HttpHeaders.AUTHORIZATION, OPERATOR_BASIC))
                 .andExpect(status().isUnauthorized())
                 .andExpect(jsonPath("$.errorCode").value("operator_unauthorized"));
+    }
+
+    /**
+     * The operator's credential is accepted, then the core refuses THIS
+     * MIDDLEWARE's read account the transaction read (a permission missing from
+     * its role). That is our fault, so it must not come back as the
+     * operator_unauthorized 401 above, which would send the operator to reset a
+     * password that works.
+     */
+    @Test
+    void ourOwnReadAccountRefusedIsA502NeverTheOperators401() throws Exception {
+        AtomicInteger authorizations = new AtomicInteger();
+        stubOperatorPort.onAuthorize = (credential, accountId) -> {
+            authorizations.incrementAndGet();
+            return new OperatorAccountView(WALLET_EXTERNAL_ID, DepositAccountKind.SAVINGS, "KES",
+                    "000000017", "Tariro Moyo", "+263771234567");
+        };
+        stubPort.onListTransactions = query -> {
+            throw new CoreAuthException(CoreProvider.FINERACT,
+                    "Fineract refused the middleware AppUser a permission: "
+                            + "error.msg.not.authorized: User has no authority to READ savingsaccounts", null);
+        };
+
+        mockMvc.perform(get("/console/savings-accounts/{id}/statement", "17")
+                        .param("from", "2026-08-01").param("to", "2026-08-31")
+                        .header(HttpHeaders.AUTHORIZATION, OPERATOR_BASIC))
+                .andExpect(status().isBadGateway())
+                .andExpect(jsonPath("$.errorCode").value("core_banking_unavailable"))
+                .andExpect(jsonPath("$.detail").value(
+                        org.hamcrest.Matchers.containsString("Your credential was accepted")))
+                .andExpect(jsonPath("$.detail").value(
+                        org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("authority"))));
+
+        assertThat(authorizations.get()).isEqualTo(1);
     }
 
     @Test
@@ -427,7 +462,7 @@ class ConsoleStatementFlowIntegrationTest {
                 .andExpect(jsonPath("$.errorCode").value("operator_credentials_required"));
 
         stubOperatorPort.onAuthorizeLoan = (credential, loanId) -> {
-            throw new CoreAuthException(CoreProvider.FINERACT, "bad operator credential", null);
+            throw new CoreOperatorAuthException(CoreProvider.FINERACT, "bad operator credential", null);
         };
         mockMvc.perform(get("/console/loans/{id}/statement", "9")
                         .header(HttpHeaders.AUTHORIZATION, OPERATOR_BASIC))

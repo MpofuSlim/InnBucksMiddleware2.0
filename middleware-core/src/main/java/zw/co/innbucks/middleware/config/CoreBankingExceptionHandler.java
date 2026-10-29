@@ -9,6 +9,7 @@ import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import zw.co.innbucks.middleware.corebanking.exception.CoreAccountRestrictedException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreAuthException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreClientException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreServerException;
@@ -22,10 +23,24 @@ import java.net.URI;
  * Precedence sits above the global catch-all so a core failure never comes
  * out dressed as a bare 500.
  *
- * <p>Only {@link CoreClientException} carries upstream wording to the caller
- * (it is the "your request was refused" case — insufficient balance, unknown
- * account). Auth/server/transient failures are OUR ops problem; the customer
- * gets a generic retryable message and the detail goes to the logs.
+ * <p>Only {@link CoreClientException} carries its message to the caller (it is
+ * the "your request was refused" case — insufficient balance, unknown
+ * account), and this handler repeats that message as it is: it cannot tell a
+ * safe sentence from a leaky one. So adapters own the wording. On a deposit or
+ * withdrawal it may be the core's own (it concerns the caller's own account);
+ * on a TRANSFER it is never the core's — fixed copy, because the core's
+ * sentences there can name the recipient's account and state — save the one
+ * refusal the adapter makes before asking the core (an amount not in the
+ * cell's currency), which is our own sentence naming only the two currencies.
+ * Auth/server/transient failures
+ * are OUR ops problem; the customer gets a generic retryable message and the
+ * detail goes to the logs.
+ *
+ * <p>{@link CoreAccountRestrictedException} — the bank has blocked the
+ * account the movement debits — is the one client refusal that carries NO
+ * upstream wording: 403 {@code account_restricted} with fixed copy. Why an
+ * account is restricted (fraud hold, compliance, a dispute) is the bank's to
+ * tell, and the app needs only to stop retrying and point at support.
  */
 @Slf4j
 @RestControllerAdvice
@@ -33,6 +48,27 @@ import java.net.URI;
 public class CoreBankingExceptionHandler {
 
     private static final URI PROBLEM_TYPE = URI.create("about:blank");
+
+    public static final String ACCOUNT_RESTRICTED = "account_restricted";
+
+    /**
+     * The whole customer-facing story of a restriction. Also what a same-key
+     * retry of the refused movement replays (MovementService), so the two
+     * answers can never say different things.
+     */
+    public static final String ACCOUNT_RESTRICTED_DETAIL =
+            "Payments from this account are paused. Please contact support.";
+
+    @ExceptionHandler(CoreAccountRestrictedException.class)
+    public ResponseEntity<ProblemDetail> restricted(CoreAccountRestrictedException ex) {
+        // Most specific handler wins over rejected() below (Spring matches by
+        // exception depth). The upstream detail stays in the log.
+        log.info("Core refused a debit from a restricted account: {}", ex.getMessage());
+        return problem(HttpStatus.FORBIDDEN,
+                "Account restricted",
+                ACCOUNT_RESTRICTED_DETAIL,
+                ACCOUNT_RESTRICTED);
+    }
 
     @ExceptionHandler(CoreClientException.class)
     public ResponseEntity<ProblemDetail> rejected(CoreClientException ex) {
@@ -45,8 +81,11 @@ public class CoreBankingExceptionHandler {
 
     @ExceptionHandler(CoreAuthException.class)
     public ResponseEntity<ProblemDetail> upstreamAuth(CoreAuthException ex) {
-        // Our service credentials — an ops incident, never customer detail.
-        log.error("Core banking credentials rejected: {}", ex.getMessage());
+        // Our service credentials, or a permission they lack (e.g. a cell
+        // provisioned without customer deposits while the deposit switch is
+        // on) — an ops incident, never customer detail.
+        log.error("Core banking refused our service credentials or a permission they need: {}",
+                ex.getMessage());
         return problem(HttpStatus.BAD_GATEWAY,
                 "Service temporarily unavailable",
                 "We couldn't reach the banking system. Please try again shortly.",

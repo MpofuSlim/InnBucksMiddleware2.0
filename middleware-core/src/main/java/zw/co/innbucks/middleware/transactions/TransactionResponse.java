@@ -20,7 +20,9 @@ public record TransactionResponse(
                 example = "501", nullable = true)
         String coreTxRef,
 
-        @Schema(description = "Machine-readable failure code when status is FAILED.",
+        @Schema(description = "Machine-readable failure code when status is FAILED (a same-key retry of a "
+                + "refused movement), e.g. core_rejected, or account_restricted when the bank has blocked "
+                + "debits from the source account.",
                 example = "core_rejected", nullable = true)
         String failureCode,
 

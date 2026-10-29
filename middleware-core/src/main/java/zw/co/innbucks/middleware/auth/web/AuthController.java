@@ -32,11 +32,10 @@ public class AuthController {
                             examples = @ExampleObject(name = "Authenticated", value = """
                                     {
                                       "subject": "550e8400-e29b-41d4-a716-446655440000",
-                                      "country": "KE",
-                                      "kycTier": "TIER_2",
+                                      "country": "ZW",
+                                      "kycTier": "basic",
                                       "scopes": ["customer:read", "customer:write"],
-                                      "deviceHash": "d41d8cd98f00b204e9800998ecf8427e",
-                                      "nationalIdHash": "5d41402abc4b2a76b9719d911017c592",
+                                      "deviceHash": "sha256-hex-of-device-fingerprint",
                                       "authTime": "2026-05-21T08:30:00Z",
                                       "issuedAt": "2026-05-21T08:30:00Z",
                                       "expiresAt": "2026-05-21T08:40:00Z"

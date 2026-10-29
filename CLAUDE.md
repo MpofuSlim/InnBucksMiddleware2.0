@@ -93,7 +93,106 @@ Build: `./mvnw verify` at the root. Run locally:
 * Adapters map upstream failures to the core-neutral taxonomy
   (`CoreAuthException` / `CoreClientException` / `CoreServerException` /
   `CoreTransientException` / `CoreUnknownOutcomeException`); nothing upstream
-  of an adapter sees a core-specific exception or raw body.
+  of an adapter sees a core-specific exception or raw body. `CoreAuthException`
+  means the core refused OUR service credentials or a permission they lack —
+  never anyone else's. The operator port's refusal of an OPERATOR's credential
+  is its own type, `CoreOperatorAuthException`, so no handler can mistake one
+  for the other (slice 10b).
+* **A bank block on the account a movement DEBITS is
+  `CoreAccountRestrictedException`** (a `CoreClientException`, so the ledger
+  still marks it FAILED, coded `account_restricted`) → **403
+  `account_restricted`** with fixed copy ("Payments from this account are
+  paused. Please contact support.") — never the core's reason, on the first
+  answer or on a same-key replay. A block on ANY OTHER account (a transfer's
+  recipient, a deposit's own credit side) is not the caller's restriction and
+  stays `422 core_rejected`. Fineract (read from the fork): a withdrawal checks
+  BLOCK then DEBIT block, a deposit BLOCK then CREDIT block, a transfer runs
+  the source's withdrawal first; DEBIT/CREDIT block name only their own side,
+  but a full BLOCK has ONE code for both sides of a transfer, so
+  `FineractErrorMapper.accountRestriction` attributes it by
+  `errors[0].args[0].value` against the source's numeric id — and an
+  unattributable BLOCK is NOT called the sender's. **The recipient-side
+  refusal is FIXED copy — "The receiving account cannot accept this
+  payment." — with no Fineract code, sentence or account id** (an
+  unattributable BLOCK: "The banking system refused this payment."). A plain
+  `CoreClientException`'s message is repeated verbatim by the 422 detail, the
+  ledger's `failure_message` and every same-key replay, and nothing downstream
+  masks it, so the code would let any sender tell a full freeze from a
+  credit-only block on someone else's wallet with a free, repeatable probe.
+  The code and account id go to ONE adapter log line keyed by the movement's
+  ref. Whether even the fixed copy says too much (it still reveals the
+  recipient cannot receive) is the owner's call. Pinned by the restriction
+  cases in `FineractClientContractTest`, `AccountRestrictedResponseTest` and
+  `TransactionFlowIntegrationTest`.
+* **Every client refusal of a TRANSFER is fixed copy, not just a block's.**
+  A transfer is the one write that touches someone else's account, and
+  Fineract's sentences on that path name accounts by internal id and state
+  ("Savings account with identifier 12 does not exist", "Trying to transfer
+  from USD to ZWG"). `FineractErrorMapper.transferRefusal` (codes read from
+  the fork) answers insufficient balance — raised only by the SOURCE's
+  withdrawal leg, `handleDeposit` has no balance check — with "There is not
+  enough money in your account for this payment.", different currencies
+  (about the destination) with the recipient copy above, and EVERYTHING else
+  with "The banking system refused this payment." — including "account is
+  not active", which both legs raise with the same code and args, so it can
+  never be called the sender's. The two account reads before the write
+  (`FineractAdapter.transferSide`) follow the same rule: a destination
+  Fineract does not know reads exactly like one that cannot receive (no
+  existence probe, no id echoed). Ops get the Fineract code — never an
+  account id or sentence — in one INFO line keyed by ref. Deposits and
+  withdrawals touch only the caller's own account and keep Fineract's
+  wording. A permission Fineract refuses OUR AppUser on a transfer
+  (`error.msg.not.authorized`) is still `CoreAuthException` — 502, ledger
+  `core_auth_failed` — never the fixed-copy decline: `transferRefusal` only
+  rewords refusals of the customer's request. The one transfer refusal that is not fixed copy never reaches
+  Fineract: an amount not in the cell's currency is refused by the adapter in
+  its own words, naming only the two currencies (documented as the transfer
+  422's fourth detail). A same-key replay of a `core_auth_failed` / `core_unreachable` /
+  `core_server_error` row answers fixed copy too
+  (`MovementService.replayedFailureMessage`, deciding "ours" with the one
+  `LedgeredMovementExecutor.isOperationalFailure`): the stored message is
+  adapter detail the first (generic 502/503) answer never showed. Pinned by
+  `FineractTransferRefusalContractTest` and `MovementServiceRestrictionTest`.
+* **The account listing carries the bank's block**, so nothing pays a second
+  call to learn it. `DepositAccountRef` / `DepositAccountSummary` carry an
+  `AccountRestriction` (`NONE` / `DEBITS_BLOCKED` / `CREDITS_BLOCKED` /
+  `FULLY_BLOCKED`, never null). Fineract: the listing's savings `subStatus`
+  (read from the fork — ONE value, 400 block / 500 blockCredit / 600
+  blockDebit, everything else blocks nothing; blocking the second direction of
+  a half-blocked account stores 400, so "both directions" always arrives as a
+  full block; Gson writes the id AND the derived booleans, and either decides).
+  It is ADVISORY: a missing value is `NONE`, and the core still refuses every
+  write the block covers. `MovementService` refuses a withdraw/transfer whose
+  SOURCE the ownership listing shows debit- or fully blocked with the same
+  403 `account_restricted` — before the step-up token is spent, the
+  idempotency claim, any ledger row or core write — EXCEPT when the key
+  already has a ledger row: a same-key retry of a payment that ran before the
+  block must get its recorded outcome, not a "restricted" that reads as
+  "failed". No ledger row records these, so they are counted on
+  `innbucks.transactions.restricted_refusals{type}`. **Accepted trade-off:**
+  the step-up PRESENCE check still runs first (PR #53: a tokenless
+  high-value attempt costs no core call), so a blocked source at or above the
+  threshold is told `account_restricted` only on the token-bearing retry,
+  after one SMS approval (bounded by the per-customer step-up allowance,
+  slice 11). Checking the block first would cost every high-value payment a
+  second listing to spare a rare blocked customer one SMS, and a full block
+  signs the customer out anyway. **The per-tier limits (slice 11) run before
+  both, for the same reason:** the advisory limit check is local and the
+  block is only known from the listing, the first core call on the path. So
+  a blocked source whose payment is ALSO over a limit is answered 422
+  `limit_exceeded`, not `account_restricted`. Reading the block first would
+  have to precede the limits, and so the step-up presence check, putting a
+  core call on every limit refusal and every token-less high-value first
+  attempt (`MovementServiceTest` pins that a limit refusal makes none). The
+  limit answer is still true — the payment is over the limit, block or no
+  block — and costs no SMS and no state; the next attempt within the limits
+  meets the listing and gets `account_restricted`. What it does mislead on:
+  the refusal's `remainingMinor` / `nextTier` describe a payment the block
+  will refuse anyway. Pinned by the
+  sub-status cases in `FineractAccountListingContractTest`,
+  `MovementServiceRestrictionTest`, `TransactionFlowIntegrationTest` and, for
+  the order against the limits, the `aBlockedSource*` cases in
+  `MovementServiceTest`.
 * **A maker-checker-PARKED command is UNKNOWN, never a success.** Fineract
   answers a parked command with a success-shaped
   `200 {"commandId":N,"rollbackTransaction":true}` and no resourceId/echo —
@@ -114,12 +213,19 @@ Build: `./mvnw verify` at the root. Run locally:
   (slice 5 — flip in the staged order in `.env.example`). Issued by
   `POST /auth/login` (MSISDN + Argon2id PIN → 10-min access + 30-day
   rotating opaque refresh, family revocation on replay AND on device
-  mismatch — the refresh token only rotates on the device it was issued to).
+  mismatch — the refresh token only rotates on the device it was issued to;
+  a PIN set or reset revokes EVERY family the customer holds, and so does a
+  FULL bank block on the wallet, at the next refresh).
   `sub` = customer UUID; claims: `country`, `kyc_tier`, `scopes`, `did`,
-  `nid_hash`, `auth_time`. High-value withdrawals/transfers additionally
-  need a step-up SMS approval bound to the exact transaction
-  (`X-Step-Up-Token`; `innbucks.stepup.*`), and every withdrawal/transfer is
-  checked against the caller's per-tier payment limits first (slice 11).
+  `auth_time` — exactly these, pinned by `JwtIssuerClaimsTest`. **No
+  national-ID derivative**: `nid_hash` (the keyed hash) was dropped because
+  nothing server-side read it and the token is readable by whoever holds it,
+  so it was a stable personal identifier on the device and in every log that
+  captures a bearer. Do not add it back; the app must not rely on it.
+  High-value withdrawals/transfers additionally need a step-up SMS approval
+  bound to the exact transaction (`X-Step-Up-Token`; `innbucks.stepup.*`),
+  and every withdrawal/transfer is checked against the caller's per-tier
+  payment limits first (slice 11).
 * **SMS/notifications ride the InnBucks notification gateway**
   (`NOTIFY_PROVIDER=innbucks-gateway` + `NOTIFY_API_*` — same platform
   gateway as the ticketing fleet; email surface pinned for later), with an
@@ -148,10 +254,22 @@ Build: `./mvnw verify` at the root. Run locally:
   `OTP_HMAC_SECRET`, `AUDIT_HMAC_SECRET` (+ non-blank `DATASOURCE_PASSWORD`).
   Generate each: `openssl rand -base64 48`. All distinct values.
 * **Low-entropy secrets are HMAC-keyed, never bare-hashed**: OTP codes
-  (`OtpHasher`), national IDs (`NationalIdHasher`). PINs: Argon2id
+  (`OtpHasher`), national IDs (`NationalIdHasher`), and the idempotency
+  request fingerprint (`IdempotencyFingerprinter`), because it covers
+  `/register`'s body, national ID included. PINs: Argon2id
   (`PinHasher`). Refresh tokens: SHA-256 of a high-entropy opaque secret.
-  Anything handed to `IdempotencyService` (whose fingerprint is UNKEYED) carries
-  such an HMAC, never the low-entropy value itself (slice 12).
+  The fingerprint's key is a SUB-KEY of `NATIONAL_ID_HMAC_KEY`
+  (`HMAC(key, 0xFF ‖ label)`), not a new secret: it protects what that key
+  already protects, and that key is never casually rotated. The 0xFF is the
+  domain separation — UTF-8 never contains it, so no "national ID" a
+  registrant types can make `NationalIdHasher` store the sub-key; a plain-text
+  label could. Rotating `NATIONAL_ID_HMAC_KEY` therefore also re-keys
+  in-flight fingerprints: a same-key retry within the TTL answers 422 (never a
+  second execution) — drain `idempotency_record` (one TTL) first. Stored as
+  `v2:` + base64url (46 chars, fits the VARCHAR(64)); an unprefixed value is
+  the pre-keyed SHA-256 hex and still matches until it expires.
+  The KYC path does not lean on that key: what it hands `IdempotencyService`
+  carries an HMAC, never the low-entropy value itself (slice 12).
 * **KYC data is sealed, and its key is kept apart from it** (slice 12): every
   typed ID, address and photo is an AES-256-GCM envelope (`KycCipher`: key-id
   prefix, random nonce, row/column AAD) under keys from a key FILE that is
@@ -179,11 +297,178 @@ Build: `./mvnw verify` at the root. Run locally:
   `innbucks.audit.chain.broken` (ticket). This chain carries the real customer
   identity per money movement — it is the compensating control for Fineract
   attributing everything to the service account. Launch gate, not polish.
+* **A PIN change signs the customer out everywhere, and a rotation in flight
+  cannot outrun it.** `PinService` revokes every refresh family in the PIN
+  change's own transaction (`RefreshTokenService.revokeAllSessions`,
+  `MANDATORY`; audited on the `PIN_SET`/`PIN_RESET` row as
+  `refreshTokensRevoked`). Two halves make it hold: the revoke takes the
+  customer row `FOR NO KEY UPDATE` and every rotation takes it `FOR SHARE`
+  before minting (they conflict; neither blocks the KEY SHARE behind FK
+  INSERTs), so the revoking UPDATE either sees the successor or the rotation
+  sees the revocation — without it, a successor committed after the revoking
+  statement's snapshot survives, and a client refreshing in a loop sits in
+  that window most of the time. And rotation marks the presented row with a
+  guarded `markReplaced` (`… AND revoked_at IS NULL AND replaced_by_jti IS
+  NULL`), never a whole-row `save()`, which wrote the stale `revoked_at =
+  NULL` it had read back over a committed revocation (logout included). The
+  `replaced_by_jti` half makes two OVERLAPPING rotations of one token a
+  replay, exactly as they are one request apart: both read the row unrotated,
+  the second's UPDATE waits on the first's row lock, and Postgres re-evaluates
+  the WHERE on the committed row — guarded on revocation alone it still
+  matched, both answered 200, and the family forked into two live chains with
+  no `REFRESH_REPLAY_DETECTED` (the theft signal silent for an attacker racing
+  the real holder). On 0 rows rotation re-reads the row: revoked → invalid;
+  rotated → replay (family revoked, the winner's successor included;
+  audited; stamped with the time AFTER the lock wait, so the successor is
+  never revoked before it was issued). **The app must single-flight
+  `/auth/refresh`**: before this guard, overlapping refreshes forked and both
+  kept a session; now they sign the customer out, and the winner's 200
+  carries tokens that are already revoked. The Swagger on `/auth/refresh` says so;
+  tell the app developer before deploying a build with this guard.
+  Access tokens are NOT revoked — see the deferred list. Pinned by
+  `PinResetSignOutIntegrationTest` (both interleavings, forced with an open
+  transaction), `RefreshRotationRaceIntegrationTest` (the overlapping double
+  submit, forced the same way) and `RefreshTokenServiceTest`.
+* **A FULL bank block ends the customer's sessions at their next refresh**
+  (`AccountBlockSessionGuard`, from `LoginController.refresh`). Staff
+  restrict a customer by blocking the wallet in the back office; the core
+  stops the money at once, and the next refresh (about one access-token
+  lifetime) reads the block from the account listing, revokes EVERY family
+  (`revokeAllSessions`, reason `account_blocked`, in its own short
+  transaction), audits `REFRESH_BLOCKED_ACCOUNT_RESTRICTED`
+  (`refreshTokensRevoked`) and answers 403 `account_restricted`; nothing is
+  rotated. **Sequence: read the token, read the core, THEN spend the
+  token.** `RefreshTokenService.liveSessionCustomer` is a single read (no
+  lock, nothing spent) that lets only a live token (known, unrevoked,
+  unexpired, not a replay, on its own device) cost a core read or learn of a
+  block; the core is read with no transaction open; only then does `rotate()`
+  spend the token, re-checking everything under its lock — it stays the ONE
+  place a replay or device mismatch revokes a family. What the order buys is
+  narrow: nothing is rotated on a full block, and a refresh that fails in the
+  guard's own path (the revoke transaction cannot commit, say) leaves the
+  token unspent for the client to present again. **It does NOT protect a
+  client that gives up waiting**: nothing stops the refresh when the client
+  does, so `rotate()` still spends the token after a client timeout or a
+  dropped connection, the successor is lost with the response, and the retry
+  with the old token is a replay that revokes the family — whichever order
+  the read and the rotation run in, and exactly as any lost refresh response
+  always has. **The bound is the only thing keeping a slow core from signing
+  customers out**: a refresh answers within `…timeout` plus a rotation, which
+  must stay well under the app's HTTP timeout — never raise `…timeout` towards
+  it on the strength of the ordering. **Latency is bounded as well as errors**: the read runs off the request
+  thread, at most `innbucks.auth.refresh-block-check.max-concurrent-reads` (8)
+  at once and NEVER queued, and the refresh waits at most `…timeout` (2s) —
+  far under a mobile client's HTTP timeout. Without it, one hung listing (the
+  adapter retries a 10 s read three times, and the breaker opens only after
+  calls FINISH) held each refresh's Tomcat thread ~30 s, enough to starve
+  `/auth/login` and every other endpoint during a Fineract stall. A read past
+  the timeout is ABANDONED, never interrupted (an interrupt would count a
+  merely-slow call as a failure on the breaker payments share) and never
+  cancelled (it keeps its slot until the core answers); with every slot busy
+  a refresh skips the check at once, so the extra load on a struggling core
+  is bounded by the slots. **A slot is a `Semaphore` permit that the read
+  gives back as its own last act**, before its future completes, over a
+  thread pool that never refuses a task — so `busy` means exactly "every slot
+  holds an unfinished read". A read that never reaches a thread gives its
+  permit back at once, at most once (`releaseOnce`): the pool lets an
+  `OutOfMemoryError: unable to create native thread` out of `submit`, and a
+  permit lost that way is never returned — lose them all and every refresh
+  is `busy`, the block check off until a restart, with Fineract healthy.
+  Never bound it with a fixed pool over a
+  `SynchronousQueue` + `AbortPolicy`: that pool also refuses the read made just
+  after the previous one FINISHED (its thread is not yet back waiting), which
+  skipped the block check with the slot free on a few percent of back-to-back
+  refreshes and made the MDC test flaky in CI.
+  What remains is the exposure every single-use rotation has: a lost refresh
+  response costs the session. A client whose own timeout is shorter than the
+  server's answer, and which retries the same token, is a replay whether the
+  retry lands after the first rotation or overlaps it (see the guarded
+  `markReplaced` above) — as before this check existed, only with up to the
+  budget added to how long a refresh can take. A DEBIT- or CREDIT-only block does NOT
+  end sessions: it is the bank's payment pause, and the customer may still
+  need balances, statements and incoming money — signing out would make a
+  pause a lockout. **Fails OPEN** on every read failure (Fineract down,
+  breaker open, our credential refused, a bad listing) and on every slow one:
+  the money is already blocked in the core, and failing closed — or waiting —
+  would sign customers out on a blip. Counted on
+  `innbucks.auth.refresh.block_check{outcome}` (`none`, `debits_blocked`,
+  `credits_blocked`, `fully_blocked`, `unmapped`, `read_failed`,
+  `timed_out`, `busy`; all registered at 0); a sustained `read_failed`,
+  `timed_out` or `busy` means blocks are not ending sessions. A customer with
+  no core mapping is skipped. **Stated limits:** `/auth/login` is not gated,
+  so a blocked customer can sign in again and keeps one access-token lifetime
+  of read access until that session's first refresh; and an access token
+  already issued lives out its TTL. Pinned by `AccountBlockSessionGuardTest`
+  (incl. no transaction during the core read, one around the revoke, the
+  bounded wait, busy only when every slot holds an unfinished read — 500
+  back-to-back refreshes on one slot, never one `busy` — no interrupt, MDC
+  carried),
+  `RefreshTokenServiceTest` (the liveness read spends and revokes nothing),
+  `RefreshAccountRestrictedResponseTest` (the order; a fault in the guard path
+  rotates nothing) and `RefreshAccountBlockIntegrationTest` (the token is
+  unspent while the core is read; a hung core answers within the budget).
 * **Idempotency claim-row**: `IdempotencyService` claims the key with
   `INSERT … ON CONFLICT DO NOTHING` (status 0 sentinel) BEFORE running work —
   concurrent same-key requests can never double-execute. Replays return the
   ORIGINAL stored status. Same key + different body → 422; fresh claim in
   flight → 409; stale claim (>60s) taken over.
+* **`POST /transactions/deposit` is an unfunded cash-in, shut by TWO
+  independent locks, both closed by default — the core's once the cell has
+  been provisioned by a `provision-cell.sh` that carries it.** A cell
+  provisioned before the lock keeps the permission until the script runs there
+  again: a one-time rollout step, not an image roll (Operational conventions;
+  runbook §4 "One-time rollout"). (1) The middleware's switch,
+  `innbucks.transactions.deposit.enabled` / `TRANSACTIONS_DEPOSIT_ENABLED`
+  (`DepositGate`, below). (2) The core's permission: `provision-cell.sh` grants
+  the write AppUser `DEPOSIT_SAVINGSACCOUNT` only when the box sets
+  `MIDDLEWARE_CUSTOMER_DEPOSITS=1` in its gitignored `deploy/fineract/.env`, and
+  otherwise REVOKES it, so Fineract refuses the deposit even when (1) is wrong.
+  The second lock exists because the first is one line in a gitignored `.env`
+  that a copy from staging would carry to production. Its opt-in is per box,
+  never in a cell file: `cell.zw.env` is shared by staging and production, and
+  the script refuses to run while any `deploy/cells/*.env` assigns it, or on
+  any value but `1`/`0`/unset. A cell file cannot reach the lock another way
+  either: step 6b refuses any `BANK_ROLE_GRANTS` entry naming
+  `innbucks-mw-read`/`-write` (the run fails until it is removed). Step 6f
+  proves the lock from what Fineract will enforce (every role the user holds;
+  `ALL_FUNCTIONS` counts), and runs LAST of the role steps: it used to run
+  before 6b, which could grant the code back after it had printed `LOCKED`. The
+  smoke proves it with a zero-amount deposit the core must refuse, and a lock
+  that is not as asked FAILS the run after every other step has run. With (1)
+  on and (2) closed the app gets `502 core_banking_unavailable` and a
+  `FAILED`/`core_auth_failed` ledger row, never `UNKNOWN` (see the
+  `FineractErrorMapper` note in slice 3a). Staging opens both; production
+  neither. Selftest cases in `provision-selftest.sh`.
+  **The switch, in detail.** Every customer token carries `customer:write`, and
+  the endpoint books a plain savings deposit (the cell's non-cash wallet payment
+  type) of any amount into the caller's own wallet: no source of funds, no
+  step-up, no maximum, and the wallet product's accounting rule is None, so no
+  GL trail. Open, any customer mints money and then spends it, and no outgoing
+  limit means anything. Off, it answers `403 deposit_disabled` as the FIRST
+  statement of `MovementService.deposit`, ahead of the per-customer
+  `/transactions/*` request budget (slice 11), the customer read, the
+  ownership call, the idempotency claim, the ledger row and the core. Ahead of
+  the budget on purpose: the refusal costs nothing, and charging it to the one
+  budget all three endpoints share would let an app that still calls deposit on
+  a switched-off cell eat the customer's withdrawals and transfers (pinned by
+  `MovementServiceTest.aSwitchedOffDepositSpendsNoneOfThePaymentBudget`). Like
+  `step_up_required`, a refusal is a counter
+  (`innbucks.transactions.deposit.refused`, registered at 0) and an INFO line,
+  never an audit row. The property is a primitive `boolean`, so a cell whose
+  config never names it is OFF. **Never on where real money is held.** Staging
+  turns it on (testers fund wallets; the runbook smoke deposits), and every
+  boot under a deployment profile then logs a WARN banner
+  (`ProductionSecretsGuard.isDeployment`, the guard's own notion, empty set
+  included). Production stays off until a FUNDED cash-in rail exists, and that
+  rail is a new design, never this flag flipped. **The packaged files are the
+  deployed default, and no Spring test reads them**: the test suite turns the
+  switch on in `middleware-app/src/test/resources/application.yaml`, which
+  REPLACES the main file on the test classpath. So `PackagedDepositDefaultTest`
+  reads `src/main/resources` from disk and fails if the default, or any
+  packaged profile but `dev`, resolves ON with the variable unset. A staging
+  cell turns it on with the variable, never a packaged file. Also pinned by
+  `DepositGateTest`, `TransactionControllerDepositSwitchTest` and
+  `DepositDisabledFlowIntegrationTest`.
 * **Credential-spray detection** (`anomaly/AuthAnomalyDetector`): the
   brute-force shape the other two controls are blind to — one source trying a
   FEW PINs against MANY accounts. Per-account lockout fires at 7 failures (so
@@ -392,9 +677,13 @@ Fineract does NOT mean "not authorised."** `PlatformDataIntegrityExceptionMapper
 and `PlatformDomainRuleExceptionMapper:53` both map to `Status.FORBIDDEN`, so a
 SQL failure and a business-rule veto are indistinguishable from a real permission
 denial by status alone — read `errors[].userMessageGlobalisationCode` from the
-body instead. (This is why `FineractErrorMapper` already splits Fineract's 403
-into `CoreClientException` for domain vetoes vs auth; the same care is owed
-anywhere else a 403 is interpreted.) Report parameters ride a `R_<variable>`
+body instead. (`FineractErrorMapper` splits Fineract's 403 on exactly that:
+the permission-denial code `error.msg.not.authorized` is auth, everything else
+a domain veto. It used to look for the words "permission"/"authorization",
+which Fineract's real denial body never contains — "User has no authority to:
+X" — so every permission denial read as a veto and reached the customer as
+`422 core_rejected` naming the permission. The same care is owed anywhere else
+a 403 is interpreted.) Report parameters ride a `R_<variable>`
 prefix that `AbstractReportingProcessService:36-47` strips — anything unprefixed
 is silently ignored — and `ReportParameterData` does NOT expose
 `parameter_variable`, so the name→variable map has to come from
@@ -443,6 +732,20 @@ reason to copy the rule rather than fork it.
 * Containers pin `-Duser.timezone=UTC` in the Dockerfile ENTRYPOINT.
 * Single-replica per cell assumption (in-memory rate limits, unlocked
   `@Scheduled` jobs) — wrap with ShedLock before ever scaling horizontally.
+* **The deposit switch is per environment, and so is the core's lock.**
+  Staging's `.env` carries `TRANSACTIONS_DEPOSIT_ENABLED=true` AND its
+  `deploy/fineract/.env` carries `MIDDLEWARE_CUSTOMER_DEPOSITS=1`; production's
+  carry neither, its boot must log `Customer deposits: OFF`, and its
+  `provision-cell.sh` step 6f must print `LOCKED`. On a cell rolling to the
+  first image with the switch, add the staging line BEFORE the roll, or staging
+  stops taking deposits on that roll; likewise add the opt-in before
+  re-provisioning staging, because a run without it revokes the permission.
+  Re-provisioning production with no change closes the core lock, and **that
+  re-provision is REQUIRED, once, on every cell provisioned before the lock**:
+  the permission lives in Fineract's roles, so rolling the image leaves it in
+  place and the switch stays the only lock there. Done means the run exits 0
+  and 6f prints `LOCKED`. Runbook §4 ("Customer deposits at the core", "One-time
+  rollout") and §5.
 
 ## Environments (EC2, af-south-1)
 
@@ -493,6 +796,16 @@ rollback is then re-pinning the previous tag and re-running the same two
 commands, with the exact bytes that were running before. Full procedure
 (TLS, truststore, edge, smoke) in `docs/fineract-cell-runbook.md`.
 
+**When the merge touches `deploy/fineract/provision-*.sh`, the image roll is
+not the whole deploy.** Fineract's roles and permissions change only when
+`provision-cell.sh` runs on the cell, so the post-merge commands must include
+that run, per cell, with what it must print. The customer-deposit lock is the
+standing case: after the merge that introduced it, every non-staging cell needs
+one re-provision with nothing new in `deploy/fineract/.env` (exit 0, 6f
+`LOCKED`), and staging needs `MIDDLEWARE_CUSTOMER_DEPOSITS=1` added first (6f
+`ON`). Until a cell has had that run, its core lock is open (runbook §4,
+"One-time rollout").
+
 ## Slice progression
 
 1. **Scaffold + core port** — multi-module build; ported OradianMiddleware's
@@ -535,8 +848,12 @@ commands, with the exact bytes that were running before. Full procedure
    (the taxonomy: write 5xx / HTTP 425 / read-timeout-mid-write →
    `CoreUnknownOutcomeException` because the command reached the core; only
    connect-phase failures → `CoreTransientException`; Fineract's 403
-   domain-rule vetoes → `CoreClientException`, permission-flavoured 403 →
-   auth), `FineractResilience` (breaker both ways, retry READS ONLY),
+   domain-rule vetoes → `CoreClientException`, a 403 carrying
+   `error.msg.not.authorized` (our AppUser lacks a permission) →
+   `CoreAuthException`: an ops fault, 502 generic to the customer, ledger
+   `FAILED`/`core_auth_failed`, and a same-key replay of that row shows a
+   generic message, never the stored operator detail), `FineractResilience`
+   (breaker both ways, retry READS ONLY),
    `FineractAdapter` (capabilities SERVER_SIDE_DEDUP +
    CLIENT_ASSIGNED_EXTERNAL_ID; savings saga create→approve→activate with
    per-leg keys `<key>:create|approve|activate`, every leg resumable by
@@ -578,6 +895,8 @@ commands, with the exact bytes that were running before. Full procedure
    /me/profile` + `GET /me/accounts` (local identity merged with core
    names/balances; missing core mapping → 404 customer_not_registered),
    `POST /transactions/{deposit|withdraw|transfer}` (JWT `customer:write`;
+   deposit is now OFF by default, an unfunded cash-in — see Security
+   invariants;
    ownership checked against the CORE's account list BEFORE any claim/write —
    source for withdraw/transfer, target for deposit; key namespaced per
    customer → becomes idempotency_record key, ledger external_ref AND the
@@ -607,7 +926,13 @@ commands, with the exact bytes that were running before. Full procedure
    ARRAYS from the legacy Gson serializer (ISO strings also accepted).
    `CoreBankingExceptionHandler`:
    `CoreClientException` → 422
-   `core_rejected` (upstream wording allowed), auth/server/transient → 502/503
+   `core_rejected`, carrying the adapter's message verbatim — the core's own
+   wording on a deposit or withdrawal (the caller's own account), NEVER the
+   core's on a transfer (fixed copy, or the adapter's own cell-currency
+   refusal; see "Every client refusal of a TRANSFER is fixed copy" above) —
+   except its
+   `CoreAccountRestrictedException` refinement → 403 `account_restricted`
+   (fixed copy), auth/server/transient → 502/503
    generic (ops detail stays in logs). Amounts cross the API in MINOR units.
    Contract pinned by `RegisterFlowIntegrationTest` +
    `TransactionFlowIntegrationTest` (stub port, real Postgres).
@@ -832,16 +1157,19 @@ commands, with the exact bytes that were running before. Full procedure
    reviewable as a diff, sourced before `provision-cell.sh`, applied by its
    steps 6b–6e additively and idempotently. Deliberately NOT configurable is
    **6e's assertion that the middleware's own permission codes are never
-   `can_maker_checker`** — it is derived from the script's `READ_PERMS`/
-   `WRITE_PERMS` arrays (so a new middleware permission is protected
-   automatically, never a copied list that drifts), it runs on EVERY provision
+   `can_maker_checker`** — it is derived from what step 5 GRANTS (`READ_PERMS`
+   plus the write role's grant list, so a new middleware permission is
+   protected automatically, never a copied list that drifts; and
+   `DEPOSIT_SAVINGSACCOUNT` only on a box opted in to customer deposits, so
+   production's bank may dual-control teller deposits), it runs on EVERY provision
    even on a cell that never enables maker-checker (the flag can be set from
    the console too), and it unflags + screams rather than merely warning. A
    cell file can widen what the bank dual-controls; it can never switch off the
    thing that keeps the customer rail moving. Ordering inside 6e is the rest of
    the safety argument: flag the bank's tasks → assert → only then flip the
    global switch. Parsing + set arithmetic are in `provision-lib.sh`, covered
-   by `provision-selftest.sh` (no cell, no network, 25 cases); the
+   by `provision-selftest.sh` (no cell, no network, 123 cases, run by CI on
+   every push so its guards on the committed cell files gate a merge); the
    `_CHECKER`-sibling case there is why the check is `grep -xF` and never a
    substring match — every protected code has a `<CODE>_CHECKER` sibling whose
    flagging is normal and harmless. **The script runs `set -euo pipefail`, so a
@@ -860,6 +1188,26 @@ commands, with the exact bytes that were running before. Full procedure
    ("Test Internal Auditor" vs the cell's real "TEST Internal Audit"). Role
    names in a cell file come from the cell's own `GET /v1/roles`, and a grant
    to a role with no members is worth nothing — check `GET /v1/users` too.
+
+   **Not every provisioning choice is market policy.** The customer-deposit
+   opt-in differs between two boxes of ONE market, so it is a per-box value
+   (`deploy/fineract/.env`), and the script refuses a cell file that sets it
+   (Security invariants). It is also the one revoke the script makes, and only
+   on the middleware's own role. **The middleware's two roles are code, not
+   policy**: their codes (`READ_PERMS`/`WRITE_PERMS`) and names live in
+   `provision-lib.sh`, 6b refuses a cell-file grant to either and fails the run,
+   and the selftest fails on a committed one. **A check must read the state the
+   run leaves behind**: the deposit-lock verification (now 6f) once ran right
+   after step 5, so a later 6b grant reopened the lock after it had printed
+   `LOCKED`, exit 0. Lib cases cannot see that kind of bug, so the selftest also
+   pins the script's WIRING by grep: which list reaches `ensure_role`, that the
+   revoke is sent, that 6e's set and 6b's refusal come from the lib, and that no
+   role or user write follows 6f. Each check needs a positive match, so a
+   reworded line fails until its check is updated, never passes vacuously. **A selftest of `set -e` behaviour must not
+   put the subshell on the left of `||`**: bash suspends errexit for anything
+   whose status `||`, `&&` or `if` tests, so `$( (set -e; …) || echo stopped )`
+   can never stop and the case passes vacuously. Capture the output and test
+   that instead (the `parse_deposit_opt_in` case does).
 
    **Two Fineract facts the step depends on, verified in the fork 2026-09-18.**
    (1) **Fineract SEEDS three of our write permissions maker-checkerable** —
@@ -918,7 +1266,9 @@ commands, with the exact bytes that were running before. Full procedure
    refuse any of them. The counter is now honest (the account does lock) but the
    ladder's RATE is not enforced *within* a burst. (b) **PIN-changed-mid-login**
    — a login racing a PIN reset can still accept the OLD `pin_hash` it read
-   before hashing. Both close with a `SELECT … FOR NO KEY UPDATE` re-read of the
+   before hashing (the reset's sign-out-everywhere does not catch it: the
+   family that login mints lands AFTER the revocation, so it is simply new).
+   Both close with a `SELECT … FOR NO KEY UPDATE` re-read of the
    row inside the settling statement's transaction. It MUST be `FOR NO KEY
    UPDATE`, not `FOR UPDATE`: `refresh_token.customer_id` and
    `ledger_transaction.customer_id` both FK to `customer`, so their INSERTs take
@@ -999,6 +1349,16 @@ commands, with the exact bytes that were running before. Full procedure
      still ride our read-only AppUser; only the account authz read carries the
      operator's credential. Fineract serves both search path variants from the
      same method (read from the fork, `SavingsAccountTransactionsApiResource`).
+   - **Whose credential was refused decides the answer.** The 401
+     `operator_unauthorized` is for the OPERATOR's credential only
+     (`CoreOperatorAuthException`, from `FineractOperatorGateway`). A refusal
+     of OUR read AppUser during the transaction reads (a permission missing
+     from its role, a wrong password in `.env`) is `CoreAuthException` and
+     answers `502 core_banking_unavailable` "Your credential was accepted…",
+     logged at ERROR. When both were `CoreAuthException`, a provisioning gap on
+     our side told the operator their working password had been rejected.
+     Pinned by `ConsoleStatementAuthSplitTest` (standalone) and
+     `ConsoleStatementFlowIntegrationTest`.
    - **Throttled BEFORE the credential is touched** — the endpoint would
      otherwise be an operator-password oracle. Keyed per source ADDRESS
      deliberately (per-operator keying would let a spray widen itself by
@@ -1162,9 +1522,16 @@ commands, with the exact bytes that were running before. Full procedure
      binding check to a concurrent payment; the approval is bound to the amount,
      so any retry re-approves anyway, and the money is never wrong.
    - **Order on withdraw/transfer:** per-customer request budget → load
-     customer → tier (ONCE) → advisory limits → step-up presence → ownership →
-     step-up enforce → idempotency claim → `openPending` + binding check → core.
-     Deposits: no limits.
+     customer → tier (ONCE) → advisory limits → step-up presence → ownership
+     listing (+ the early 403 `account_restricted` on a blocked source, unless
+     the key already has a ledger row — see "The account listing carries the
+     bank's block") → step-up enforce → idempotency claim → `openPending` +
+     binding check → core. The two LOCAL refusals come before the first core
+     call, so a blocked source over a limit is told `limit_exceeded`; the
+     block is reported on the next attempt within the limits.
+     Deposits: the deposit switch (`DepositGate`, Security invariants) → the
+     request budget → customer → ownership → claim → `openPending` with
+     `PendingReservationGuard.NONE` → core; no limits.
    - **The tier is read ONCE per request through `KycTierResolver`** and that one
      `KycTierResolution` goes to step-up and both limit checks — never re-read,
      never the token's `kyc_tier` claim. Today it is the local row the request
@@ -1235,9 +1602,12 @@ commands, with the exact bytes that were running before. Full procedure
      this middleware; teller, console, payroll and journal movements are not
      counted. A transfer to the caller's own other account counts like any
      other (only the wallet is app-visible today; counting is the conservative
-     reading). Outflow limits mean little while `POST /transactions/deposit`
-     lets a customer credit their own wallet unfunded — an owner decision
-     outside this slice.
+     reading). Outflow limits mean little on a cell where
+     `POST /transactions/deposit` is switched ON, because a customer can then
+     credit their own wallet unfunded and spend it in limit-sized pieces; that
+     is why the switch is off by default and the core holds a second lock
+     (Security invariants, "unfunded cash-in"). Staging, which opens both, is
+     the one place the limits can be walked around this way.
    - **Never compute a limit from the in-memory `RateLimiterService`**: buckets
      forget everything on restart and are per replica. The ledger is the only
      source of usage, which is also why these limits stay correct if the cell
@@ -1291,8 +1661,9 @@ commands, with the exact bytes that were running before. Full procedure
      the step-up endpoints too.
    - **`/transactions/*` has a per-customer request budget**
      (`RATE_LIMIT_CUSTOMER_PAYMENT_*`, 10 / min, first thing in every
-     `MovementService` method). A count limit is not a rate limit: refused and
-     failed attempts are free against it.
+     `MovementService` method — in `deposit` second, after the deposit switch,
+     whose refusal never spends it). A count limit is not a rate limit: refused
+     and failed attempts are free against it.
    Contract pinned by `PaymentLimitsPolicyLoaderTest` (every refusal rule,
    overrides incl. lowering that never changes an outcome and the tier WARN, the
    empty-env binding, the step-up WARN), `PaymentLimitsPolicyAuditorTest`,
@@ -1417,10 +1788,10 @@ commands, with the exact bytes that were running before. Full procedure
      last 3 (`63•••••••X18`); a number
      that would leave fewer than five hidden shows only its last 3.
    - **The idempotency fingerprint carries HMACs, never the number or the
-     address** (`KycService.CreateFingerprint`): `IdempotencyService`
-     fingerprints with an unkeyed SHA-256 and keeps it a day, and an unkeyed
-     hash of an ID is a brute-force from the ID. Keys are namespaced
-     `kyc-submission:<customer>`.
+     address** (`KycService.CreateFingerprint`): `IdempotencyService` keeps
+     its fingerprint a day, and this path does not depend on that
+     fingerprint being keyed: a hash of a bare ID number is a brute-force
+     from the ID. Keys are namespaced `kyc-submission:<customer>`.
    - **Photos** (`KycImageProcessor`): a JPEG by its BYTES, never the
      Content-Type. `JpegStructure` walks the markers before any decoder sees
      the bytes: whole (EOI present — the JDK decoder answers truncation with a
@@ -1649,7 +2020,14 @@ benign only if you actually rotated it.
 apart. `backup-cell.sh` refuses to run if `.env` holds a KYC key value or the
 mounted key file sits inside the repo or the backup root.
 
-Deferred (documented, not forgotten): KMS/Secrets Manager custody + rotation
+Deferred (documented, not forgotten): **revocable access tokens** — a PIN
+reset ends every refresh family, but an access token already issued is a
+self-contained JWT and keeps working until it expires (`JWT_ACCESS_TTL`, 10
+minutes); cutting it short needs a per-customer `token_version` claim checked
+on every request. **Gating `/auth/login` on a full bank block** — today only
+refresh reads it, so a blocked customer can sign in for one access-token
+lifetime of read access; gating login costs a core read per sign-in and a new
+403 the app must handle (owner's call). KMS/Secrets Manager custody + rotation
 runbook (the KYC key file included, plus a re-seal job so an old KYC key can be
 retired); moving KYC photos to S3 + SSE-KMS behind `KycFileStore` (slice 12 says
 when); whether an expired or rejected round's sealed ID number should be
@@ -1658,4 +2036,6 @@ dropped like its files (compliance); per-customer namespacing of inbound Idempot
 (slice 11 ships the mechanism dormant, pending compliance) and moving the
 step-up thresholds into the same policy file; **offsite/automated** backup scheduling (the scripts are manual and write to the
 box — copying them off is still an operator step); ShedLock;
-PENDING_VERIFICATION expiry job.
+PENDING_VERIFICATION expiry job; drop `IdempotencyFingerprinter`'s legacy
+(unprefixed SHA-256) match once a full idempotency TTL has passed since the
+keyed fingerprint deployed on every cell.

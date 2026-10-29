@@ -93,9 +93,37 @@ public final class FineractDtos {
      * and they are deliberately not modelled here — Fineract maps them with
      * {@code getBigDecimalDefaultToNullIfZero}, so a zero balance becomes null
      * and Gson drops the key. Money must come from the per-account read.
+     *
+     * <p>{@code subStatus} is the bank's block, read from the same mapper
+     * ({@code sa.sub_status_enum} through {@code SavingsEnumerations.subStatus},
+     * which turns a NULL column into NONE) — so it is always present on this
+     * endpoint. Absent is still tolerated and means "no block reported".
      */
     public record SavingsSummary(Long id, String externalId, String accountNo,
-                                 String productName, CurrencyRef currency) {
+                                 String productName, CurrencyRef currency,
+                                 SubStatus subStatus) {
+    }
+
+    /**
+     * {@code SavingsAccountSubStatusEnumData}, as Gson serialises its FIELDS on
+     * the client accounts listing:
+     *
+     * <pre>
+     * {"id":400,"code":"SavingsAccountSubStatusEnum.block","value":"Block",
+     *  "none":false,"inactive":false,"dormant":false,"escheat":false,
+     *  "block":true,"blockCredit":false,"blockDebit":false}
+     * </pre>
+     *
+     * The sub-status is ONE value (SavingsAccountSubStatusEnum: 0 none, 100
+     * inactive, 200 dormant, 300 escheat, 400 block, 500 blockCredit, 600
+     * blockDebit) and each boolean is derived from it, so at most one of the
+     * three block flags is ever true. Both the flag and the id are modelled so
+     * a serializer change that drops one of them cannot silently read a frozen
+     * wallet as unblocked. Primitive booleans in the fork — Gson always writes
+     * them; boxed here so a missing key is null, not a fabricated false.
+     */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record SubStatus(Long id, String code, Boolean block, Boolean blockDebit, Boolean blockCredit) {
     }
 
     @JsonIgnoreProperties(ignoreUnknown = true)

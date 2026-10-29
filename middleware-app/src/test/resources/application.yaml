@@ -76,6 +76,16 @@ innbucks:
       zone: ""
       max-length: 160
       max-narrative-length: 24
+  transactions:
+    deposit:
+      # ON for the suite: the flow ITs fund wallets through the deposit
+      # endpoint, as staging does. This file REPLACES the main application.yaml
+      # on the test classpath, so leaving the key out would bind false and
+      # every deposit IT would get 403 deposit_disabled.
+      # DepositDisabledFlowIntegrationTest overrides it to false. Because of
+      # this line no Spring test sees the main file's default:
+      # PackagedDepositDefaultTest reads that from disk.
+      enabled: true
   stepup:
     # Real thresholds exercised by StepUpFlowIntegrationTest: amounts >= the
     # basic threshold require approval; small movements pass untouched.

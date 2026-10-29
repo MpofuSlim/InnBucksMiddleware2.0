@@ -18,10 +18,14 @@ import zw.co.innbucks.middleware.auth.CustomerScopes;
 import zw.co.innbucks.middleware.auth.jwt.JwtIssuer;
 import zw.co.innbucks.middleware.common.country.Country;
 import zw.co.innbucks.middleware.corebanking.CoreProvider;
+import zw.co.innbucks.middleware.corebanking.exception.CoreAccountRestrictedException;
+import zw.co.innbucks.middleware.corebanking.exception.CoreAuthException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreClientException;
+import zw.co.innbucks.middleware.corebanking.exception.CoreServerException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreUnknownOutcomeException;
 import zw.co.innbucks.middleware.corebanking.value.AccountBalance;
 import zw.co.innbucks.middleware.corebanking.value.AccountRef;
+import zw.co.innbucks.middleware.corebanking.value.AccountRestriction;
 import zw.co.innbucks.middleware.corebanking.value.CustomerProfile;
 import zw.co.innbucks.middleware.corebanking.value.DepositAccountSummary;
 import zw.co.innbucks.middleware.corebanking.value.MinorUnits;
@@ -42,6 +46,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.not;
 import static org.springframework.security.test.web.servlet.setup.SecurityMockMvcConfigurers.springSecurity;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -120,12 +126,13 @@ class TransactionFlowIntegrationTest {
                 VALUES (?, 'KE', '+254712000099', 'x', 'basic', 'FINERACT', ?, 'active', 0, ?, ?)
                 """, customerId, customerId.toString(), Timestamp.from(now), Timestamp.from(now));
         bearer = "Bearer " + issuer.issue(new JwtIssuer.IssueRequest(
-                customerId.toString(), Country.KE, "basic", CustomerScopes.DEFAULT, null, null));
+                customerId.toString(), Country.KE, "basic", CustomerScopes.DEFAULT, null));
 
         coreDeposits.set(0);
         smsSender.messages.clear();
         stubPort.onListAccounts = ref -> List.of(new DepositAccountSummary(
-                new AccountRef(wallet), "InnBucks Wallet", "KES", new MinorUnits(150000L, "KES")));
+                new AccountRef(wallet), "InnBucks Wallet", "KES", new MinorUnits(150000L, "KES"),
+                AccountRestriction.NONE));
         stubPort.onGetBalance = account -> new AccountBalance(account,
                 new MinorUnits(150000L, "KES"), new MinorUnits(150000L, "KES"), "000000010");
         stubPort.onGetProfile = ref -> new CustomerProfile(
@@ -155,7 +162,8 @@ class TransactionFlowIntegrationTest {
                 VALUES (?, 'KE', '+254712000188', 'x', 'basic', 'FINERACT', ?, 'active', 0, ?, ?)
                 """, recipientId, recipientId.toString(), Timestamp.from(now), Timestamp.from(now));
         stubPort.onListAccounts = ref -> List.of(new DepositAccountSummary(
-                new AccountRef(ref.externalId() + ":wallet"), "Wallet", "KES", new MinorUnits(1000L, "KES")));
+                new AccountRef(ref.externalId() + ":wallet"), "Wallet", "KES", new MinorUnits(1000L, "KES"),
+                AccountRestriction.NONE));
 
         mockMvc.perform(post("/accounts/lookup")
                         .header(HttpHeaders.AUTHORIZATION, bearer)
@@ -352,6 +360,241 @@ class TransactionFlowIntegrationTest {
 
         assertThat(jdbcTemplate.queryForObject(
                 "SELECT status FROM ledger_transaction", String.class)).isEqualTo("FAILED");
+    }
+
+    /**
+     * The core-side deposit lock firing behind a wrongly-open switch: this
+     * suite turns the deposit switch ON, and the core refuses the middleware's
+     * write user the deposit permission, as on a cell provisioned without
+     * {@code MIDDLEWARE_CUSTOMER_DEPOSITS=1}. The adapter maps Fineract's
+     * permission denial to {@link CoreAuthException} (pinned on the wire by
+     * {@code FineractClientContractTest}).
+     */
+    @Test
+    void aDepositTheCoreRefusesOnPermissionIsACleanFailureThatLeaksNoDetail() throws Exception {
+        String operatorDetail = "Fineract refused the middleware AppUser a permission: "
+                + "error.msg.not.authorized: User has no authority to: DEPOSIT_SAVINGSACCOUNT";
+        stubPort.onDeposit = (cmd, key) -> {
+            coreDeposits.incrementAndGet();
+            throw new CoreAuthException(CoreProvider.FINERACT, operatorDetail, null);
+        };
+
+        // An ops fault, so the generic 502, never "Request refused" with the
+        // permission name as the customer's reason.
+        mockMvc.perform(post("/transactions/deposit")
+                        .header(HttpHeaders.AUTHORIZATION, bearer).header("Idempotency-Key", "dep-locked")
+                        .contentType(MediaType.APPLICATION_JSON).content(depositBody(1000)))
+                .andExpect(status().isBadGateway())
+                .andExpect(jsonPath("$.errorCode").value("core_banking_unavailable"))
+                .andExpect(jsonPath("$.detail").value(not(containsString("DEPOSIT_SAVINGSACCOUNT"))));
+
+        // FAILED, never parked UNKNOWN: the core refused before the command ran,
+        // so there is nothing for the reconciler or an operator to chase.
+        assertThat(jdbcTemplate.queryForMap("SELECT status, failure_code FROM ledger_transaction"))
+                .containsEntry("status", "FAILED")
+                .containsEntry("failure_code", "core_auth_failed");
+        // The claim was released, so the app's retry is answered, not 409'd.
+        assertThat(jdbcTemplate.queryForObject("SELECT COUNT(*) FROM idempotency_record", Integer.class))
+                .isZero();
+
+        // The app retries with the same key: the ledger row answers, FAILED,
+        // without the operator detail the row holds, and the core is not asked twice.
+        mockMvc.perform(post("/transactions/deposit")
+                        .header(HttpHeaders.AUTHORIZATION, bearer).header("Idempotency-Key", "dep-locked")
+                        .contentType(MediaType.APPLICATION_JSON).content(depositBody(1000)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("FAILED"))
+                .andExpect(jsonPath("$.failureCode").value("core_auth_failed"))
+                .andExpect(jsonPath("$.failureMessage").value(
+                        "The movement did not apply. Use a new Idempotency-Key for a fresh attempt."));
+        assertThat(coreDeposits.get()).isEqualTo(1);
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT failure_message FROM ledger_transaction", String.class)).isEqualTo(operatorDetail);
+    }
+
+    @Test
+    void aBlockedSourceAccountIs403AccountRestrictedAndReplaysTheSameCopy() throws Exception {
+        stubPort.onWithdraw = (cmd, key) -> {
+            throw new CoreAccountRestrictedException(CoreProvider.FINERACT,
+                    "Fineract refused to debit a restricted account "
+                            + "(error.msg.savings.account.debit.transaction.not.allowed)", null);
+        };
+        String body = """
+                {"accountId":"%s","amountMinor":9999,"currency":"KES"}
+                """.formatted(wallet);
+
+        mockMvc.perform(post("/transactions/withdraw")
+                        .header(HttpHeaders.AUTHORIZATION, bearer).header("Idempotency-Key", "wd-blocked")
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.errorCode").value("account_restricted"))
+                .andExpect(jsonPath("$.detail")
+                        .value("Payments from this account are paused. Please contact support."));
+
+        // Still a provably-not-applied refusal: FAILED, coded for ops.
+        assertThat(jdbcTemplate.queryForMap("SELECT status, failure_code FROM ledger_transaction"))
+                .containsEntry("status", "FAILED")
+                .containsEntry("failure_code", "account_restricted");
+
+        // A same-key retry answers from the ledger row — with the same fixed
+        // copy, never the core's code the first answer withheld.
+        mockMvc.perform(post("/transactions/withdraw")
+                        .header(HttpHeaders.AUTHORIZATION, bearer).header("Idempotency-Key", "wd-blocked")
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("FAILED"))
+                .andExpect(jsonPath("$.failureCode").value("account_restricted"))
+                .andExpect(jsonPath("$.failureMessage")
+                        .value("Payments from this account are paused. Please contact support."));
+    }
+
+    @Test
+    void aBlockedRecipientIs422AndEveryAnswerCarriesOnlyTheFixedCopy() throws Exception {
+        // Exactly what FineractErrorMapper raises for a recipient's BLOCK or
+        // CREDIT block. Unlike a restriction, nothing downstream masks a plain
+        // refusal: the 422 detail, the ledger's failure_message and the
+        // same-key replay all repeat the message — so the adapter's fixed copy
+        // is the only thing that keeps the bank's hold type away from a sender.
+        stubPort.onTransfer = (cmd, key) -> {
+            throw new CoreClientException(CoreProvider.FINERACT,
+                    "The receiving account cannot accept this payment.", null);
+        };
+        String body = """
+                {"fromAccountId":"%s","toAccountId":"other:wallet",
+                 "amountMinor":5000,"currency":"KES"}
+                """.formatted(wallet);
+
+        mockMvc.perform(post("/transactions/transfer")
+                        .header(HttpHeaders.AUTHORIZATION, bearer).header("Idempotency-Key", "tr-recipient")
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.errorCode").value("core_rejected"))
+                .andExpect(jsonPath("$.detail").value("The receiving account cannot accept this payment."));
+
+        assertThat(jdbcTemplate.queryForMap("SELECT status, failure_code, failure_message FROM ledger_transaction"))
+                .containsEntry("status", "FAILED")
+                .containsEntry("failure_code", "core_rejected")
+                .containsEntry("failure_message", "The receiving account cannot accept this payment.");
+
+        mockMvc.perform(post("/transactions/transfer")
+                        .header(HttpHeaders.AUTHORIZATION, bearer).header("Idempotency-Key", "tr-recipient")
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("FAILED"))
+                .andExpect(jsonPath("$.failureCode").value("core_rejected"))
+                .andExpect(jsonPath("$.failureMessage").value("The receiving account cannot accept this payment."));
+    }
+
+    private void walletIs(AccountRestriction restriction) {
+        stubPort.onListAccounts = ref -> List.of(new DepositAccountSummary(
+                new AccountRef(wallet), "InnBucks Wallet", "KES", new MinorUnits(150000L, "KES"), restriction));
+    }
+
+    @Test
+    void aDebitBlockOnTheListingRefusesAWithdrawalBeforeAnyLedgerRowOrCoreWrite() throws Exception {
+        walletIs(AccountRestriction.DEBITS_BLOCKED);
+        AtomicInteger coreWithdrawals = new AtomicInteger();
+        stubPort.onWithdraw = (cmd, key) -> {
+            coreWithdrawals.incrementAndGet();
+            return new TransactionResult(new TxRef("CORE-9"), TransactionState.COMPLETED);
+        };
+
+        mockMvc.perform(post("/transactions/withdraw")
+                        .header(HttpHeaders.AUTHORIZATION, bearer).header("Idempotency-Key", "wd-listed-block")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"accountId":"%s","amountMinor":9999,"currency":"KES"}
+                                """.formatted(wallet)))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.errorCode").value("account_restricted"))
+                .andExpect(jsonPath("$.detail")
+                        .value("Payments from this account are paused. Please contact support."));
+
+        // Nothing to reconcile: no claim, no ledger row, no core write.
+        assertThat(coreWithdrawals.get()).isZero();
+        assertThat(jdbcTemplate.queryForObject("SELECT COUNT(*) FROM ledger_transaction", Integer.class))
+                .isZero();
+        assertThat(jdbcTemplate.queryForObject("SELECT COUNT(*) FROM idempotency_record", Integer.class))
+                .isZero();
+    }
+
+    @Test
+    void aFullBlockOnTheListingRefusesATransferToo() throws Exception {
+        walletIs(AccountRestriction.FULLY_BLOCKED);
+        AtomicInteger coreTransfers = new AtomicInteger();
+        stubPort.onTransfer = (cmd, key) -> {
+            coreTransfers.incrementAndGet();
+            return new TransactionResult(new TxRef("CORE-10"), TransactionState.COMPLETED);
+        };
+
+        mockMvc.perform(post("/transactions/transfer")
+                        .header(HttpHeaders.AUTHORIZATION, bearer).header("Idempotency-Key", "tr-listed-block")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"fromAccountId":"%s","toAccountId":"other:wallet",
+                                 "amountMinor":5000,"currency":"KES"}
+                                """.formatted(wallet)))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.errorCode").value("account_restricted"));
+
+        assertThat(coreTransfers.get()).isZero();
+        assertThat(jdbcTemplate.queryForObject("SELECT COUNT(*) FROM ledger_transaction", Integer.class))
+                .isZero();
+    }
+
+    @Test
+    void aSameKeyRetryOfATransferThatRanBeforeTheBlockStillLearnsItSucceeded() throws Exception {
+        stubPort.onTransfer = (cmd, key) -> new TransactionResult(new TxRef("CORE-11"), TransactionState.COMPLETED);
+        String body = """
+                {"fromAccountId":"%s","toAccountId":"other:wallet",
+                 "amountMinor":5000,"currency":"KES"}
+                """.formatted(wallet);
+        mockMvc.perform(post("/transactions/transfer")
+                        .header(HttpHeaders.AUTHORIZATION, bearer).header("Idempotency-Key", "tr-before-block")
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("SUCCESS"));
+
+        // The bank blocks the wallet; the app retries the lost response.
+        // "Account restricted" here would read as "your payment failed".
+        walletIs(AccountRestriction.FULLY_BLOCKED);
+
+        mockMvc.perform(post("/transactions/transfer")
+                        .header(HttpHeaders.AUTHORIZATION, bearer).header("Idempotency-Key", "tr-before-block")
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("SUCCESS"))
+                .andExpect(jsonPath("$.coreTxRef").value("CORE-11"));
+    }
+
+    @Test
+    void aReplayOfATransferTheCoreFailedOnNeverRepeatsTheCoresDetail() throws Exception {
+        stubPort.onTransfer = (cmd, key) -> {
+            throw new CoreServerException(CoreProvider.FINERACT,
+                    "Fineract read failed (500): error.msg.saving.account.id.invalid: "
+                            + "Savings account with identifier 12 does not exist", null);
+        };
+        String body = """
+                {"fromAccountId":"%s","toAccountId":"other:wallet",
+                 "amountMinor":5000,"currency":"KES"}
+                """.formatted(wallet);
+
+        mockMvc.perform(post("/transactions/transfer")
+                        .header(HttpHeaders.AUTHORIZATION, bearer).header("Idempotency-Key", "tr-core-500")
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.errorCode").value("core_banking_unavailable"));
+
+        // The ledger keeps the ops detail; the customer never sees it, on the
+        // first answer or on the same-key replay.
+        mockMvc.perform(post("/transactions/transfer")
+                        .header(HttpHeaders.AUTHORIZATION, bearer).header("Idempotency-Key", "tr-core-500")
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("FAILED"))
+                .andExpect(jsonPath("$.failureCode").value("core_server_error"))
+                .andExpect(jsonPath("$.failureMessage").value(
+                        "The movement did not apply. Use a new Idempotency-Key for a fresh attempt."));
     }
 
     @Test

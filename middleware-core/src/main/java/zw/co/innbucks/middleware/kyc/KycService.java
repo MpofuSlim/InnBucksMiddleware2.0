@@ -206,8 +206,9 @@ public class KycService {
      * Opens a request. The ID is canonicalised, validated and HMAC'd BEFORE
      * the idempotency layer sees anything, and the body handed to it carries
      * that HMAC (and the address's) — never the number: its fingerprint is
-     * stored in {@code idempotency_record} for a day, and an unkeyed hash of
-     * an ID number is a brute-force away from the number.
+     * stored in {@code idempotency_record} for a day, and this path must not
+     * depend on that fingerprint being keyed, because a hash of a bare ID
+     * number is a brute-force away from the number.
      */
     public IdempotencyService.Result<KycSubmissionCreated> create(UUID customerId, String clientIp,
                                                                   String rawIdempotencyKey,

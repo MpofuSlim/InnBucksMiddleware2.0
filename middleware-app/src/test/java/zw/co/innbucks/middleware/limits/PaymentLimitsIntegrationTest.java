@@ -24,6 +24,7 @@ import zw.co.innbucks.middleware.corebanking.CoreProvider;
 import zw.co.innbucks.middleware.corebanking.exception.CoreClientException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreUnknownOutcomeException;
 import zw.co.innbucks.middleware.corebanking.value.AccountRef;
+import zw.co.innbucks.middleware.corebanking.value.AccountRestriction;
 import zw.co.innbucks.middleware.corebanking.value.DepositAccountSummary;
 import zw.co.innbucks.middleware.corebanking.value.MinorUnits;
 import zw.co.innbucks.middleware.corebanking.value.TransactionResult;
@@ -134,12 +135,12 @@ class PaymentLimitsIntegrationTest {
         customerId = insertCustomer("+254712000301");
         wallet = customerId + ":wallet";
         bearer = "Bearer " + issuer.issue(new JwtIssuer.IssueRequest(
-                customerId.toString(), Country.KE, "basic", CustomerScopes.DEFAULT, null, null));
+                customerId.toString(), Country.KE, "basic", CustomerScopes.DEFAULT, null));
 
         coreTransfers.set(0);
         stubPort.onListAccounts = ref -> List.of(new DepositAccountSummary(
                 new AccountRef(ref.externalId() + ":wallet"), "InnBucks Wallet", "KES",
-                new MinorUnits(10_000_000L, "KES")));
+                new MinorUnits(10_000_000L, "KES"), AccountRestriction.NONE));
         stubPort.onTransfer = (cmd, key) -> {
             coreTransfers.incrementAndGet();
             return new TransactionResult(new TxRef("CORE-T"), TransactionState.COMPLETED);

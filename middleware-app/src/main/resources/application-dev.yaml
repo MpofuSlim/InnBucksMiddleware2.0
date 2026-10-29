@@ -42,6 +42,12 @@ innbucks:
     # this value while the SMS provider isn't wired. Refused by OtpConfig
     # if the active profile isn't dev or test.
     fixed-code: "000000"
+  transactions:
+    deposit:
+      # DEV ONLY. On, so a local wallet can be funded against a local Fineract.
+      # Off by default everywhere else (application.yaml): it is an unfunded
+      # cash-in. Set TRANSACTIONS_DEPOSIT_ENABLED=false to try the refusal.
+      enabled: ${TRANSACTIONS_DEPOSIT_ENABLED:true}
 
 # Dev-only Fineract defaults: a fresh clone boots against a local Fineract
 # dev instance (docker compose from the fineract repo). Placeholder creds are

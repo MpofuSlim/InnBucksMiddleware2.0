@@ -123,6 +123,18 @@ innbucks:
       max-failed-attempts-before-lock: ${AUTH_MAX_FAILED_ATTEMPTS:7}
       lock-duration: ${AUTH_LOCK_DURATION:1h}
       backoff-base: ${AUTH_BACKOFF_BASE:1s}
+    # /auth/refresh reads the wallet's bank block from the core (a FULL block
+    # ends every session). The read runs BEFORE the refresh token is spent and
+    # never holds the request longer than `timeout`; past it, or with every
+    # slot busy (a stalled core holds them), the refresh goes through — the
+    # money is already blocked in the core. Keep `timeout` well under the app's
+    # own HTTP timeout: that margin, not the read-before-spend order, is what
+    # keeps a slow core from signing customers out (a refresh whose client gave
+    # up still spends the token, and the client's retry is then a replay).
+    # Watch innbucks.auth.refresh.block_check{outcome}.
+    refresh-block-check:
+      timeout: ${REFRESH_BLOCK_CHECK_TIMEOUT:2s}
+      max-concurrent-reads: ${REFRESH_BLOCK_CHECK_MAX_CONCURRENT:8}
   audit:
     # Keys the tamper-evidence HMAC chain over audit_event. Per-deployment,
     # openssl rand -base64 48. Rotation breaks the chain at the rotation point
@@ -218,6 +230,17 @@ innbucks:
       # alert still sends) rather than spill into a second segment.
       max-length: ${TXN_ALERTS_MAX_LENGTH:160}
       max-narrative-length: ${TXN_ALERTS_MAX_NARRATIVE:24}
+  transactions:
+    deposit:
+      # POST /transactions/deposit is an UNFUNDED cash-in: any signed-in
+      # customer credits their own wallet with a plain savings deposit of any
+      # amount, with no source of funds, no step-up, no maximum and no GL trail
+      # (the wallet product's accounting rule is None). OFF by default; off, it
+      # answers 403 deposit_disabled before anything is read or written.
+      # Staging turns it on (testers fund wallets; the runbook smoke deposits),
+      # and a deployment profile then logs a WARN banner at every boot. NEVER
+      # true on a cell that holds real money.
+      enabled: ${TRANSACTIONS_DEPOSIT_ENABLED:false}
   limits:
     # Per-tier payment limits on app withdrawals/transfers. The VALUES live in
     # the reviewed policy file packaged into the image —

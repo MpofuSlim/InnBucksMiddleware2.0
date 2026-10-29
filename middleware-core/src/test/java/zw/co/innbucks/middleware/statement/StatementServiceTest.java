@@ -11,6 +11,7 @@ import zw.co.innbucks.middleware.corebanking.CoreOperatorPort;
 import zw.co.innbucks.middleware.corebanking.CoreProvider;
 import zw.co.innbucks.middleware.corebanking.exception.CoreTransientException;
 import zw.co.innbucks.middleware.corebanking.value.AccountRef;
+import zw.co.innbucks.middleware.corebanking.value.AccountRestriction;
 import zw.co.innbucks.middleware.corebanking.value.CoreCustomerRef;
 import zw.co.innbucks.middleware.corebanking.value.CustomerProfile;
 import zw.co.innbucks.middleware.corebanking.value.DepositAccountKind;
@@ -66,7 +67,7 @@ class StatementServiceTest {
         when(customers.findById(CUSTOMER)).thenReturn(Optional.of(customer));
         when(port.listDepositAccountRefs(new CoreCustomerRef(CUSTOMER.toString())))
                 .thenReturn(List.of(new DepositAccountRef(
-                        new AccountRef(WALLET), "Wallet", "USD", "000000010")));
+                        new AccountRef(WALLET), "Wallet", "USD", "000000010", AccountRestriction.NONE)));
         when(port.getProfile(new CoreCustomerRef(CUSTOMER.toString())))
                 .thenReturn(new CustomerProfile(new CoreCustomerRef(CUSTOMER.toString()),
                         "Tariro", "Moyo", "ACTIVE"));

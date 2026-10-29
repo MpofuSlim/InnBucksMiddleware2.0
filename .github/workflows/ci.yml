@@ -38,6 +38,13 @@ jobs:
       - name: Make mvnw executable
         run: chmod +x ./mvnw
 
+      # No cell, no network, about a second. It holds the guards on the
+      # COMMITTED cell files (no customer-deposit opt-in, no grant to the
+      # middleware's own Fineract roles) and the wiring of provision-cell.sh,
+      # which only gate a merge if something runs them.
+      - name: Provisioning selftest
+        run: bash ./deploy/fineract/provision-selftest.sh
+
       - name: Build, test, and package
         run: ./mvnw -B -ntp -Dstyle.color=always verify
 

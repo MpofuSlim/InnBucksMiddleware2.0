@@ -2,8 +2,59 @@
 # Pure helpers for provision-cell.sh — no network, no state, no side effects,
 # so provision-selftest.sh can cover them without a cell.
 #
-# Only the parsing and set arithmetic lives here. Anything that talks to
-# Fineract stays in provision-cell.sh, where it is obvious that it does.
+# Only the parsing, the set arithmetic and the sets themselves (the middleware's
+# permission codes and role names) live here. Anything that talks to Fineract
+# stays in provision-cell.sh, where it is obvious that it does.
+
+# ─── The middleware's own roles and permission codes (steps 5, 6b, 6e, 6f) ───
+#
+# The two AppUsers the middleware rides, and their roles, which share the name.
+# These roles belong to this script: their codes are READ_PERMS / WRITE_PERMS
+# below, never a cell file (step 6b refuses a BANK_ROLE_GRANTS entry naming
+# either; see is_middleware_role).
+MW_READ_ROLE=innbucks-mw-read
+MW_WRITE_ROLE=innbucks-mw-write
+
+# Every code is checked against the running build before the roles are written
+# (step 5). Notes on the two non-obvious ones:
+#   * There is NO READ_SAVINGSACCOUNTTRANSACTION permission — the transaction
+#     endpoints validate READ against the SAVINGSACCOUNT resource, so
+#     READ_SAVINGSACCOUNT already covers the reconciliation read-back.
+#   * ACTIVATE_CLIENT is required because the adapter creates clients with
+#     active:true, and Fineract's createClient runs the activate command
+#     inline (ClientWritePlatformServiceJpaRepositoryImpl ->
+#     validateRollbackCommand(activateClient) -> validateHasPermissionTo).
+#
+# WRITE_PERMS is everything the adapter CAN issue. What the write role is
+# actually GRANTED is mw_write_grants below: DEPOSIT_SAVINGSACCOUNT only on a
+# box that opts in to customer deposits. Transfers do not need it: an account
+# transfer is checked against CREATE_ACCOUNTTRANSFER alone, and its two legs
+# run through SavingsAccountDomainService with no further permission check.
+READ_PERMS=(READ_CLIENT READ_SAVINGSACCOUNT READ_ACCOUNTTRANSFER)
+WRITE_PERMS=(CREATE_CLIENT ACTIVATE_CLIENT CREATE_SAVINGSACCOUNT APPROVE_SAVINGSACCOUNT
+             ACTIVATE_SAVINGSACCOUNT DEPOSIT_SAVINGSACCOUNT WITHDRAWAL_SAVINGSACCOUNT
+             CREATE_ACCOUNTTRANSFER)
+
+# is_middleware_role NAME — succeeds when NAME is one of the middleware's own
+# roles (whitespace-trimmed, case-insensitive), fails otherwise.
+#
+# Step 6b grants codes to roles a cell file names, and a cell file is shared by
+# every box of its market. Let it name innbucks-mw-write and the committed file
+# can hand production's middleware DEPOSIT_SAVINGSACCOUNT (or ALL_FUNCTIONS),
+# reopening the customer-deposit lock that the per-box opt-in exists to keep
+# shut, and widen the least-privilege set the code defines. So 6b refuses such
+# an entry outright and the run fails. Case-insensitive on purpose: refusing a
+# near-identical name costs nothing, and admitting one could cost the lock.
+# A predicate: call it as a condition (if, &&), never bare under set -e.
+is_middleware_role() {
+  local name="${1-}" r
+  name="${name#"${name%%[![:space:]]*}"}"; name="${name%"${name##*[![:space:]]}"}"
+  [[ -n "$name" ]] || return 1
+  for r in "$MW_READ_ROLE" "$MW_WRITE_ROLE"; do
+    [[ "${name,,}" == "${r,,}" ]] && return 0
+  done
+  return 1
+}
 
 # split_list SEP STRING — one item per line, whitespace-trimmed, blanks dropped.
 # Used for the '|'- and ','-separated policy lists in a cell file, where a
@@ -156,8 +207,147 @@ checker_gaps() {
   return 0
 }
 
+# ─── Customer deposits: the core-side lock (steps 5, 6f and 7) ───────────────
+#
+# POST /transactions/deposit is an UNFUNDED cash-in: any signed-in customer
+# credits their own wallet from nothing. The middleware refuses it unless its
+# TRANSACTIONS_DEPOSIT_ENABLED is on, but that flag lives in a gitignored .env,
+# where one line carried over from staging would reopen money creation with no
+# review and no record. This is the SECOND, independent lock: the middleware's
+# write AppUser is not granted the one Fineract permission a deposit needs
+# unless the box opts in at provision time, so the core refuses the command
+# even when the flag is wrong.
+#
+# The opt-in is PER BOX (MIDDLEWARE_CUSTOMER_DEPOSITS=1 in that box's gitignored
+# deploy/fineract/.env), never in a committed cell file: one cell file serves
+# every box of a market (staging and production both source cell.zw.env), so a
+# committed switch would be on for both or off for both.
+CUSTOMER_DEPOSIT_PERMISSION=DEPOSIT_SAVINGSACCOUNT
+
+# parse_deposit_opt_in VALUE — prints 1 (opted in) or 0 (off).
+#
+# Unset or empty is 0: production is safe with no action. Only the literal 1
+# opts in. Any other spelling (true, yes, on, ' 1') RETURNS 1 and prints
+# nothing, and the caller must stop: guessing is wrong in both directions.
+# Read as off, a staging box that wrote "true" silently loses deposits; read as
+# on, a typo anywhere reopens money creation.
+parse_deposit_opt_in() {
+  case "${1-}" in
+    ''|0) printf '0' ;;
+    1)    printf '1' ;;
+    *)    return 1 ;;
+  esac
+}
+
+# write_role_grants OPT_IN CODE... — the codes to GRANT the middleware's write
+# role: CODE... in order, minus the customer-deposit permission unless OPT_IN is
+# exactly 1 (anything else is treated as off, failing closed).
+#
+# Step 6e protects exactly these codes (plus the read role's), so the deposit
+# permission is shielded from maker-checker only on a box that grants it. Where
+# the middleware cannot deposit, the bank is free to dual-control teller
+# deposits, and 6e will not unflag them.
+write_role_grants() {
+  local opt_in="${1:-0}" code; shift || true
+  for code in "$@"; do
+    [[ -n "$code" ]] || continue
+    [[ "$opt_in" != 1 && "$code" == "$CUSTOMER_DEPOSIT_PERMISSION" ]] && continue
+    printf '%s\n' "$code"
+  done
+  return 0
+}
+
+# mw_write_grants OPT_IN — what step 5 GRANTS the middleware's write role:
+# WRITE_PERMS through write_role_grants. provision-cell.sh takes the list from
+# here and nowhere else, so the selftest covers what the script actually grants,
+# not a copy of it.
+mw_write_grants() {
+  write_role_grants "${1:-0}" "${WRITE_PERMS[@]}"
+}
+
+# mw_protected_codes OPT_IN — what step 6e keeps off the maker-checker task
+# list: the read role's codes, then the write role's GRANTS. Derived, never a
+# copied list, so a code added to READ_PERMS / WRITE_PERMS is protected with no
+# other change, and DEPOSIT_SAVINGSACCOUNT is protected exactly where the
+# middleware can issue it.
+mw_protected_codes() {
+  printf '%s\n' "${READ_PERMS[@]}"
+  mw_write_grants "${1:-0}"
+}
+
+# write_role_revokes OPT_IN — the codes to actively REMOVE from the write role:
+# the deposit permission unless OPT_IN is exactly 1, else nothing.
+#
+# Withholding a grant is not enough on its own. A cell provisioned before this
+# lock already has the permission on the role, and PUT /roles/{id}/permissions
+# MERGES, so only an explicit false takes it away (Role.updatePermission ->
+# removePermission). This is the one code the script revokes; every other grant
+# stays additive.
+write_role_revokes() {
+  [[ "${1:-0}" == 1 ]] || printf '%s\n' "$CUSTOMER_DEPOSIT_PERMISSION"
+  return 0
+}
+
+# deposit_capable_codes HELD — prints each code in HELD (newline-separated; the
+# union of every role the write AppUser holds) that lets its holder post a
+# savings deposit: the deposit permission itself, or ALL_FUNCTIONS, which
+# AppUser.hasPermissionTo honours ahead of every specific code. Empty means the
+# core refuses the AppUser's deposits.
+#
+# Exact match, never substring: DEPOSIT_SAVINGSACCOUNT_CHECKER grants no deposit.
+# Case-insensitive, because Fineract compares codes that way
+# (Permission.hasCode -> equalsIgnoreCase).
+deposit_capable_codes() {
+  local held="${1:-}" code
+  [[ -n "$held" ]] || return 0
+  for code in "$CUSTOMER_DEPOSIT_PERMISSION" ALL_FUNCTIONS; do
+    if grep -qixF -- "$code" <<<"$held"; then printf '%s\n' "$code"; fi
+  done
+  return 0
+}
+
+# classify_deposit_probe STATUS BODY — reads the answer to the smoke step's
+# zero-amount deposit, sent with the write AppUser's credentials on a box that
+# has NOT opted in. Prints one word:
+#
+#   refused   403 carrying error.msg.not.authorized: Fineract's permission check
+#             refused the command (AppUser.validateHasPermissionTo, run in
+#             logCommandSource before the command executes). The lock holds.
+#   allowed   the permission check PASSED: a 400 (amount 0 fails positiveAmount),
+#             a 403 domain veto with another code, or a 2xx. The lock is NOT in
+#             place. Nothing moved: an amount of 0 cannot pass validation.
+#   unproven  anything that says nothing about the permission (connection
+#             failure, 401, 404, 5xx).
+classify_deposit_probe() {
+  local status="${1:-000}" body="${2:-}"
+  case "$status" in
+    403) if grep -qF -- 'error.msg.not.authorized' <<<"$body"; then printf 'refused'; else printf 'allowed'; fi ;;
+    2??|400) printf 'allowed' ;;
+    *) printf 'unproven' ;;
+  esac
+  return 0
+}
+
+# committed_deposit_opt_ins FILE... — prints each FILE that ASSIGNS
+# MIDDLEWARE_CUSTOMER_DEPOSITS (a comment mentioning it does not count).
+#
+# A committed cell file is shared by every box of its market, so an opt-in
+# there opts PRODUCTION in on its next provision. provision-cell.sh refuses to
+# run while any committed cell file carries one.
+committed_deposit_opt_ins() {
+  local f
+  for f in "$@"; do
+    [[ -f "$f" ]] || continue
+    if grep -qE '^[[:space:]]*(export[[:space:]]+)?MIDDLEWARE_CUSTOMER_DEPOSITS[[:space:]]*=' "$f"; then
+      printf '%s\n' "$f"
+    fi
+  done
+  return 0
+}
+
 # json_flag_map BOOL CODE... — {"permissions":{"CODE":BOOL,...}}, the body shape
-# PUT /v1/permissions takes for both flagging and unflagging.
+# PUT /v1/permissions takes for both flagging and unflagging, and the shape
+# PUT /v1/roles/{id}/permissions takes for granting (true) and revoking (false).
 json_flag_map() {
   local val="$1"; shift
   printf '%s\n' "$@" | jq -R . | jq -s --argjson v "$val" 'map({(.): $v}) | add | {permissions: .}'

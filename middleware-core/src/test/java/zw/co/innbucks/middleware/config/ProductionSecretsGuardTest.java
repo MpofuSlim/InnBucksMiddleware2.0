@@ -3,6 +3,7 @@ package zw.co.innbucks.middleware.config;
 import org.junit.jupiter.api.Test;
 import org.springframework.mock.env.MockEnvironment;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 
@@ -126,5 +127,26 @@ class ProductionSecretsGuardTest {
     void mixedProfileWithTestIsNotADeployment() {
         MockEnvironment env = new MockEnvironment();
         assertThatCode(() -> run(env, "test", "extra")).doesNotThrowAnyException();
+    }
+
+    /**
+     * The shared definition other components ask (the deposit switch's boot
+     * warning, for one) must agree with what the guard itself enforces.
+     */
+    @Test
+    void isDeploymentIsTheSameNotionTheGuardEnforces() {
+        assertThat(isDeployment()).isTrue();
+        assertThat(isDeployment("prod")).isTrue();
+        assertThat(isDeployment("uat")).isTrue();
+        assertThat(isDeployment("dev")).isFalse();
+        assertThat(isDeployment("DEV")).isFalse();
+        assertThat(isDeployment("uat", "local")).isFalse();
+        assertThat(isDeployment("it")).isFalse();
+    }
+
+    private static boolean isDeployment(String... profiles) {
+        MockEnvironment env = new MockEnvironment();
+        env.setActiveProfiles(profiles);
+        return ProductionSecretsGuard.isDeployment(env);
     }
 }

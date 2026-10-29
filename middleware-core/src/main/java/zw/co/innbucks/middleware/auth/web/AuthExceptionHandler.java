@@ -8,6 +8,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import zw.co.innbucks.middleware.auth.exception.AccountLockedException;
+import zw.co.innbucks.middleware.auth.exception.AccountRestrictedSessionException;
 import zw.co.innbucks.middleware.auth.exception.BackoffActiveException;
 import zw.co.innbucks.middleware.auth.exception.InvalidCredentialsException;
 import zw.co.innbucks.middleware.auth.exception.MalformedRequestException;
@@ -167,6 +168,28 @@ public class AuthExceptionHandler {
         problem.setProperty("errorCode", "refresh_invalid");
         return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(problem);
     }
+
+    /**
+     * The bank fully blocked the account, and every session the customer held
+     * has been ended. Same errorCode as a refused payment from a blocked
+     * account, so the app has ONE "contact support" state; the copy differs
+     * because here the customer is also signed out. Fixed text: the reason
+     * for a block is the bank's to tell. 403, not 401 — retrying with a fresh
+     * login will not help while the block stands.
+     */
+    @ExceptionHandler(AccountRestrictedSessionException.class)
+    public ResponseEntity<ProblemDetail> accountRestricted(AccountRestrictedSessionException ex) {
+        ProblemDetail problem = ProblemDetail.forStatus(HttpStatus.FORBIDDEN);
+        problem.setType(PROBLEM_TYPE);
+        problem.setTitle("Account restricted");
+        problem.setDetail(ACCOUNT_RESTRICTED_SESSION_DETAIL);
+        problem.setProperty("errorCode", "account_restricted");
+        return ResponseEntity.status(HttpStatus.FORBIDDEN).body(problem);
+    }
+
+    /** The whole customer-facing story of a refresh refused for a full block. */
+    public static final String ACCOUNT_RESTRICTED_SESSION_DETAIL =
+            "Your account has been restricted and you have been signed out. Please contact support.";
 
     @ExceptionHandler(RefreshTokenReplayException.class)
     public ResponseEntity<ProblemDetail> refreshReplay(RefreshTokenReplayException ex) {

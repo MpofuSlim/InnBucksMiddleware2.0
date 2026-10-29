@@ -6,6 +6,7 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import zw.co.innbucks.middleware.corebanking.exception.CoreAccountRestrictedException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreAuthException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreClientException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreServerException;
@@ -192,6 +193,81 @@ class FineractClientContractTest {
                 .hasMessageContaining("insufficient.account.balance");
     }
 
+    /**
+     * Fineract refusing OUR AppUser a permission. Not observed on a cell; read
+     * out of the fork, field by field:
+     * {@code AppUser.validateHasPermissionTo} throws
+     * {@code NoAuthorizationException("User has no authority to: " + code)},
+     * {@code NoAuthorizationExceptionMapper} answers 403 with
+     * {@code ApiGlobalErrorResponse.unAuthorized(message)} (top-level code,
+     * developer and user messages verbatim), whose single error is
+     * {@code ApiParameterError.generalError} (parameterName "id", no args),
+     * written by Jersey's Jackson writer, which drops the null value.
+     *
+     * <p>This is the shape a customer deposit gets on a cell provisioned
+     * without {@code MIDDLEWARE_CUSTOMER_DEPOSITS=1} while the middleware's own
+     * deposit switch is wrongly on. The check runs in {@code logCommandSource}
+     * before the command executes, so nothing applied.
+     */
+    private static final String PERMISSION_DENIED_BODY = """
+            {"developerMessage":"The user associated with credentials passed on this request does not have sufficient privileges to perform this action.",
+             "httpStatusCode":"403",
+             "defaultUserMessage":"Insufficient privileges to perform this action.",
+             "userMessageGlobalisationCode":"error.msg.not.authorized",
+             "errors":[{"developerMessage":"User has no authority to: DEPOSIT_SAVINGSACCOUNT",
+                        "defaultUserMessage":"User has no authority to: DEPOSIT_SAVINGSACCOUNT",
+                        "userMessageGlobalisationCode":"error.msg.not.authorized",
+                        "parameterName":"id","args":[]}]}
+            """;
+
+    @Test
+    void aPermissionTheWriteUserLacksIsAnAuthFailureNeverAVeto() {
+        wireMock.stubFor(post(urlPathEqualTo("/v1/savingsaccounts/external-id/acct-1/transactions"))
+                .willReturn(aResponse().withStatus(403).withBody(PERMISSION_DENIED_BODY)));
+
+        // Auth, not client: it is our provisioning, not the customer's request.
+        // As a CoreClientException it reached the customer as 422 core_rejected
+        // with "User has no authority to: DEPOSIT_SAVINGSACCOUNT" as the reason.
+        // Either way the write provably did not apply, so the ledger row is
+        // FAILED, never parked UNKNOWN.
+        assertThatThrownBy(() -> client.deposit("acct-1", new BigDecimal("10.00"), "ref-perm", "key-perm"))
+                .isInstanceOf(CoreAuthException.class)
+                .hasMessageContaining("error.msg.not.authorized")
+                .hasMessageContaining("DEPOSIT_SAVINGSACCOUNT");
+        // Sent once and never retried: a write is never re-driven.
+        wireMock.verify(1, postRequestedFor(urlPathEqualTo("/v1/savingsaccounts/external-id/acct-1/transactions")));
+    }
+
+    /**
+     * A READ denial has its own wording, also read out of the fork: the read
+     * endpoints call {@code AppUser.validateHasReadPermission(resourceType)}
+     * (here {@code ClientsApiResource.retrieveClient}, resource "client"),
+     * whose message is "User has no authority to READ " + resource + "s" — not
+     * the command path's "to: CODE" — through the same
+     * {@code NoAuthorizationExceptionMapper} envelope as above. So the code is
+     * the only thing the two denials share, which is why the mapper keys on it.
+     */
+    private static final String READ_PERMISSION_DENIED_BODY = """
+            {"developerMessage":"The user associated with credentials passed on this request does not have sufficient privileges to perform this action.",
+             "httpStatusCode":"403",
+             "defaultUserMessage":"Insufficient privileges to perform this action.",
+             "userMessageGlobalisationCode":"error.msg.not.authorized",
+             "errors":[{"developerMessage":"User has no authority to READ clients",
+                        "defaultUserMessage":"User has no authority to READ clients",
+                        "userMessageGlobalisationCode":"error.msg.not.authorized",
+                        "parameterName":"id","args":[]}]}
+            """;
+
+    @Test
+    void aPermissionTheReadUserLacksIsAnAuthFailureToo() {
+        wireMock.stubFor(get(urlEqualTo("/v1/clients/external-id/x"))
+                .willReturn(aResponse().withStatus(403).withBody(READ_PERMISSION_DENIED_BODY)));
+
+        assertThatThrownBy(() -> client.findClientByExternalId("x"))
+                .isInstanceOf(CoreAuthException.class)
+                .hasMessageContaining("error.msg.not.authorized");
+    }
+
     @Test
     void validationErrorEnvelopeMapsToCoreClient() {
         wireMock.stubFor(post(urlEqualTo("/v1/clients"))
@@ -289,6 +365,190 @@ class FineractClientContractTest {
         assertThatThrownBy(() -> client.createClient("cust-uuid-9", "A", "B", "+254712000009", "key-mc2"))
                 .isInstanceOf(CoreUnknownOutcomeException.class)
                 .hasMessageContaining("maker-checker");
+    }
+
+    // ------------------------------------------------ savings restrictions
+
+    /**
+     * A savings-restriction refusal EXACTLY as the fork serialises it
+     * (MpofuSlim/fineract develop, read from source — not yet observed on a
+     * cell): {@code Savings{Account,AccountDebits,AccountCredits}BlockedException}
+     * (fineract-savings .../savings/exception/) extend
+     * {@code AbstractPlatformDomainRuleException};
+     * {@code PlatformDomainRuleExceptionMapper.toResponse} answers
+     * {@code Status.FORBIDDEN} with {@code ApiGlobalErrorResponse.domainRuleViolation}
+     * (fineract-core .../core/data/ApiGlobalErrorResponse.java), whose one error
+     * is {@code ApiParameterError.generalError}: developerMessage =
+     * defaultUserMessage, parameterName "id", args = [{value: accountId}].
+     * Jersey writes it with the Jackson converter configured NON_NULL
+     * ({@code JerseyJacksonConverterConfig}), so the null {@code value} key is
+     * absent and the account id is a JSON number.
+     */
+    private static String domainRuleViolation(String code, String message, long accountId) {
+        return """
+                {"developerMessage":"Request was understood but caused a domain rule violation.",
+                 "httpStatusCode":"403",
+                 "defaultUserMessage":"Errors contain reason for domain rule violation.",
+                 "userMessageGlobalisationCode":"validation.msg.domain.rule.violation",
+                 "errors":[{"developerMessage":"%2$s",
+                            "defaultUserMessage":"%2$s",
+                            "userMessageGlobalisationCode":"%1$s",
+                            "parameterName":"id",
+                            "args":[{"value":%3$d}]}]}
+                """.formatted(code, message, accountId);
+    }
+
+    /** SavingsAccountBlockedException(accountId) — note "saving." singular. */
+    private static String blocked(long id) {
+        return domainRuleViolation("error.msg.saving.account.blocked.transaction.not.allowed",
+                "Any transaction to " + id + " is not allowed, since the account is blocked", id);
+    }
+
+    /** SavingsAccountDebitsBlockedException(accountId). */
+    private static String debitsBlocked(long id) {
+        return domainRuleViolation("error.msg.savings.account.debit.transaction.not.allowed",
+                "Any debit transactions from " + id + " is not allowed, since the account is blocked for debits", id);
+    }
+
+    /** SavingsAccountCreditsBlockedException(accountId). */
+    private static String creditsBlocked(long id) {
+        return domainRuleViolation("error.msg.savings.account.credit.transaction.not.allowed",
+                "Any Credit transactions to " + id + " is not allowed, since the account is blocked for credits", id);
+    }
+
+    private void withdrawalAnswers(String body) {
+        wireMock.stubFor(post(urlPathEqualTo("/v1/savingsaccounts/external-id/acct-1/transactions"))
+                .withQueryParam("command", equalTo("withdrawal"))
+                .willReturn(aResponse().withStatus(403)
+                        .withHeader("Content-Type", "application/json").withBody(body)));
+    }
+
+    private void transferAnswers(String body) {
+        wireMock.stubFor(post(urlEqualTo("/v1/accounttransfers"))
+                .willReturn(aResponse().withStatus(403)
+                        .withHeader("Content-Type", "application/json").withBody(body)));
+    }
+
+    @Test
+    void aWithdrawalFromABlockedAccountIsARestriction() {
+        // validateForAccountBlock runs first on the withdrawal; the externalId
+        // route never tells us the numeric id, and needs not — one account.
+        withdrawalAnswers(blocked(17));
+
+        assertThatThrownBy(() -> client.withdraw("acct-1", new BigDecimal("5.00"), "ref-b", "key-b"))
+                .isInstanceOf(CoreAccountRestrictedException.class)
+                .hasMessageContaining("error.msg.saving.account.blocked.transaction.not.allowed")
+                // Ops detail is the code; Fineract's sentence (and its id) stays out.
+                .hasMessageNotContaining("17");
+    }
+
+    @Test
+    void aWithdrawalFromADebitBlockedAccountIsARestriction() {
+        withdrawalAnswers(debitsBlocked(17));
+
+        assertThatThrownBy(() -> client.withdraw("acct-1", new BigDecimal("5.00"), "ref-db", "key-db"))
+                .isInstanceOf(CoreAccountRestrictedException.class)
+                .hasMessageContaining("error.msg.savings.account.debit.transaction.not.allowed");
+    }
+
+    @Test
+    void aTransferFromABlockedSourceIsARestriction() {
+        // Source 11 (fromAccountId below): the withdrawal leg runs first.
+        transferAnswers(blocked(11));
+
+        assertThatThrownBy(() -> client.transfer(7L, 11L, 8L, 12L, new BigDecimal("100.00"), "rent", "key-tb"))
+                .isInstanceOf(CoreAccountRestrictedException.class);
+    }
+
+    @Test
+    void aTransferFromADebitBlockedSourceIsARestriction() {
+        transferAnswers(debitsBlocked(11));
+
+        assertThatThrownBy(() -> client.transfer(7L, 11L, 8L, 12L, new BigDecimal("100.00"), "rent", "key-td"))
+                .isInstanceOf(CoreAccountRestrictedException.class);
+    }
+
+    @Test
+    void aBlockedRecipientIsAPlainRefusalNotTheSendersRestriction() {
+        // Same code as a blocked source — only args[0] (12 = toAccountId) says
+        // whose account it is. It is the recipient's, so the sender must not be
+        // told THEIR account is paused. The message is ALL the sender ever sees
+        // (422 detail, ledger failure_message, same-key replay), so it is fixed
+        // copy: Fineract's code would say WHICH hold the bank put on someone
+        // else's wallet, on a probe that moves no money and repeats for free.
+        transferAnswers(blocked(12));
+
+        assertThatThrownBy(() -> client.transfer(7L, 11L, 8L, 12L, new BigDecimal("100.00"), "rent", "key-rb"))
+                .isInstanceOf(CoreClientException.class)
+                .isNotInstanceOf(CoreAccountRestrictedException.class)
+                .hasMessage("The receiving account cannot accept this payment.");
+    }
+
+    @Test
+    void aCreditBlockedRecipientIsWordedExactlyLikeAFullBlock() {
+        // A credit-only block and a full freeze must be indistinguishable to
+        // the sender — same message, byte for byte, nothing of either code.
+        transferAnswers(creditsBlocked(12));
+
+        assertThatThrownBy(() -> client.transfer(7L, 11L, 8L, 12L, new BigDecimal("100.00"), "rent", "key-rc"))
+                .isInstanceOf(CoreClientException.class)
+                .isNotInstanceOf(CoreAccountRestrictedException.class)
+                .hasMessage("The receiving account cannot accept this payment.")
+                .hasMessageNotContaining("error.msg")
+                .hasMessageNotContaining("12");
+    }
+
+    @Test
+    void aFullBlockWhoseAccountCannotBeReadIsNotCalledTheSenders() {
+        // Defensive: a BLOCK on a transfer with no id to attribute it. Calling
+        // it the sender's restriction would be the worse error, and calling it
+        // the recipient's would be a guess — so it names neither.
+        transferAnswers("""
+                {"errors":[{"userMessageGlobalisationCode":"error.msg.saving.account.blocked.transaction.not.allowed",
+                            "defaultUserMessage":"Any transaction to 12 is not allowed, since the account is blocked"}]}
+                """);
+
+        assertThatThrownBy(() -> client.transfer(7L, 11L, 8L, 12L, new BigDecimal("100.00"), "rent", "key-rn"))
+                .isInstanceOf(CoreClientException.class)
+                .isNotInstanceOf(CoreAccountRestrictedException.class)
+                .hasMessage("The banking system refused this payment.");
+    }
+
+    @Test
+    void aDepositIntoABlockedAccountDebitsNothingSoIsNoRestriction() {
+        // A deposit's BLOCK / CREDIT-block refusal is about the credited side —
+        // the customer's own account here, so "receiving account" is true.
+        wireMock.stubFor(post(urlPathEqualTo("/v1/savingsaccounts/external-id/acct-1/transactions"))
+                .withQueryParam("command", equalTo("deposit"))
+                .willReturn(aResponse().withStatus(403)
+                        .withHeader("Content-Type", "application/json").withBody(blocked(17))));
+
+        assertThatThrownBy(() -> client.deposit("acct-1", new BigDecimal("5.00"), "ref-dep", "key-dep"))
+                .isInstanceOf(CoreClientException.class)
+                .isNotInstanceOf(CoreAccountRestrictedException.class)
+                .hasMessage("The receiving account cannot accept this payment.");
+    }
+
+    @Test
+    void otherDomainVetoesKeepTheirUpstreamWording() {
+        // The restriction match is exact-code: insufficient balance, in the
+        // fork's real envelope, is still the generic refusal with its sentence.
+        withdrawalAnswers("""
+                {"developerMessage":"Request was understood but caused a domain rule violation.",
+                 "httpStatusCode":"403",
+                 "defaultUserMessage":"Errors contain reason for domain rule violation.",
+                 "userMessageGlobalisationCode":"validation.msg.domain.rule.violation",
+                 "errors":[{"developerMessage":"Insufficient account balance.",
+                            "defaultUserMessage":"Insufficient account balance.",
+                            "userMessageGlobalisationCode":"error.msg.savingsaccount.transaction.insufficient.account.balance",
+                            "parameterName":"id",
+                            "args":[{"value":17}]}]}
+                """);
+
+        assertThatThrownBy(() -> client.withdraw("acct-1", new BigDecimal("5.00"), "ref-ib", "key-ib"))
+                .isInstanceOf(CoreClientException.class)
+                .isNotInstanceOf(CoreAccountRestrictedException.class)
+                .hasMessageContaining("Insufficient account balance.");
     }
 
     @Test

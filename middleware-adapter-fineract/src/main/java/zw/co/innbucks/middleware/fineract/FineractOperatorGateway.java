@@ -9,8 +9,8 @@ import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientResponseException;
 import zw.co.innbucks.middleware.corebanking.CoreOperatorPort;
 import zw.co.innbucks.middleware.corebanking.CoreProvider;
-import zw.co.innbucks.middleware.corebanking.exception.CoreAuthException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreClientException;
+import zw.co.innbucks.middleware.corebanking.exception.CoreOperatorAuthException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreServerException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreTransientException;
 import zw.co.innbucks.middleware.corebanking.value.DepositAccountKind;
@@ -41,7 +41,8 @@ import java.util.Locale;
  * <p>The first call is the whole security model: Fineract authenticates the
  * Basic credential and enforces READ_SAVINGSACCOUNT / READ_LOAN before
  * answering, so a 200 simultaneously proves who the operator is and that
- * they may read this account. 401 maps to {@link CoreAuthException}; 403 and
+ * they may read this account. 401 maps to {@link CoreOperatorAuthException}
+ * (the operator's credential, never this middleware's); 403 and
  * 404 both map to {@link CoreClientException} without distinguishing —
  * Fineract's own distinction is preserved upstream, and flattening it here
  * avoids this endpoint becoming an account-enumeration oracle cheaper than
@@ -220,7 +221,9 @@ public class FineractOperatorGateway implements CoreOperatorPort {
     private RuntimeException mapStatus(RestClientResponseException e, String what) {
         int status = e.getStatusCode().value();
         if (status == 401) {
-            return new CoreAuthException(CoreProvider.FINERACT,
+            // The OPERATOR's credential, so never CoreAuthException, which says
+            // the core refused this middleware's own service account.
+            return new CoreOperatorAuthException(CoreProvider.FINERACT,
                     "Fineract rejected the operator credential", e);
         }
         if (status >= 400 && status < 500) {
