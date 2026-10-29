@@ -15,6 +15,8 @@
 #      role gets DEPOSIT_SAVINGSACCOUNT only on a box that opts in, and has it
 #      REVOKED everywhere else                        MIDDLEWARE_CUSTOMER_DEPOSITS
 #   6. create the two AppUsers the middleware rides     innbucks-mw-read / -write
+#   6a. remove Fineract's seeded demo super user (interopUser: ALL_FUNCTIONS,
+#       a seeded password nobody manages). Not configurable, runs every time
 #   6b. grant the BANK's operational roles — never the middleware's own two,
 #       which this script alone defines                   BANK_ROLE_GRANTS
 #   6c. make GL control accounts refuse manual journals   CONTROL_ACCOUNT_GLCODES
@@ -174,6 +176,8 @@ LOCK_FAILURES=()
 lock_failure() { LOCK_FAILURES+=("$1"); log "  !! $1"; }
 POLICY_REFUSALS=()
 policy_refusal() { POLICY_REFUSALS+=("$1"); log "  !! $1"; }
+SEED_FAILURES=()
+seed_failure() { SEED_FAILURES+=("$1"); log "  !! $1"; }
 
 # api METHOD PATH [JSON_BODY] [USER PASS] — prints the response body; nonzero on >=400.
 api() {
@@ -582,6 +586,24 @@ ensure_user() { # USERNAME PASSWORD ROLE_ID
 ensure_user "$MW_READ_ROLE"  "$MW_READ_PASSWORD"  "$READ_ROLE_ID"
 ensure_user "$MW_WRITE_ROLE" "$MW_WRITE_PASSWORD" "$WRITE_ROLE_ID"
 
+# 6a. Fineract's seeded demo super user (SEEDED_DEMO_USERS, provision-lib.sh):
+# a full-rights account nobody owns or watches. DELETE is Fineract's soft
+# delete, so the account can no longer sign in and its audit history stays. A
+# refused delete, or one maker-checker parks (a 2xx with no resourceId), fails
+# the run at the end like a lock failure; every other step still runs.
+log "6a/7 removing Fineract's seeded demo super user ..."
+SEEDED_IDS=$(seeded_demo_user_ids "$(api GET "/v1/users")")
+[[ -n "$SEEDED_IDS" ]] || log "  none present."
+for uid in $SEEDED_IDS; do
+  if ! resp=$(api DELETE "/v1/users/${uid}"); then
+    seed_failure "user id ${uid} (${SEEDED_DEMO_USERS[*]}): the delete was refused — see the API error above"
+  elif [[ -z "$(jq -r '.resourceId // empty' <<<"$resp")" ]]; then
+    seed_failure "user id ${uid} (${SEEDED_DEMO_USERS[*]}): maker-checker parked the delete — approve it in the checker inbox"
+  else
+    log "  removed user id ${uid}."
+  fi
+done
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 6b–6e: the BANK's operational policy, driven from deploy/cells/cell.<iso>.env.
 #
@@ -950,11 +972,15 @@ else
   log "7/7 skipping smoke (set RUN_SMOKE=1 to run it)."
 fi
 
-if ((${#LOCK_FAILURES[@]} + ${#POLICY_REFUSALS[@]})); then
+if ((${#LOCK_FAILURES[@]} + ${#POLICY_REFUSALS[@]} + ${#SEED_FAILURES[@]})); then
   REPORT=""
   if ((${#POLICY_REFUSALS[@]})); then
     REPORT+="the cell file asks for something this script refuses to apply:"$'\n'
     REPORT+="$(printf '         - %s\n' "${POLICY_REFUSALS[@]}")"$'\n'
+  fi
+  if ((${#SEED_FAILURES[@]})); then
+    REPORT+="Fineract's seeded demo super user is still active:"$'\n'
+    REPORT+="$(printf '         - %s\n' "${SEED_FAILURES[@]}")"$'\n'
   fi
   if ((${#LOCK_FAILURES[@]})); then
     REPORT+="the customer-deposit lock is NOT as this box asked (MIDDLEWARE_CUSTOMER_DEPOSITS=${MW_DEPOSITS}):"$'\n'

@@ -357,6 +357,19 @@ for f in ../cells/*.env; do
 done
 is "no committed cell file grants the middleware's roles" "$MW_GRANTS_IN_CELL_FILES" ""
 
+printf 'seeded_demo_user_ids (step 6a)\n'
+USERS='[{"id":1,"username":"mifos"},{"id":2,"username":"system"},{"id":3,"username":"interopUser"},{"id":9,"username":"innbucks-mw-write"}]'
+is "the list is exactly interopUser" "${SEEDED_DEMO_USERS[*]}" "interopUser"
+is "finds interopUser, never system" "$(seeded_demo_user_ids "$USERS")" "3"
+is "none present" "$(seeded_demo_user_ids '[{"id":1,"username":"mifos"}]')" ""
+is "exact username only" \
+   "$(seeded_demo_user_ids '[{"id":5,"username":"interopUser2"},{"id":6,"username":"interopuser"}]')" ""
+is "an empty listing" "$(seeded_demo_user_ids '[]')" ""
+# Under the script's set -e, a no-match or an unreadable listing must not end
+# the run inside the helper (the same trap the 6b hint once fell into).
+is "no match succeeds under -e" "$( set -e; seeded_demo_user_ids '[]'; echo rc=$? )" "rc=0"
+is "unreadable listing succeeds under -e" "$( set -e; seeded_demo_user_ids 'not json'; echo rc=$? )" "rc=0"
+
 # ─── provision-cell.sh wiring ────────────────────────────────────────────────
 # The lib cases above prove the sets are right. These prove the script USES
 # them, where a refactor that passed WRITE_PERMS to the write role, or rebuilt
@@ -381,6 +394,10 @@ is "6e checks the flagged codes against that set" \
    "$(count_lines 'mc_violations "$FLAGGED_CODES" "${PROTECTED_CODES[@]}"')" "1"
 is "6b refuses the middleware's roles" \
    "$(count_lines 'if is_middleware_role "$role_name"; then')" "1"
+is "6a deletes what seeded_demo_user_ids finds" \
+   "$(count_lines 'SEEDED_IDS=$(seeded_demo_user_ids "$(api GET "/v1/users")")')" "1"
+is "a 6a failure fails the run" \
+   "$(count_lines 'if ((${#LOCK_FAILURES[@]} + ${#POLICY_REFUSALS[@]} + ${#SEED_FAILURES[@]})); then')" "1"
 # THE ordering. 6f must read the state the run leaves behind, so no role or
 # user write may come after it (it once ran before 6b, and 6b granted the
 # deposit permission back after 6f had printed LOCKED). The smoke comes after

@@ -1189,7 +1189,11 @@ one re-provision with nothing new in `deploy/fineract/.env` (exit 0, 6f
    even on a cell that never enables maker-checker (the flag can be set from
    the console too), and it unflags + screams rather than merely warning. A
    cell file can widen what the bank dual-controls; it can never switch off the
-   thing that keeps the customer rail moving. Ordering inside 6e is the rest of
+   thing that keeps the customer rail moving. **Step 6a is the same kind:** it
+   removes Fineract's seeded demo super user (`interopUser`, `ALL_FUNCTIONS`
+   under a seeded password nobody manages; `SEEDED_DEMO_USERS` in
+   `provision-lib.sh`) on every run, and a refused or parked delete fails the
+   run. `system` is left on purpose: no role, and Fineract runs jobs as it. Ordering inside 6e is the rest of
    the safety argument: flag the bank's tasks → assert → only then flip the
    global switch. Parsing + set arithmetic are in `provision-lib.sh`, covered
    by `provision-selftest.sh` (no cell, no network, 123 cases, run by CI on
