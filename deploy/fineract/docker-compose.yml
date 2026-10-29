@@ -106,11 +106,15 @@ services:
 
       # CORS for the browser console (imari, the CBS portal). Fineract's
       # defaults accept EVERY origin WITH credentials (application.properties:
-      # 31 and 35): any site a staff member visits could then make credentialed
-      # calls (cookies, or Basic credentials the browser cached from a sign-in
-      # prompt) and read the answers. imari sets Authorization itself on every
-      # call and never uses credentials mode, so credentials are OFF, and not
-      # configurable: nothing we run needs them. The allowed origins stay "*"
+      # 31 and 35): any site a staff member visits could read Fineract's answers
+      # to calls carrying a Basic password the browser cached at Fineract's own
+      # sign-in prompt (Fineract is stateless; it sets no cookie). imari sets
+      # Authorization itself on every call and never uses credentials mode, so
+      # credentials are OFF, and not configurable: nothing we run needs them.
+      # Off, other sites can't read those answers, and a credentialed call that
+      # needs a preflight is never sent. It does NOT stop a plain cross-site
+      # form post carrying that cached password: that is CSRF, which CORS does
+      # not govern (runbook, "Browser access"). The allowed origins stay "*"
       # until imari's host move, then each box sets
       # FINERACT_CORS_ALLOWED_ORIGIN_PATTERNS in .env (runbook, "Browser access").
       # Allowed headers stay "*", which Spring answers by echoing the headers a
