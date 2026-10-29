@@ -136,7 +136,7 @@ class KycIntakeIntegrationTest {
 
     private String bearerFor(UUID id) {
         return "Bearer " + issuer.issue(new JwtIssuer.IssueRequest(
-                id.toString(), Country.KE, "basic", CustomerScopes.DEFAULT, null, null));
+                id.toString(), Country.KE, "basic", CustomerScopes.DEFAULT, null));
     }
 
     private UUID create(String auth, String body) throws Exception {

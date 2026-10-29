@@ -44,7 +44,7 @@ class KycSwitchedOffIntegrationTest {
     void setUp() {
         mvc = MockMvcBuilders.webAppContextSetup(context).apply(springSecurity()).build();
         bearer = "Bearer " + issuer.issue(new JwtIssuer.IssueRequest(
-                UUID.randomUUID().toString(), Country.KE, "basic", CustomerScopes.DEFAULT, null, null));
+                UUID.randomUUID().toString(), Country.KE, "basic", CustomerScopes.DEFAULT, null));
     }
 
     @Test
