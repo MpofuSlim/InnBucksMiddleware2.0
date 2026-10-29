@@ -153,6 +153,13 @@ public class TransactionController {
             + "refused with its own detail naming both currencies (a client error — send the cell's "
             + "currency). Show the detail; do not parse it";
 
+    /** GlobalExceptionHandler.notRegistered — the same body /me/* and /auth/step-up/* answer. */
+    private static final String CUSTOMER_NOT_REGISTERED = """
+            {"type":"about:blank","title":"Not registered","status":404,
+             "detail":"We couldn't find a registered account for this login. Please register first.",
+             "errorCode":"customer_not_registered"}
+            """;
+
     private final MovementService movementService;
 
     @PostMapping("/deposit")
@@ -184,6 +191,10 @@ public class TransactionController {
                                              "detail":"You can only access accounts that belong to you.",
                                              "errorCode":"account_ownership_mismatch"}
                                             """)})),
+            @ApiResponse(responseCode = "404", description = "No registered customer behind this token: the "
+                    + "registration never linked to the core (errorCode customer_not_registered)",
+                    content = @Content(schema = @Schema(implementation = ProblemDetail.class),
+                            examples = @ExampleObject(name = "Not registered", value = CUSTOMER_NOT_REGISTERED))),
             @ApiResponse(responseCode = "409", description = "An identical request is still in progress",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
             @ApiResponse(responseCode = "422", description = "Key reused with a different body, or the core "
@@ -242,6 +253,10 @@ public class TransactionController {
                                     @ExampleObject(name = "Step-up required", value = STEP_UP_REQUIRED),
                                     @ExampleObject(name = "Account restricted", value = ACCOUNT_RESTRICTED)
                             })),
+            @ApiResponse(responseCode = "404", description = "No registered customer behind this token: the "
+                    + "registration never linked to the core (errorCode customer_not_registered)",
+                    content = @Content(schema = @Schema(implementation = ProblemDetail.class),
+                            examples = @ExampleObject(name = "Not registered", value = CUSTOMER_NOT_REGISTERED))),
             @ApiResponse(responseCode = "409", description = "An identical request is still in progress",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
             @ApiResponse(responseCode = "422", description = LIMITS_422_DESCRIPTION,
@@ -303,6 +318,10 @@ public class TransactionController {
                                     @ExampleObject(name = "Step-up required", value = STEP_UP_REQUIRED),
                                     @ExampleObject(name = "Account restricted", value = ACCOUNT_RESTRICTED)
                             })),
+            @ApiResponse(responseCode = "404", description = "No registered customer behind this token: the "
+                    + "registration never linked to the core (errorCode customer_not_registered)",
+                    content = @Content(schema = @Schema(implementation = ProblemDetail.class),
+                            examples = @ExampleObject(name = "Not registered", value = CUSTOMER_NOT_REGISTERED))),
             @ApiResponse(responseCode = "409", description = "An identical request is still in progress",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
             @ApiResponse(responseCode = "422", description = TRANSFER_422_DESCRIPTION,

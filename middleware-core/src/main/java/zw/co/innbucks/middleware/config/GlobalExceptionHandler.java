@@ -145,6 +145,23 @@ public class GlobalExceptionHandler {
     }
 
     /**
+     * A token whose customer has no row, or whose registration crashed before
+     * the core mapping landed, is 404 wherever it is noticed. Same story as
+     * ownership above: the identical handler lived on three controllers, and
+     * TransactionController was not one of them — a movement by such a
+     * customer fell through to the catch-all and answered 500.
+     */
+    @ExceptionHandler(zw.co.innbucks.middleware.me.ProfileNotFoundException.class)
+    public ResponseEntity<ProblemDetail> notRegistered(
+            zw.co.innbucks.middleware.me.ProfileNotFoundException ex) {
+        log.info("No registered customer: {}", ex.getMessage());
+        return problem(HttpStatus.NOT_FOUND,
+                "Not registered",
+                "We couldn't find a registered account for this login. Please register first.",
+                "customer_not_registered");
+    }
+
+    /**
      * The cell has customer deposits switched off (DepositGate). 403, not 404
      * or 503: the request is understood and authenticated, and the answer is a
      * standing policy refusal that no retry changes — the same family as

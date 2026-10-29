@@ -225,6 +225,11 @@ Build: `./mvnw verify` at the root. Run locally:
   bound to the exact transaction (`X-Step-Up-Token`; `innbucks.stepup.*`),
   and every withdrawal/transfer is checked against the caller's per-tier
   payment limits first (slice 11).
+* **Refresh deliberately IGNORES the wrong-PIN lock.** Anyone can type wrong
+  PINs against a number, so gating refresh on `locked` would be a
+  sign-out-everywhere DoS on any customer. Sessions end only by explicit
+  actions: a PIN set/reset, a replay or device mismatch, or the bank's FULL
+  block (all above).
 * **SMS/notifications ride the InnBucks notification gateway**
   (`NOTIFY_PROVIDER=innbucks-gateway` + `NOTIFY_API_*` — same platform
   gateway as the ticketing fleet; email surface pinned for later), with an

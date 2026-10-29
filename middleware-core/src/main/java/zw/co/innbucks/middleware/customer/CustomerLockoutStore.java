@@ -64,6 +64,15 @@ public class CustomerLockoutStore {
      * and silently drop the attempt (0 rows, empty RETURNING, no way to say
      * why). The ladder belongs in the CASE, which always updates and always
      * returns a row.
+     *
+     * <p><b>The counter deliberately survives the lock's expiry.</b> Nothing
+     * decays or resets it when {@code locked_until} passes, so it is still at
+     * or above the cap and the very next wrong PIN re-locks for the full
+     * duration: once the first N guesses are spent, an attacker gets ONE guess
+     * per lock period, not another N. Only a correct PIN
+     * ({@link #clearFailureCounters}) or a PIN reset clears it. Do not "fix"
+     * this by resetting the counter on expiry — that hands every lock period a
+     * fresh set of guesses.
      */
     private static final String RECORD_FAILED_ATTEMPT_SQL = """
             UPDATE customer
