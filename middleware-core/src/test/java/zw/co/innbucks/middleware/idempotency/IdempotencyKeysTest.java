@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class IdempotencyKeysTest {
 
@@ -33,6 +34,13 @@ class IdempotencyKeysTest {
     void rejectsBlankInputs() {
         assertThatIllegalArgumentException().isThrownBy(() -> IdempotencyKeys.namespaced("", "k"));
         assertThatIllegalArgumentException().isThrownBy(() -> IdempotencyKeys.namespaced("s", " "));
+        // a blank KEY is the caller's mistake (400 missing_header), a blank scope ours
+        assertThatThrownBy(() -> IdempotencyKeys.namespaced("s", " "))
+                .isInstanceOf(BlankIdempotencyKeyException.class);
+        assertThatThrownBy(() -> IdempotencyKeys.namespaced("s", null))
+                .isInstanceOf(BlankIdempotencyKeyException.class);
+        assertThatThrownBy(() -> IdempotencyKeys.namespaced("", "k"))
+                .isNotInstanceOf(BlankIdempotencyKeyException.class);
         assertThatIllegalArgumentException().isThrownBy(() -> IdempotencyKeys.namespaced(null, "k"));
     }
 }

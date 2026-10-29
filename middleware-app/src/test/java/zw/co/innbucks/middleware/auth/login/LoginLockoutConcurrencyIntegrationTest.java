@@ -96,8 +96,9 @@ class LoginLockoutConcurrencyIntegrationTest {
      *
      * <p>N is kept at 4 because each in-flight login still borrows a connection
      * for its audit unit and every audit writer serialises on
-     * {@code audit_chain_head}'s row lock; the test profile sets no Hikari keys,
-     * so Boot's default pool applies.
+     * {@code audit_chain_head}'s row lock; the test profile keeps Boot's
+     * default maximum of 10 (it only trims the IDLE connections a cached
+     * context holds), so the pool grows to cover them.
      */
     @Test
     void concurrentWrongPinsAreAllCounted() throws Exception {

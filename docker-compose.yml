@@ -116,6 +116,18 @@ services:
       # CORS — set to the FE origin in prod.
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
 
+      # KYC intake (slice 12) is OFF unless .env says KYC_ENABLED=true, and
+      # then needs its AES-256 key FILE. The key is never an env value: this
+      # .env is copied into every backup by deploy/backup-cell.sh. The file is
+      # bind-mounted read-only by the per-box docker-compose.override.yml, from
+      # a host path outside the repo and outside the backup root:
+      #   volumes:
+      #     - /etc/innbucks/kyc/kyc-keys:/run/secrets/innbucks-kyc-keys:ro
+      # with KYC_KEYS_FILE=/run/secrets/innbucks-kyc-keys in .env. Not here:
+      # a bind mount of a host file that does not exist makes Docker create a
+      # DIRECTORY there, on every box, KYC or not. Runbook: "KYC encryption key".
+      KYC_ENABLED: ${KYC_ENABLED:-false}
+
       # Profile + observability.
       SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-prod}
       TRACING_ENABLED: ${TRACING_ENABLED:-false}

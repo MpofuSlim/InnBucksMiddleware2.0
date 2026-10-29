@@ -13,6 +13,11 @@
 # you (a volume from PG18 will not start on PG16), and for reading with your
 # eyes.
 #
+# KYC data comes back as AES-GCM ciphertext and opens only with the KYC key
+# file that sealed it — which backup-cell.sh deliberately never copies. Keep
+# that file (every key id it ever had) apart and offline; without it the
+# restored KYC rows are unreadable.
+#
 # Usage: ./deploy/restore-cell.sh /path/to/cell-backups/<STAMP>
 set -euo pipefail
 
@@ -140,4 +145,10 @@ fires, it is a REAL finding: the likeliest cause is a backup whose audit_event
 and audit_chain_head were captured at different moments (backup-cell.sh stops
 the app containers to prevent exactly that), or an AUDIT_HMAC_SECRET that no
 longer matches the one the rows were sealed with.
+
+KYC: if this cell runs KYC (KYC_ENABLED=true), the restored kyc_* rows open only
+with the key file that sealed them. It is not in the backup by design: the
+mounted key file must still hold every key id the restored rows carry (v1:,
+v2:, ...). A missing id is "sealed under key vN, which is not in the key file"
+on read, never silent garbage.
 EOF

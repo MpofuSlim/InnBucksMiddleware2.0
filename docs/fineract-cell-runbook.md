@@ -849,6 +849,104 @@ services:
         -Djavax.net.ssl.trustStorePassword=${TRUSTSTORE_PASSWORD:?set TRUSTSTORE_PASSWORD in .env}
 ```
 
+### KYC encryption key (only when switching KYC intake on)
+
+KYC intake (`/me/kyc*`, CLAUDE.md slice 12) is **off** unless `.env` says
+`KYC_ENABLED=true`; off, nothing below is needed and the cell boots exactly
+as before. On, every typed ID number, typed address and photo is stored as
+AES-256-GCM ciphertext in the middleware's Postgres, sealed with keys from a
+**key file** — and the key file is boot-required.
+
+**The key never goes in `.env`.** `deploy/backup-cell.sh` copies `.env` into
+every backup, next to `middleware-cluster.sql.gz`: a key there would ride
+along with the ciphertext it protects (the script now refuses to run if it
+finds a `KYC_*KEY*` value in `.env`). The file lives on the host OUTSIDE the
+repo and outside the backup root (the script refuses that too), and is
+bind-mounted read-only:
+
+```sh
+# 1. The uid the middleware runs as inside the image (alpine "app" user).
+APP_UID=$(docker run --rm --entrypoint id "ghcr.io/mpofuslim/innbucks-middleware:$IMAGE_TAG" -u)
+
+# 2. The key file, readable by that uid only, in a root-only directory (the
+#    Docker daemon mounts it as root; the app reads it as $APP_UID). "current"
+#    seals new data; every listed key keeps opening what it sealed.
+sudo install -d -m 0700 -o root -g root /etc/innbucks/kyc
+umask 077
+printf 'current=v1\nv1=%s\n' "$(openssl rand -base64 32)" > /tmp/kyc-keys
+sudo install -m 0400 -o "$APP_UID" /tmp/kyc-keys /etc/innbucks/kyc/kyc-keys
+shred -u /tmp/kyc-keys
+```
+
+Add the mount to the box's `docker-compose.override.yml`, and two lines to
+`.env`:
+
+```yaml
+services:
+  middleware:
+    volumes:
+      - ./deploy/fineract/ssl/innbucks-cell-truststore.p12:/ssl/truststore.p12:ro
+      - /etc/innbucks/kyc/kyc-keys:/run/secrets/innbucks-kyc-keys:ro
+```
+
+```sh
+KYC_ENABLED=true
+KYC_KEYS_FILE=/run/secrets/innbucks-kyc-keys
+```
+
+Then `docker compose up -d --no-build --force-recreate middleware` (the file is
+bind-mounted as a single file, so a changed file needs a recreate too). A good
+boot logs `KYC intake ON: key file /run/secrets/innbucks-kyc-keys holds 1 key(s)
+[v1], sealing with v1`; a missing or malformed file stops the boot with a
+`KYC key ring:` message that never contains key material.
+
+**Keep a copy of the key file offline, apart from the backups.** Without it,
+every KYC row in every backup is unreadable — that is the point, and it also
+means losing the only copy loses the KYC evidence.
+
+**Rotation:** add `v2=<openssl rand -base64 32>`, set `current=v2`, recreate.
+New data seals with v2; rows sealed with v1 keep opening with v1, so **v1 stays
+in the file** until nothing carries its prefix. Count what each key still
+seals:
+
+```sql
+SELECT split_part(national_id_ciphertext, ':', 1) AS key_id, count(*) FROM kyc_round GROUP BY 1;
+SELECT convert_from(substring(content_ciphertext FROM 1 FOR position('\x3a'::bytea IN content_ciphertext) - 1), 'UTF8')
+       AS key_id, count(*) FROM kyc_file GROUP BY 1;
+```
+
+(There is no re-seal job yet; retiring a key means re-sealing its rows first —
+a follow-up, not a manual SQL edit.)
+
+**Before real customers' KYC is accepted — go-live gates, not code:** the
+box's EBS volume encrypted (Docker's volumes live on it); backups encrypted at
+creation and pruned on compliance's retention schedule (they are plain gzip
+today); the key file's offline copy made. Deleted KYC rows survive as dead
+tuples until VACUUM and in every backup taken before, until those age out.
+
+**Smoke-test one upload in the released image before switching KYC on.**
+The photo pipeline (ImageIO's JPEG codec in `java.desktop`) is tested on the
+build JDK, never inside the `eclipse-temurin:21-jre-alpine` runtime image. On
+staging with `KYC_ENABLED=true`, open a request from a test account and upload
+a photo SHAPED THE WAY THE APP SENDS ONE — a baseline (not progressive) JPEG
+under 2 MiB and 16 MP, e.g. a phone photo re-saved at about 1600 px on its
+long side. A camera original is the wrong test file: it is often over 2 MiB
+(a 413), over 16 MP (`too_many_pixels`), or HEIC on an iPhone (`not_jpeg`),
+and each of those is the intake doing its job. Send the raw bytes —
+`--data-binary`, never `-d`, which strips line breaks and corrupts the file:
+
+```sh
+curl -sS -X POST "https://<host>/middleware/me/kyc/submissions/$ID/files/id_front" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: image/jpeg' --data-binary @id.jpg
+```
+
+A `200` with `width`/`height` proves the decoder, scaler and encoder run
+there. On a refusal, read its `reason` before blaming the image:
+`too_many_pixels`, `too_small`, `not_jpeg` and any 413 are about the FILE.
+Only a `500`, or `corrupt` / `unsupported_encoding` for a file that a
+middleware run from source (dev profile, build JDK) accepts, points at
+something the runtime image is missing.
+
 Then start it. **Pull a published, scanned image — do not build on the box.**
 The Release workflow (`.github/workflows/release.yml`) gates on the test
 suite, builds, Trivy-scans CRITICAL/HIGH, pushes to GHCR and attests SLSA
@@ -942,6 +1040,43 @@ location /middleware/ {
     proxy_read_timeout 60s;
 }
 ```
+
+**KYC photo uploads need their own location** (only when KYC is on). nginx's
+default `client_max_body_size` is 1 MB, below the middleware's own 2 MiB cap
+(`KYC_IMAGE_MAX_BYTES`), and nginx's 413 is an HTML page with no `errorCode`.
+Set the limit just ABOVE the middleware's, so an oversize photo normally gets
+the app's JSON `413 kyc_file_too_large`, and keep the body in memory — past
+`client_body_buffer_size` nginx spools a request body to a temp file, i.e. a
+plaintext copy of the photo on disk:
+
+```nginx
+# Longest prefix wins over /middleware/ below. proxy_set_header lines are NOT
+# inherited by a location that sets its own, so they are repeated here.
+location /middleware/me/kyc/ {
+    client_max_body_size    2200k;   # just above KYC_IMAGE_MAX_BYTES (2 MiB)
+    client_body_buffer_size 2200k;   # never spool a photo to disk
+    proxy_pass http://127.0.0.1:8090/me/kyc/;
+    proxy_http_version 1.1;
+    proxy_set_header Host               $host;
+    proxy_set_header X-Forwarded-For    $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto  https;
+    proxy_set_header X-Forwarded-Prefix /middleware;
+    proxy_read_timeout 60s;
+}
+```
+
+Keep nginx's default `proxy_request_buffering on` for this location: nginx
+then receives the WHOLE body before it opens the upstream request, so a slow
+phone on a bad network never holds one of the middleware's few upload places
+(`KYC_IMAGE_MAX_CONCURRENT_UPLOADS`, default 4 — a full house is an immediate
+`503 kyc_upload_busy` with `Retry-After`) while it trickles bytes in.
+
+Raise both together with `KYC_IMAGE_MAX_BYTES`, never alone. Clients must treat
+ANY 413 as "too large", whatever its body — a body far over the limit is
+answered by nginx (or Cloudflare) before the app sees it. Uploads should use
+`POST`: the Cloudflare WAF in front of the InnBucks domains refused `PUT` with a
+multipart body (measured on the ticketing platform), and a raw-JPEG `PUT`
+through this edge has not been measured.
 
 Placement inside the `server` block does not matter — nginx picks the longest
 matching prefix. Behind Cloudflare, restrict 443 at the firewall to

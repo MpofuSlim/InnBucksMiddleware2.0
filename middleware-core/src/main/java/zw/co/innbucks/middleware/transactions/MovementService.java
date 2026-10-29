@@ -56,9 +56,15 @@ import java.util.function.Function;
  *       must not spend the customer's {@code /transactions/*} budget, or an
  *       app that still calls deposit on a switched-off cell would eat into
  *       the customer's withdrawals and transfers.</li>
+ *   <li><b>Blank Idempotency-Key:</b> 400 {@code missing_header}, local and
+ *       free, ahead of the budget below so a client stuck sending one cannot
+ *       use up its own next real payment. First on withdraw/transfer; on a
+ *       deposit, after the cell switch (a switched-off cell answers
+ *       {@code deposit_disabled} whatever the key).</li>
  *   <li><b>Request rate:</b> a per-customer budget on {@code /transactions/*}
- *       (429 {@code rate_limited}), first after the deposit switch — refused
- *       attempts are free, so the count limit below is not a rate limit.</li>
+ *       (429 {@code rate_limited}), after the blank-key refusal (and, on a
+ *       deposit, the cell switch) — refused attempts are free, so the count
+ *       limit below is not a rate limit.</li>
  *   <li><b>Tier:</b> resolved ONCE ({@link KycTierResolver}) and threaded into
  *       step-up and both limit checks; never re-read, never from the token.</li>
  *   <li><b>Limits, advisory (withdraw/transfer):</b> the per-tier payment
@@ -193,6 +199,10 @@ public class MovementService {
         // customer's /transactions/* budget on a request it always refuses,
         // and must leave no idempotency claim or ledger row behind.
         depositGate.requireEnabled(customerId);
+        // A blank key is the caller's bug, refused (400 missing_header) before
+        // the payment budget is spent or the core asked about ownership: a
+        // client stuck sending one must not use up its own next real payment.
+        IdempotencyKeys.requirePresent(rawKey);
         rateLimiter.enforceCustomerPayment(customerId);
         Customer customer = requireMappedCustomer(customerId);
         requireOwnership(customer, request.accountId());
@@ -214,6 +224,7 @@ public class MovementService {
 
     public IdempotencyService.Result<TransactionResponse> withdraw(UUID customerId, String rawKey,
                                                                    WithdrawRequest request, String stepUpToken) {
+        IdempotencyKeys.requirePresent(rawKey);  // before the budget — see deposit()
         rateLimiter.enforceCustomerPayment(customerId);
         Customer customer = requireMappedCustomer(customerId);
         KycTierResolution tier = tierResolver.resolve(customer);
@@ -254,6 +265,7 @@ public class MovementService {
 
     public IdempotencyService.Result<TransactionResponse> transfer(UUID customerId, String rawKey,
                                                                    TransferRequest request, String stepUpToken) {
+        IdempotencyKeys.requirePresent(rawKey);  // before the budget — see deposit()
         rateLimiter.enforceCustomerPayment(customerId);
         Customer customer = requireMappedCustomer(customerId);
         KycTierResolution tier = tierResolver.resolve(customer);

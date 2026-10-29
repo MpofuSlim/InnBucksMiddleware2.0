@@ -22,6 +22,7 @@ import zw.co.innbucks.middleware.customer.KycTier;
 import zw.co.innbucks.middleware.customer.KycTierResolution;
 import zw.co.innbucks.middleware.customer.KycTierResolver;
 import zw.co.innbucks.middleware.customer.KycTierUnavailableException;
+import zw.co.innbucks.middleware.idempotency.BlankIdempotencyKeyException;
 import zw.co.innbucks.middleware.idempotency.IdempotencyKeys;
 import zw.co.innbucks.middleware.idempotency.IdempotencyService;
 import zw.co.innbucks.middleware.ledger.LedgerOutcome;
@@ -77,8 +78,9 @@ import static org.mockito.Mockito.when;
 
 /**
  * The ORDER of the money path's guards, which is where the limits' promises
- * live: the deposit switch before anything on a deposit, the payment request
- * budget before anything else, the limits before the step-up answer, a replay
+ * live: the deposit switch before anything on a deposit, a blank
+ * Idempotency-Key refused before the payment request budget, the budget
+ * before anything else, the limits before the step-up answer, a replay
  * answered from its ledger row instead of being counted again, and the
  * binding check handed to the ledger for withdrawals and transfers only.
  */
@@ -167,6 +169,26 @@ class MovementServiceTest {
                 new WithdrawRequest(WALLET, 1000, "USD", null), null))
                 .isInstanceOf(RateLimitExceededException.class);
         verify(customers, times(2)).findById(CUSTOMER);
+    }
+
+    @Test
+    void aBlankIdempotencyKeyIsRefusedBeforeTheBudgetOrTheCore() {
+        MovementService service = service(BASIC, new CustomerRecordKycTierResolver(meters), 1);
+
+        for (String blank : new String[]{"", "   "}) {
+            assertThatThrownBy(() -> service.deposit(CUSTOMER, blank, new DepositRequest(WALLET, 1000, "USD", null)))
+                    .isInstanceOf(BlankIdempotencyKeyException.class);
+            assertThatThrownBy(() -> service.withdraw(CUSTOMER, blank,
+                    new WithdrawRequest(WALLET, 1000, "USD", null), null))
+                    .isInstanceOf(BlankIdempotencyKeyException.class);
+            assertThatThrownBy(() -> service.transfer(CUSTOMER, blank, transfer(1000), null))
+                    .isInstanceOf(BlankIdempotencyKeyException.class);
+        }
+        verifyNoInteractions(customers);
+        verify(port, never()).listDepositAccountRefs(any());
+        // the customer's one request this minute is still theirs to spend
+        assertThat(service.deposit(CUSTOMER, "k1", new DepositRequest(WALLET, 1000, "USD", null)).body().status())
+                .isEqualTo("SUCCESS");
     }
 
     /**

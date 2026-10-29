@@ -62,7 +62,8 @@ middleware-corebanking-api   The CoreBankingPort + value types + core-neutral
                              exceptions. ZERO framework deps, pure Java.
 middleware-core              Everything core-agnostic: auth (login/PIN/OTP/
                              refresh/JWT), customer, audit chain, idempotency,
-                             rate limiting, country/MSISDN SPI, config.
+                             rate limiting, country/MSISDN SPI, config,
+                             payment limits, KYC intake.
 middleware-adapter-fineract  Fineract implementation of the port (skeleton —
                              client lands in the next slice).
 middleware-app               Boot assembly: application class, yamls, Flyway
@@ -272,6 +273,13 @@ Build: `./mvnw verify` at the root. Run locally:
   second execution) — drain `idempotency_record` (one TTL) first. Stored as
   `v2:` + base64url (46 chars, fits the VARCHAR(64)); an unprefixed value is
   the pre-keyed SHA-256 hex and still matches until it expires.
+  The KYC path does not lean on that key: what it hands `IdempotencyService`
+  carries an HMAC, never the low-entropy value itself (slice 12).
+* **KYC data is sealed, and its key is kept apart from it** (slice 12): every
+  typed ID, address and photo is an AES-256-GCM envelope (`KycCipher`: key-id
+  prefix, random nonce, row/column AAD) under keys from a key FILE that is
+  never an env value and never in a backup. Guarded only while
+  `KYC_ENABLED=true`.
 * **The two Fineract AppUsers are stored at bcrypt cost 6, `mifos` at 10** —
   the same entropy argument, run the other way. Fineract's
   `DaoAuthenticationProvider` has NO verification cache, so `matches()` runs on
@@ -559,7 +567,9 @@ best-effort attempt.
 * `INNBUCKS_COUNTRY` env var pins each deployment (startup fails without it).
 * SPIs needing a per-country impl: `MsisdnNormalizer` (currently
   `KenyaMsisdnNormalizer`; registry fails startup if the active country has
-  no normalizer).
+  no normalizer), and `NationalIdValidator` (KYC, slice 12: its registry
+  fails startup without one once KYC is on, and a unit test requires one per
+  `Country` so a new market cannot forget it).
 * Every JWT carries `country`; MDC carries it; log pattern is
   `[country,correlationId,traceId,spanId]`.
 
@@ -1516,7 +1526,8 @@ one re-provision with nothing new in `deploy/fineract/.env` (exit 0, 6f
      payment can pass the advisory check, spend its SMS approval, and lose the
      binding check to a concurrent payment; the approval is bound to the amount,
      so any retry re-approves anyway, and the money is never wrong.
-   - **Order on withdraw/transfer:** per-customer request budget → load
+   - **Order on withdraw/transfer:** blank `Idempotency-Key` refusal (400
+     `missing_header`) → per-customer request budget → load
      customer → tier (ONCE) → advisory limits → step-up presence → ownership
      listing (+ the early 403 `account_restricted` on a blocked source, unless
      the key already has a ledger row — see "The account listing carries the
@@ -1525,7 +1536,7 @@ one re-provision with nothing new in `deploy/fineract/.env` (exit 0, 6f
      call, so a blocked source over a limit is told `limit_exceeded`; the
      block is reported on the next attempt within the limits.
      Deposits: the deposit switch (`DepositGate`, Security invariants) → the
-     request budget → customer → ownership → claim → `openPending` with
+     blank-key refusal → the request budget → customer → ownership → claim → `openPending` with
      `PendingReservationGuard.NONE` → core; no limits.
    - **The tier is read ONCE per request through `KycTierResolver`** and that one
      `KycTierResolution` goes to step-up and both limit checks — never re-read,
@@ -1655,9 +1666,9 @@ one re-provision with nothing new in `deploy/fineract/.env` (exit 0, 6f
      Still open in the same family: a spray-BLOCKED source address is refused
      the step-up endpoints too.
    - **`/transactions/*` has a per-customer request budget**
-     (`RATE_LIMIT_CUSTOMER_PAYMENT_*`, 10 / min, first thing in every
-     `MovementService` method — in `deposit` second, after the deposit switch,
-     whose refusal never spends it). A count limit is not a rate limit: refused
+     (`RATE_LIMIT_CUSTOMER_PAYMENT_*`, 10 / min, spent in every
+     `MovementService` method right after the blank-key refusal — in `deposit`
+     after the deposit switch too; neither refusal spends it). A count limit is not a rate limit: refused
      and failed attempts are free against it.
    Contract pinned by `PaymentLimitsPolicyLoaderTest` (every refusal rule,
    overrides incl. lowering that never changes an outcome and the tier WARN, the
@@ -1678,8 +1689,292 @@ one re-provision with nothing new in `deploy/fineract/.env` (exit 0, 6f
    the binding check alone over five rounds; same-key replay counted once;
    `/me/limits` agreeing with the refusal; FAILED released, PROCESSING counted).
 
+12. **KYC intake — DONE (switched off by default; no decisions yet).** `kyc/`
+   in middleware-core: a customer asks for a higher tier from the app —
+   `GET /me/kyc`, `POST /me/kyc/submissions`, `PUT|POST
+   /me/kyc/submissions/{id}/files/{kind}` (raw `image/jpeg` body), `POST
+   /me/kyc/submissions/{id}/submit`, `POST /me/kyc/submissions/{id}/cancel`. The typed ID, the typed address (enhanced)
+   and the photos live ENCRYPTED in the middleware's Postgres (V3). Nothing here
+   decides: review, approval, the live tier read and the staff read surface are
+   the next change; `KycDecisionApplier` is its in-process entry point, unit-
+   tested, called by nothing yet. **Approving changes no tier.**
+   - **The switch** `innbucks.kyc.enabled` (`KYC_ENABLED`, default false). Every
+     KYC bean carries `@ConditionalOnKycEnabled`: off, the routes are unmapped
+     (the plain 404 `not_found` of any unknown path) and no key is read.
+     `KycSwitchTest` scans the package so a new KYC bean cannot escape it. On,
+     the key file is boot-required in EVERY profile (`KycConfig`), and
+     `ProductionSecretsGuard` requires `KYC_KEYS_FILE` under a deployment
+     profile — **only while KYC is on**, so a deploy to a box nobody prepared
+     for KYC cannot take payments down.
+   - **Encryption: a versioned AES-256-GCM envelope** (`KycCipher`):
+     `v1:` key-id prefix, a random 96-bit nonce per value, and AAD binding each
+     value to its row and column (`KycAad` — never edit a label; add new ones),
+     so a blob copied into another row does not open. Binary form for photos
+     (`kyc_file.content_ciphertext`), base64 text form for the ID and address.
+     **A photo's AAD reaches past its own row**: a round SHOWS a file by
+     reference, so a database writer swapping in another customer's approved
+     ID photo re-points `kyc_round_evidence`, never moves a blob — binding the
+     file id alone stopped nothing. A file is sealed to (submission, upload
+     round, kind, id), and `KycFileStore.read(submissionId, evidence)` rebuilds
+     that from what the reader EXPECTS (the submission it shows, the evidence
+     row's kind), never from the file row; carry-forward still opens because a
+     file never leaves its submission or kind. In SQL the same rule is a
+     composite FK (`fk_kyc_round_evidence_file` → `uq_kyc_file_owner`), so the
+     re-point is refused outright and the seal is the backstop for a writer
+     who can drop constraints.
+   - **Keys come from a FILE, never env** (`KycKeyRing`; `current=vN` plus every
+     `vN=<base64 32 bytes>`, parsed strictly, no message ever carries key
+     material). `backup-cell.sh` copies the root `.env` into every backup next to
+     the dump, so a key there would sit beside its ciphertext. The file is
+     bind-mounted read-only from a host path outside the repo and the backup
+     root; `backup-cell.sh` now refuses to run if `.env` holds a `KYC_*KEY*`
+     value or the mounted file lives inside the repo/backup root, never copies
+     it, skips any volume mounted under `/run/secrets`, and names the host path
+     in the MANIFEST as "not in this backup". Rotation: add `v{n+1}`, point
+     `current` at it, recreate; old rows keep opening with their key, so a key
+     leaves the file only once nothing carries its prefix (no re-seal job yet).
+     Runbook: "KYC encryption key". `.gitignore` now covers key files and the
+     per-box `docker-compose.override.yml` (the runbook always said it did).
+   - **Data model (V3):** `kyc_submission` (target tier, status
+     `draft|pending_review|approved|rejected|expired`, `current_round`, sealed
+     address, `expires_at` exactly while the CUSTOMER owes work), `kyc_round`
+     (sealed canonical ID, its HMAC, mask, `signup_match`, `duplicate_count`,
+     the decision columns), `kyc_file` (one row per upload, sealed bytes,
+     `STORAGE EXTERNAL` — ciphertext does not compress), `kyc_round_evidence`
+     (per round and kind, WHICH file that round shows). INSERTs through
+     `JdbcTemplate` (the client-assigned-id gotcha). **One open submission per
+     customer** is a partial unique index whose predicate also covers a
+     rejection reopened for redo; `JdbcKycStore.OPEN_PREDICATE` must match it
+     (`KycMigrationTest`).
+   - **Rounds (why they exist).** Submit FREEZES the round: its ID and evidence
+     never change again, so whoever decides sees exactly what was sent. A
+     decision names its round and lands only on the current, frozen, undecided
+     round of a `pending_review` submission. A rejection with a redo list opens
+     round N+1: ONLY the redo kinds can be uploaded (`kyc_file_not_needed`
+     otherwise); every other kind is carried forward BY REFERENCE (an evidence
+     row pointing at round N's file — no bytes copied), and the ID is re-sealed
+     to the new round's binding. A rejection with no redo closes the submission
+     (a wrong ID or address is fixed by a new request, not a retake).
+   - **Cancel** (`POST .../{id}/cancel`) — NOT in the app's request; added
+     from review, so it needs the owner's go before the FE guide offers it.
+     Without it a well-formed but WRONG entry (a transposed ZW serial, any 5-9
+     KE digits, the wrong tier or address — none of which a retake can fix)
+     locked the customer out for the 14-day draft TTL, because only one
+     request may be open; the only other exit was submitting known-wrong data
+     for staff to reject. It works only while the customer owns the round (a
+     draft, or a rejection reopened for redo) and ends exactly as an expiry
+     does (`KycHousekeeping.expire`: `expired`, the open round's own files
+     deleted, submitted rounds' files left to retention), audited
+     `KYC_SUBMISSION_EXPIRED` with `trigger: customer_cancelled`. Idempotent on
+     an expired request; 409 `kyc_submission_not_open` with staff or decided
+     (staff decide those). It spends the CREATE budget, so a cancel-and-recreate
+     loop churns no faster than creates alone. POST, not DELETE, like `submit`.
+     No new status: `expired` already means "closed unfinished, start again".
+   - **National ID** (`NationalIdValidator` SPI, registry shaped like the MSISDN
+     one, one per `Country` — `NationalIdValidatorRegistryTest`). Canonical =
+     upper-case ASCII, spaces and every dash variant dropped, anything else
+     refused (no folding of non-ASCII letters). **ZW: structure only** — 2
+     digits, 6-7 digits, a letter, 2 digits; the check-letter algorithm is not
+     published and a wrong guess would lock real customers out, and where the
+     customer put the dash cannot be checked. **KE: 5-9 digits**, deliberately
+     loose. 400 `national_id_invalid` never repeats the number.
+     **`signup_match`** compares with the sign-up hash, which was taken over
+     the number AS TYPED (trim only): the canonical form and 54 common ZW
+     spellings are tried before `no_match` (so `no_match` can still be an odd
+     separator). **`duplicate_count`** = other customers holding the number by
+     sign-up hash (any spelling) or by a SUBMITTED (frozen) KYC round's HMAC,
+     computed at FREEZE; never refused, never shown to the customer
+     (`customer.national_id_hash` gained an index for it). A draft that was
+     never sent — open, cancelled or lapsed — is no claim to the number:
+     counting it flagged the real holder over a stranger's typo, and with
+     cancel any account could plant a flag on a known number for one create
+     and one cancel. Such a draft's round still keeps its sealed ID, HMAC and
+     mask after it closes (its submission shows the mask); how long is
+     compliance's call, beside the rejected-file retention. Mask: first 2 +
+     last 3 (`63•••••••X18`); a number
+     that would leave fewer than five hidden shows only its last 3.
+   - **The idempotency fingerprint carries HMACs, never the number or the
+     address** (`KycService.CreateFingerprint`): `IdempotencyService` keeps
+     its fingerprint a day, and this path does not depend on that
+     fingerprint being keyed: a hash of a bare ID number is a brute-force
+     from the ID. Keys are namespaced `kyc-submission:<customer>`.
+   - **Photos** (`KycImageProcessor`): a JPEG by its BYTES, never the
+     Content-Type. `JpegStructure` walks the markers before any decoder sees
+     the bytes: whole (EOI present — the JDK decoder answers truncation with a
+     half-grey image and a warning), one baseline/extended-sequential frame,
+     8-bit, 1 or 3 components, **exactly ONE scan interleaving every
+     component** (progressive is refused: thousands of scans is a CPU bomb),
+     dimensions in the header. The one-scan rule is a MEMORY rule, not a
+     tidiness one: a sequential file split into one scan per component sets
+     libjpeg's `has_multiple_scans`, and the JDK's native decoder then
+     mallocs a coefficient buffer for the WHOLE image — 2 bytes per pixel per
+     component, ~96 MB at the 16 MP cap, outside the Java heap where no cap
+     here reaches it (measured: +93 MB RSS for a 187 KB 4000x4000 file vs
+     +4 MB for the same image in one scan; two decode slots of that OOM-kill
+     the 768 MB container). Cameras write one interleaved scan, so nothing
+     real is lost. The pixel cap (16 MP) and minimum side (200 px) are
+     checked on the declared dimensions — a 30000x30000 header is refused
+     before a pixel is allocated. **Two cell-wide semaphores bound upload
+     memory** (one replica, 768 MB, it moves money): an UPLOAD place (4) is
+     taken before the body is read and held until the image is processed —
+     full is an immediate 503 `kyc_upload_busy` + Retry-After, nothing read —
+     so at most 4 bodies are ever in the heap whatever Tomcat's 200 threads
+     or the rate-limit bursts of several accounts add up to; inside it, a
+     DECODE slot (2, waited for up to 5 s). A declared body is read into ONE
+     array of exactly `Content-Length` bytes, no copy. A chunked body goes
+     through `readNBytes(cap + 1)`, which gathers 16 KB chunks and then copies
+     them into one array, so it peaks at TWICE its size while it is read
+     (4 places x 2 x 2 MiB = 16 MiB at worst, not 8). Behind nginx's default
+     request buffering every body reaches us with a `Content-Length`, and that
+     buffering is also what keeps a slow phone from sitting on a place while
+     it trickles bytes in (runbook). Decode through the JPEG reader only,
+     in-memory streams plus
+     `ImageIO.setUseCache(false)` (no temp files), subsampled during decode,
+     any decoder warning refused; then scaled (1600 documents, 1080 selfie)
+     and re-encoded from pixels at q0.9 with NO metadata — EXIF, ICC, XMP and
+     anything after EOI are gone; EXIF orientation is dropped, not applied.
+     Byte cap 2 MiB: `Content-Length` over it is a JSON 413
+     `kyc_file_too_large` before the body is touched, a chunked body is read
+     only up to it. **Nothing parses a body before a controller**, so nothing
+     reads one before authentication or outside an upload place: both Boot
+     defaults that do are off app-wide. `spring.servlet.multipart.enabled=false`
+     (Tomcat would spool every part to a temp file, a plaintext photo on disk)
+     and `spring.mvc.formcontent.filter.enabled=false` — Boot's
+     `FormContentFilter` reads the WHOLE body of any PUT/PATCH/DELETE sent as
+     `application/x-www-form-urlencoded` into the heap, unlimited and
+     unauthenticated, which made the upload places a bound on uploads only
+     (and would also eat a raw-JPEG PUT mislabelled as a form). No endpoint
+     takes a form. The test profile's `application.yaml` shadows the main one,
+     so no `@SpringBootTest` sees either line: `ServletBodyParsingSwitchesTest`
+     reads the SHIPPED file and proves Boot honours it. nginx's
+     upload location sits just above the cap (runbook); a client must treat
+     ANY 413 as too large.
+   - **Rate limits** per customer AND per address (`ClientIpResolver`) on
+     create/upload/submit (`KycRateLimiter`, `innbucks.kyc.rate-limit.*`), FIRST,
+     through `RateLimiterService` (so `rate-limit.enabled` stays the master
+     switch): 429 `rate_limited` + Retry-After. Every call spends, replays and
+     refusals included — a refusal that costs nothing is no limit — so the app
+     RESUMES from `GET /me/kyc`, never by calling create to read the 409's id.
+     The create budget is 5 per customer per DAY, which only holds because
+     `RateLimiterService` now keeps an idle key for its own window or an hour,
+     whichever is longer: the old flat one-hour idle eviction recreated the
+     bucket full, i.e. 5 per quiet hour (and silently shortened any window an
+     operator raised past an hour through the env). It stays a SOFT bound:
+     every restart resets it, and past the limiter's one shared size cap
+     (100,000 keys, ~45 MB at ~475 B a key, measured) Caffeine evicts by
+     frequency, so a daily bucket spent quietly can be dropped and come back
+     full. A cache of its own for long windows was weighed and not taken —
+     up to another 45 MB on the replica that moves money, for a budget whose
+     overrun now costs rows, not reviewer flags (see `duplicate_count`).
+   - **Lifecycle** (`KycLifecycleJob`, daily): drafts and reopened rounds past
+     `draft-ttl` (14 d) expire and lose their unsubmitted files; REJECTED rounds'
+     files go after `rejected-file-retention` (30 d — a placeholder, compliance's
+     call); approved-round files are never deleted (evidence of record). Files
+     are deleted only when no evidence row references them, which is what keeps
+     a file carried into an approved round safe from its rejected round's
+     purge. The write paths also expire a lapsed submission inline, so a
+     customer is never stuck behind one until the sweep. **Unlocked, safely**:
+     one replica, and each item is its own transaction under the submission
+     row lock, re-checked and idempotent — a second runner would find nothing
+     to do. **Deleted bytea is not gone**: it survives as dead tuples until
+     VACUUM and in every earlier backup until those age out.
+   - **Audit** (best-effort, like every customer event):
+     `KYC_SUBMISSION_OPENED`, `KYC_FILE_STORED` (kind, round, size —
+     never content), `KYC_ROUND_SUBMITTED` (with the duplicate count),
+     `KYC_ROUND_DECIDED`, `KYC_SUBMISSION_EXPIRED`, `KYC_FILES_PURGED`. No ID,
+     address or image anywhere in audit or logs; the KYC request record
+     redacts its own `toString`, and an unreadable KYC body is answered without
+     logging Jackson's message (it can quote the token).
+   - **`onFile` is the evidence of RECORD** — the latest APPROVED round's masked
+     ID, files and address; all false until one is approved. It used to be the
+     latest FROZEN round of any outcome, which flipped photos to false when a
+     rejected round's retention purged them (masked ID still shown), let a later
+     rejected request hide approved evidence kept forever, and showed a photo
+     rejected as unreadable as "on file" while `redo` asked for it. Approved
+     files are never deleted, so the record never moves under the customer. What
+     a pending or rejected request carries is `submission`'s to say, including
+     the masked ID it was made with (`submission.nationalId`). This departs from
+     the app's example, where a basic customer's rejected request showed a
+     masked `onFile.nationalId`: that number is on the submission now, not
+     claimed as on file.
+   - **The tier**: read once per request through `KycTierResolver`; a tier that
+     could not be read is 503 `kyc_tier_unavailable`, never a guessed "you can
+     upgrade". A submission is SELF-CONTAINED: it carries everything its
+     target tier needs even when an earlier approved one holds some of it
+     (reusing evidence across submissions is the review step's decision).
+   - **What the FE guide must state** (delivered in chat, per the FE-doc rule
+     above) because it goes beyond the app's request: `submission.status` has a
+     FIFTH value, `expired` (lapsed or cancelled: start a new request) — an app
+     parsing a strict four-value enum breaks on the first lapsed draft;
+     `submission.round`, `.missing`, `.expiresAt` (they drive the resume
+     screen) and `.nationalId` (masked); `onFile` is the evidence of RECORD,
+     not "last sent", and adds `proofOfAddress`; resume from `GET /me/kyc`,
+     never by probing create; every NEW request takes a NEW Idempotency-Key,
+     one opened after a cancel or an expiry included — for a day the old key
+     replays the old, closed request's 201 (an id that then answers 409
+     `expired`) and spends the create budget each time; uploads are raw
+     `image/jpeg` bodies, POST preferred; ANY 413 means too large; 503
+     `kyc_upload_busy` means retry after Retry-After; and the cancel endpoint
+     once the owner says go.
+   - **`approve()` is called only once the tier change is in force.** It frees
+     the one-open slot and makes the round the record; on a reviewer's yes
+     alone `/me/kyc` would show `approved` beside the old tier and offer the
+     same upgrade again. The view is deliberately NOT patched to "pending while
+     the tier lags" — a later downgrade also leaves the tier below an old
+     approved target.
+   - **A blank `Idempotency-Key` is 400 `missing_header`**, like an absent one,
+     on every endpoint that takes it (`BlankIdempotencyKeyException` from
+     `IdempotencyKeys`, one handler in `GlobalExceptionHandler`); it used to be
+     the catch-all's 500 with an ERROR stack trace on `/register` and
+     `/transactions/*` too. KYC create, withdraw and transfer refuse it FIRST;
+     deposit refuses it right after the deposit switch, so a switched-off cell
+     answers a blank key 403 `deposit_disabled` (an ABSENT header is still the
+     400, from Spring, before the service runs). Always before the budget is
+     spent and before any core read: a client stuck sending one must not use
+     up its own next real payment.
+   - **When to move the photos to object storage** (`KycFileStore` is the seam;
+     an S3 + SSE-KMS implementation keeps the `kyc_file` row and moves only the
+     bytes): **before any bulk upgrade, or once `pg_total_relation_size('kyc_file')`
+     passes ~5 GB, whichever comes first.** `backup-cell.sh` STOPS the middleware
+     for the dump and writes every byte twice (hex in the SQL dump, raw in the
+     volume tarball; ciphertext does not compress), wants 3x the data free, and
+     the store shares a 512 MB Postgres container with the ledger — so every GB
+     here is payment downtime on every backup. A re-encoded photo is roughly
+     0.15–0.4 MB, a request 0.5–1.6 MB.
+   - **Go-live gates outside the code**: EBS encryption on the box, encrypted and
+     pruned backups, an offline copy of the key file, compliance's tier
+     requirements and retention, and one photo shaped the way the app sends
+     it (baseline JPEG under 2 MiB and 16 MP, raw `--data-binary`) uploaded
+     through the RELEASED image (the JPEG pipeline is tested on the build JDK,
+     never in the alpine JRE runtime — runbook; a camera original is the
+     wrong test file, its 413 / `too_many_pixels` / `not_jpeg` is the intake
+     working).
+   Contract pinned by `KycCipherTest` + `KycKeyRingTest` (envelope, AAD incl.
+   a file opening only as its own submission/round/kind, previous and wrong
+   keys, strict parsing), the national-ID tests (ZW/KE
+   canonicalisation, refusals, spellings, mask, registry), `KycImageProcessorTest`
+   (good JPEG, PNG, truncated, bomb header refused with no decode slot,
+   progressive, one scan per component refused with no decode slot beside the
+   same hand-built file in one scan accepted, EXIF and trailing data gone,
+   downscale, slot released on failure), `KycServiceTest` / `KycRoundsTest` / `KycLifecycleJobTest` over an
+   in-memory store with the SQL's semantics, `KycHttpTest` (standalone MockMvc:
+   statuses, errorCodes, headers, every Swagger example parses with no
+   duplicate keys and carries exactly the fields of a real response of its
+   kind — problem examples leave out `instance`, the request path Spring adds
+   to every problem, as every example in this codebase does), `KycSwitchTest`
+   (off = nothing exists; on = key required; on = every
+   bean wires), the guard cases in `ProductionSecretsGuardTest`,
+   `ServletBodyParsingSwitchesTest` (the SHIPPED yaml switches multipart and
+   the form filter off, and Boot honours it), and against
+   real Postgres by `KycIntakeIntegrationTest` (full flow storing only
+   ciphertext, the partial unique index, another customer's id 404, the expiry
+   job, rounds and retention in SQL, a cancelled draft not counted as a
+   duplicate, the composite FK refusing a re-pointed
+   evidence row and the seal refusing it with the FK dropped) and
+   `KycSwitchedOffIntegrationTest`.
+
 Next (in order):
-12. **Veengu adapter** behind the same port (`V-Tenant`/`V-Access-Token`
+13. **Veengu adapter** behind the same port (`V-Tenant`/`V-Access-Token`
    headers, consent-then-execute saga, REVERSAL capability).
    **ON HOLD until the full Veengu API spec is in hand (owner's call,
    2026-07-30)** — do NOT start it from the older specs pinned in
@@ -1728,6 +2023,11 @@ restore therefore points at the backup being torn, not at the restore being
 normal. Rotating `AUDIT_HMAC_SECRET` is the other benign cause, and it is
 benign only if you actually rotated it.
 
+**The KYC key file is NOT in any backup, by design** (slice 12): the restored
+`kyc_*` rows open only with the key file that sealed them, kept offline and
+apart. `backup-cell.sh` refuses to run if `.env` holds a KYC key value or the
+mounted key file sits inside the repo or the backup root.
+
 Deferred (documented, not forgotten): **revocable access tokens** — a PIN
 reset ends every refresh family, but an access token already issued is a
 self-contained JWT and keeps working until it expires (`JWT_ACCESS_TTL`, 10
@@ -1735,12 +2035,11 @@ minutes); cutting it short needs a per-customer `token_version` claim checked
 on every request. **Gating `/auth/login` on a full bank block** — today only
 refresh reads it, so a blocked customer can sign in for one access-token
 lifetime of read access; gating login costs a core read per sign-in and a new
-403 the app must handle (owner's call). The Fineract 403 permission denial
-(`error.msg.not.authorized`, "User has no authority to: …") does not match
-`FineractErrorMapper.forbidden`'s wording heuristic, so a missing AppUser
-permission reads as a client refusal (422, ledger `core_rejected`) rather than
-an auth incident — match the code. KMS/Secrets Manager custody + rotation
-runbook; per-customer namespacing of inbound Idempotency-Keys
+403 the app must handle (owner's call). KMS/Secrets Manager custody + rotation
+runbook (the KYC key file included, plus a re-seal job so an old KYC key can be
+retired); moving KYC photos to S3 + SSE-KMS behind `KycFileStore` (slice 12 says
+when); whether an expired or rejected round's sealed ID number should be
+dropped like its files (compliance); per-customer namespacing of inbound Idempotency-Keys
 (HMAC(customerUuid ‖ key)) before propagation; the payment-limit VALUES
 (slice 11 ships the mechanism dormant, pending compliance) and moving the
 step-up thresholds into the same policy file; **offsite/automated** backup scheduling (the scripts are manual and write to the

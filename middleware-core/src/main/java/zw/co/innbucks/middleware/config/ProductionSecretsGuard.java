@@ -86,6 +86,7 @@ public class ProductionSecretsGuard {
                 || PLACEHOLDER_MARKERS.stream().anyMatch(dbPassword.toLowerCase(Locale.ROOT)::contains)) {
             failures.add("spring.datasource.password (env DATASOURCE_PASSWORD) is blank or a placeholder");
         }
+        kycKeysFileProblem().ifPresent(failures::add);
         if (!failures.isEmpty()) {
             throw new IllegalStateException(
                     "Refusing to start under deployment profiles " + active + " (an EMPTY profile set "
@@ -107,6 +108,36 @@ public class ProductionSecretsGuard {
                     + "access-token minter mint PIN-reset verification tokens (account takeover). "
                     + "Generate a distinct VERIFICATION_SIGNING_KEY.");
         }
+    }
+
+    /**
+     * The KYC encryption key is guarded ONLY while KYC is switched on
+     * ({@code innbucks.kyc.enabled}). Adding it unconditionally would let a
+     * deploy to a box whose {@code .env} was never prepared for KYC refuse to
+     * boot — taking payments down over a feature that is off.
+     *
+     * <p>What is guarded is the key FILE's path, not a key value: the key is
+     * deliberately never an env var, because {@code backup-cell.sh} copies the
+     * root {@code .env} into every backup next to the ciphertext. The file's
+     * content (present, readable, 32-byte keys, a {@code current} that exists)
+     * is checked when the KYC key ring loads — in every profile, since KYC
+     * cannot seal anything without it.
+     */
+    private java.util.Optional<String> kycKeysFileProblem() {
+        if (!Boolean.parseBoolean(trimmed("innbucks.kyc.enabled"))) {
+            return java.util.Optional.empty();
+        }
+        String keysFile = trimmed("innbucks.kyc.keys-file");
+        if (keysFile.isEmpty()) {
+            return java.util.Optional.of("innbucks.kyc.keys-file (env KYC_KEYS_FILE) is not set while KYC is "
+                    + "enabled (KYC_ENABLED=true) — mount the KYC key file read-only and point it there, or "
+                    + "switch KYC off");
+        }
+        String lower = keysFile.toLowerCase(Locale.ROOT);
+        if (PLACEHOLDER_MARKERS.stream().anyMatch(lower::contains)) {
+            return java.util.Optional.of("innbucks.kyc.keys-file (env KYC_KEYS_FILE) still names a placeholder path");
+        }
+        return java.util.Optional.empty();
     }
 
     private String check(String property, String envVar) {

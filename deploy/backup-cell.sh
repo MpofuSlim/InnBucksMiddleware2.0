@@ -70,6 +70,37 @@ if [ "${USED_KB:-0}" -gt 0 ] && [ "$AVAIL_KB" -lt $(( USED_KB * 3 )) ]; then
     die "not enough free space: want 3x the data size. Free some, or pass a path on a bigger disk."
 fi
 
+# KYC encryption key: NEVER in a backup. The KYC tables hold only AES-GCM
+# ciphertext, which is worth exactly as much as the key's separation from it.
+# This script copies the root .env into every backup (below), so the key must
+# not be in .env, and its file must not live where a backup or the repo would
+# sweep it up. Checked BEFORE anything is stopped: a refusal costs nothing.
+# (awk, not grep -q in a pipe: under pipefail grep -q's early exit SIGPIPEs
+# the writer and reads as a failure — see the verify_dump note below.)
+if awk '/^[ \t]*(export[ \t]+)?KYC_[A-Z0-9_]*KEY[A-Z0-9_]*=/ \
+        && !/^[ \t]*(export[ \t]+)?KYC_KEYS_FILE=/ { found = 1 }
+        END { exit !found }' "$REPO_DIR/.env" 2>/dev/null; then
+    die "$REPO_DIR/.env carries a KYC_*KEY* value. KYC keys live ONLY in the key file named by
+     KYC_KEYS_FILE — this backup copies .env, and would put the key next to the ciphertext.
+     Move the key into the key file, delete the line, then back up."
+fi
+KYC_KEYS_IN_CONTAINER="$(awk -F= '/^[ \t]*KYC_KEYS_FILE=/ { v = $2 } END { gsub(/["'"'"' ]/, "", v); print v }' \
+    "$REPO_DIR/.env" 2>/dev/null || true)"
+KYC_KEYS_IN_CONTAINER="${KYC_KEYS_IN_CONTAINER:-/run/secrets/innbucks-kyc-keys}"
+KYC_KEYS_ON_HOST="$(docker inspect -f '{{range .Mounts}}{{.Source}}|{{.Destination}}{{"\n"}}{{end}}' \
+    innbucks-middleware 2>/dev/null \
+    | awk -F'|' -v d="$KYC_KEYS_IN_CONTAINER" '$2 == d { print $1; exit }' || true)"
+if [ -n "$KYC_KEYS_ON_HOST" ]; then
+    KYC_KEYS_REAL="$(readlink -f "$KYC_KEYS_ON_HOST" 2>/dev/null || echo "$KYC_KEYS_ON_HOST")"
+    BACKUP_ROOT_REAL="$(readlink -f "$BACKUP_ROOT" 2>/dev/null || echo "$BACKUP_ROOT")"
+    case "$KYC_KEYS_REAL" in
+        "$REPO_DIR"/*|"$BACKUP_ROOT_REAL"/*)
+            die "the KYC key file ($KYC_KEYS_ON_HOST) lives inside the repo or the backup root.
+     Move it outside both (runbook: \"KYC encryption key\"), re-point the mount, then back up." ;;
+    esac
+    echo "KYC key file on host: $KYC_KEYS_ON_HOST — deliberately NOT part of this backup"
+fi
+
 mkdir -p "$DEST"
 echo "backing up to $DEST"
 
@@ -79,6 +110,7 @@ say "Recording cell state"
     echo "taken_utc=$STAMP"
     echo "host=$(hostname)"
     echo "repo_commit=$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+    echo "kyc_keys_file_host=${KYC_KEYS_ON_HOST:-none mounted} (NOT in this backup: the KYC data here opens only with it)"
     echo
     echo "--- running images ---"
     docker ps --format '{{.Names}}\t{{.Image}}' 2>/dev/null
@@ -129,6 +161,11 @@ backup_volumes_of() {
     docker inspect -f '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{.Destination}}{{"\n"}}{{end}}{{end}}' "$ctr" \
     | while read -r vol dest; do
         [ -z "$vol" ] && continue
+        # Secrets (the KYC key file above all) never ride a backup, even if a
+        # box mounted them from a named volume instead of a bind mount.
+        case "$dest" in
+            /run/secrets|/run/secrets/*) echo "  $label: SKIPPED $vol ($dest): secrets are kept apart"; continue ;;
+        esac
         echo "  $label: $vol ($dest)"
         docker run --rm \
             -v "$vol":/from:ro \
