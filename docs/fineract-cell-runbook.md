@@ -135,11 +135,14 @@ imari, the CBS portal, calls Fineract from the browser. Fineract's own CORS
 defaults accept every origin with credentials, so `docker-compose.yml` sets two
 things:
 
-- **Credentials are off, always.** Any site a staff member visits could
-  otherwise make credentialed calls to Fineract (cookies, or Basic credentials
-  the browser cached from a sign-in prompt) and read the answers. imari sets
-  `Authorization` itself and never uses credentials mode, so it is unaffected.
-  It is not an `.env` setting: nothing we run needs credentials.
+- **Credentials are off, always.** With them on, any site a staff member
+  visits could read Fineract's answers to calls carrying a Basic password the
+  browser cached at Fineract's own sign-in prompt. Fineract is stateless and
+  sets no cookie, so that cached password is the one browser-held credential.
+  Off, other sites can't read those answers, and a credentialed call that
+  needs a preflight (any JSON write, any custom header) is never sent. imari
+  sets `Authorization` itself and never uses credentials mode, so it is
+  unaffected. It is not an `.env` setting: nothing we run needs credentials.
 - **Origins come from `FINERACT_CORS_ALLOWED_ORIGIN_PATTERNS`** in this box's
   `.env`. Unset is every origin, which is where cells stay until imari serves
   from its own host. Then set it to that exact origin (comma-separated for
@@ -171,6 +174,14 @@ on that route adds `Access-Control-*` headers of its own, remove them: the
 browser refuses a response carrying two `Access-Control-Allow-Origin` headers,
 and one nginx sets alone would override this setting. Fineract is the only CORS
 authority for its own API.
+
+**What CORS does not cover.** A plain cross-site form post (no preflight) still
+reaches Fineract carrying a cached Basic password. Fineract disables CSRF
+protection (`SecurityConfig`), accepts the tenant as a `tenantIdentifier`
+query parameter, and has endpoints that accept form-style bodies. The browser
+only holds such a password if someone typed it into Fineract's own `401` Basic
+prompt, so staff should sign in through imari, never at a Fineract URL in the
+browser. The origin limit does not change this either.
 
 ## 4. Provision the tenant
 
