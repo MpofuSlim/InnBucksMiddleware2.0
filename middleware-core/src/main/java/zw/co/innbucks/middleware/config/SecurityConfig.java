@@ -1,5 +1,6 @@
 package zw.co.innbucks.middleware.config;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -14,6 +15,7 @@ import org.springframework.security.config.annotation.web.configurers.HeadersCon
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.header.writers.ReferrerPolicyHeaderWriter;
+import zw.co.innbucks.middleware.auth.CustomerScopes;
 import zw.co.innbucks.middleware.auth.jwt.InnbucksJwtAuthenticationConverter;
 import zw.co.innbucks.middleware.common.country.CountryProperties;
 
@@ -35,7 +37,7 @@ public class SecurityConfig {
     }
 
     @Bean
-    public SecurityFilterChain appSecurityFilterChain(HttpSecurity http) throws Exception {
+    public SecurityFilterChain appSecurityFilterChain(HttpSecurity http, ObjectMapper objectMapper) throws Exception {
         http
                 .cors(Customizer.withDefaults())
                 .csrf(AbstractHttpConfigurer::disable)
@@ -79,10 +81,20 @@ public class SecurityConfig {
                         // read-only contract); per-IP throttled in the
                         // controller because it forwards credentials upstream.
                         .requestMatchers(org.springframework.http.HttpMethod.GET, "/console/**").permitAll()
-                        .anyRequest().authenticated()
+                        // An identity token (scope identity:read alone) is for
+                        // a third party: it reads who the customer is and
+                        // NOTHING else. Every other authenticated path needs a
+                        // customer scope HERE as well as in its @PreAuthorize,
+                        // so an endpoint that ever forgets its annotation is
+                        // still closed to identity tokens.
+                        .requestMatchers(org.springframework.http.HttpMethod.GET, "/me/identity")
+                                .hasAuthority("SCOPE_" + CustomerScopes.IDENTITY_READ)
+                        .anyRequest().hasAnyAuthority(
+                                "SCOPE_" + CustomerScopes.CUSTOMER_READ, "SCOPE_" + CustomerScopes.CUSTOMER_WRITE)
                 )
                 .oauth2ResourceServer(oauth2 -> oauth2
-                        .jwt(jwt -> jwt.jwtAuthenticationConverter(new InnbucksJwtAuthenticationConverter())));
+                        .jwt(jwt -> jwt.jwtAuthenticationConverter(new InnbucksJwtAuthenticationConverter()))
+                        .accessDeniedHandler(new ScopeDeniedHandler(objectMapper)));
         return http.build();
     }
 }

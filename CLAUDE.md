@@ -246,6 +246,25 @@ Build: `./mvnw verify` at the root. Run locally:
   permissions, never `ALL_FUNCTIONS`. `Fineract-Platform-TenantId` pinned per
   cell. The customer JWT NEVER reaches Fineract. Fineract's self-service API
   is DEAD upstream (FINERACT-2480 removed it as insecure) — do not resurrect.
+* **Identity tokens: a third party learns WHO the customer is, never holds
+  a token that acts for them.** The Magaya app's profile-picture function
+  needed the caller's number, and was being handed the app's own access token
+  (`customer:write`: it can move money for 10 minutes). `POST /me/identity-token`
+  (app's token, `customer:read`) mints a token whose ONLY scope is
+  `identity:read` — no KYC tier, no device, cannot mint another; it expires 2
+  minutes after issue, plus the decoder's 60 s skew, and is reusable until
+  then — and
+  `GET /me/identity` (that scope only; the app's token is refused there) answers
+  `{customerId, msisdn}`. **Two locks, on purpose:** every other authenticated
+  path needs a `customer:*` scope at the security FILTER
+  (`SecurityConfig`: `anyRequest().hasAnyAuthority(...)`) as well as in its own
+  `@PreAuthorize`, so an endpoint that forgets its annotation is still closed to
+  identity tokens (`ScopeDeniedHandler` gives the filter's 403 the same
+  `insufficient_scope` body). **Never add `identity:read` to a login/refresh
+  token, and never accept it on an endpoint that returns more than identity.**
+  It shares the access token's issuer and audience and names no relying party:
+  fine for ONE third party; give it a per-party audience before a second one
+  receives these tokens. Pinned by `IdentityTokenIntegrationTest`.
 * Customer ↔ core mapping: `customer.core_provider` + `customer.core_external_id`;
   for Fineract the client `externalId` = our customer UUID (client-assigned,
   crash-recoverable by GET).
