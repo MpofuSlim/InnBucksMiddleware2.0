@@ -78,8 +78,9 @@ import static org.mockito.Mockito.when;
 
 /**
  * The ORDER of the money path's guards, which is where the limits' promises
- * live: the deposit switch before anything on a deposit, the payment request
- * budget before anything else, the limits before the step-up answer, a replay
+ * live: the deposit switch before anything on a deposit, a blank
+ * Idempotency-Key refused before the payment request budget, the budget
+ * before anything else, the limits before the step-up answer, a replay
  * answered from its ledger row instead of being counted again, and the
  * binding check handed to the ledger for withdrawals and transfers only.
  */

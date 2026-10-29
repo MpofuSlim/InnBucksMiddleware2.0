@@ -56,9 +56,15 @@ import java.util.function.Function;
  *       must not spend the customer's {@code /transactions/*} budget, or an
  *       app that still calls deposit on a switched-off cell would eat into
  *       the customer's withdrawals and transfers.</li>
+ *   <li><b>Blank Idempotency-Key:</b> 400 {@code missing_header}, local and
+ *       free, ahead of the budget below so a client stuck sending one cannot
+ *       use up its own next real payment. First on withdraw/transfer; on a
+ *       deposit, after the cell switch (a switched-off cell answers
+ *       {@code deposit_disabled} whatever the key).</li>
  *   <li><b>Request rate:</b> a per-customer budget on {@code /transactions/*}
- *       (429 {@code rate_limited}), first after the deposit switch — refused
- *       attempts are free, so the count limit below is not a rate limit.</li>
+ *       (429 {@code rate_limited}), after the blank-key refusal (and, on a
+ *       deposit, the cell switch) — refused attempts are free, so the count
+ *       limit below is not a rate limit.</li>
  *   <li><b>Tier:</b> resolved ONCE ({@link KycTierResolver}) and threaded into
  *       step-up and both limit checks; never re-read, never from the token.</li>
  *   <li><b>Limits, advisory (withdraw/transfer):</b> the per-tier payment

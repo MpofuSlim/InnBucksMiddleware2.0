@@ -1526,7 +1526,8 @@ one re-provision with nothing new in `deploy/fineract/.env` (exit 0, 6f
      payment can pass the advisory check, spend its SMS approval, and lose the
      binding check to a concurrent payment; the approval is bound to the amount,
      so any retry re-approves anyway, and the money is never wrong.
-   - **Order on withdraw/transfer:** per-customer request budget → load
+   - **Order on withdraw/transfer:** blank `Idempotency-Key` refusal (400
+     `missing_header`) → per-customer request budget → load
      customer → tier (ONCE) → advisory limits → step-up presence → ownership
      listing (+ the early 403 `account_restricted` on a blocked source, unless
      the key already has a ledger row — see "The account listing carries the
@@ -1535,7 +1536,7 @@ one re-provision with nothing new in `deploy/fineract/.env` (exit 0, 6f
      call, so a blocked source over a limit is told `limit_exceeded`; the
      block is reported on the next attempt within the limits.
      Deposits: the deposit switch (`DepositGate`, Security invariants) → the
-     request budget → customer → ownership → claim → `openPending` with
+     blank-key refusal → the request budget → customer → ownership → claim → `openPending` with
      `PendingReservationGuard.NONE` → core; no limits.
    - **The tier is read ONCE per request through `KycTierResolver`** and that one
      `KycTierResolution` goes to step-up and both limit checks — never re-read,
@@ -1665,9 +1666,9 @@ one re-provision with nothing new in `deploy/fineract/.env` (exit 0, 6f
      Still open in the same family: a spray-BLOCKED source address is refused
      the step-up endpoints too.
    - **`/transactions/*` has a per-customer request budget**
-     (`RATE_LIMIT_CUSTOMER_PAYMENT_*`, 10 / min, first thing in every
-     `MovementService` method — in `deposit` second, after the deposit switch,
-     whose refusal never spends it). A count limit is not a rate limit: refused
+     (`RATE_LIMIT_CUSTOMER_PAYMENT_*`, 10 / min, spent in every
+     `MovementService` method right after the blank-key refusal — in `deposit`
+     after the deposit switch too; neither refusal spends it). A count limit is not a rate limit: refused
      and failed attempts are free against it.
    Contract pinned by `PaymentLimitsPolicyLoaderTest` (every refusal rule,
    overrides incl. lowering that never changes an outcome and the tier WARN, the
@@ -1925,10 +1926,12 @@ one re-provision with nothing new in `deploy/fineract/.env` (exit 0, 6f
      on every endpoint that takes it (`BlankIdempotencyKeyException` from
      `IdempotencyKeys`, one handler in `GlobalExceptionHandler`); it used to be
      the catch-all's 500 with an ERROR stack trace on `/register` and
-     `/transactions/*` too. KYC create and deposit/withdraw/transfer refuse it
-     FIRST, before the budget is spent (and, for a deposit, before the core
-     ownership read): a client stuck sending one must not use up its own next
-     real payment.
+     `/transactions/*` too. KYC create, withdraw and transfer refuse it FIRST;
+     deposit refuses it right after the deposit switch, so a switched-off cell
+     answers a blank key 403 `deposit_disabled` (an ABSENT header is still the
+     400, from Spring, before the service runs). Always before the budget is
+     spent and before any core read: a client stuck sending one must not use
+     up its own next real payment.
    - **When to move the photos to object storage** (`KycFileStore` is the seam;
      an S3 + SSE-KMS implementation keeps the `kyc_file` row and moves only the
      bytes): **before any bulk upgrade, or once `pg_total_relation_size('kyc_file')`
