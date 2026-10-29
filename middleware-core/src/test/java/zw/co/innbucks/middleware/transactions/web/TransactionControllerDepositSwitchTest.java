@@ -17,6 +17,7 @@ import zw.co.innbucks.middleware.corebanking.CoreBankingPort;
 import zw.co.innbucks.middleware.corebanking.CoreProvider;
 import zw.co.innbucks.middleware.corebanking.command.MoneyMovementCommand;
 import zw.co.innbucks.middleware.corebanking.value.AccountRef;
+import zw.co.innbucks.middleware.corebanking.value.AccountRestriction;
 import zw.co.innbucks.middleware.corebanking.value.DepositAccountRef;
 import zw.co.innbucks.middleware.corebanking.value.IdempotencyKey;
 import zw.co.innbucks.middleware.corebanking.value.TransactionResult;
@@ -108,7 +109,8 @@ class TransactionControllerDepositSwitchTest {
         env.setActiveProfiles("prod");
         DepositGate gate = new DepositGate(new DepositProperties(depositsEnabled), env, new SimpleMeterRegistry());
         MovementService service = new MovementService(customerRepository, corePort, idempotencyService,
-                executor, ledgerRepository, stepUpService, tierResolver, limitService, rateLimiter, gate);
+                executor, ledgerRepository, stepUpService, tierResolver, limitService, rateLimiter, gate,
+                new SimpleMeterRegistry());
         return MockMvcBuilders.standaloneSetup(new TransactionController(service))
                 .setControllerAdvice(new GlobalExceptionHandler())
                 .setCustomArgumentResolvers(new AuthenticationPrincipalArgumentResolver())
@@ -144,7 +146,8 @@ class TransactionControllerDepositSwitchTest {
         when(customerRepository.findById(customerId)).thenReturn(Optional.of(customer));
         when(corePort.provider()).thenReturn(CoreProvider.FINERACT);
         when(corePort.listDepositAccountRefs(any())).thenReturn(List.of(
-                new DepositAccountRef(new AccountRef(wallet), "InnBucks Wallet", "KES", null)));
+                new DepositAccountRef(new AccountRef(wallet), "InnBucks Wallet", "KES", null,
+                        AccountRestriction.NONE)));
         when(corePort.deposit(any(), any()))
                 .thenReturn(new TransactionResult(new TxRef("CORE-501"), TransactionState.COMPLETED));
         when(ledgerRepository.findByExternalRef(anyString())).thenReturn(Optional.empty());

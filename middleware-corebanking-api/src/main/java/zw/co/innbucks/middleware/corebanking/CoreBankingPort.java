@@ -116,10 +116,17 @@ public interface CoreBankingPort {
      * balance path applies: this method feeds pre-write ownership checks, so
      * relaxing the check here would let a wrong-currency account through a
      * route the balance path would have refused.
+     *
+     * <p>Each entry carries the account's {@link
+     * zw.co.innbucks.middleware.corebanking.value.AccountRestriction} from the
+     * same listing, so the callers that already pay for it (payment ownership
+     * checks, the session-refresh block check) learn of a bank block without a
+     * second call. An override must report it exactly as the full listing does.
      */
     default List<DepositAccountRef> listDepositAccountRefs(CoreCustomerRef ref) {
         return listDepositAccounts(ref).stream()
-                .map(a -> new DepositAccountRef(a.account(), a.name(), a.currencyCode(), null))
+                .map(a -> new DepositAccountRef(a.account(), a.name(), a.currencyCode(), null,
+                        a.restriction()))
                 .toList();
     }
 

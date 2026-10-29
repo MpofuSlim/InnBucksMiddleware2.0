@@ -267,7 +267,12 @@ public class FineractClient {
         // later 404-by-ref a POSITIVE "this write never landed".
         body.put("externalId", transactionExternalId);
         putLocaleAndDateFormat(body);
-        return write(idempotencyKey, () -> writeClient.post()
+        // A withdrawal debits the one account it names; a deposit debits
+        // nothing of the customer's — what a block refusal is attributed to.
+        FineractErrorMapper.DebitedAccount debited = "withdrawal".equals(command)
+                ? FineractErrorMapper.DebitedAccount.ONLY_ACCOUNT
+                : FineractErrorMapper.DebitedAccount.NONE;
+        return write(idempotencyKey, debited, () -> writeClient.post()
                 .uri("/v1/savingsaccounts/external-id/{acct}/transactions?command={cmd}",
                         accountExternalId, command)
                 .header(IDEMPOTENCY_HEADER, FineractIdempotencyKey.forCore(idempotencyKey))
@@ -292,7 +297,7 @@ public class FineractClient {
         body.put("transferDate", today());
         body.put("transferDescription", description == null ? "InnBucks transfer" : description);
         putLocaleAndDateFormat(body);
-        return write(idempotencyKey, () -> writeClient.post()
+        return write(idempotencyKey, FineractErrorMapper.DebitedAccount.savings(fromAccountId), () -> writeClient.post()
                 .uri("/v1/accounttransfers")
                 .header(IDEMPOTENCY_HEADER, FineractIdempotencyKey.forCore(idempotencyKey))
                 .body(body)
@@ -319,6 +324,10 @@ public class FineractClient {
     }
 
     private <T> T write(String idempotencyKey, Supplier<T> call) {
+        return write(idempotencyKey, FineractErrorMapper.DebitedAccount.NONE, call);
+    }
+
+    private <T> T write(String idempotencyKey, FineractErrorMapper.DebitedAccount debited, Supplier<T> call) {
         TxRef ref = new TxRef(idempotencyKey);
         return resilience.write(() -> {
             try {
@@ -326,7 +335,7 @@ public class FineractClient {
                 failIfParkedByMakerChecker(result, ref);
                 return result;
             } catch (RestClientResponseException ex) {
-                throw FineractErrorMapper.mapWriteFailure(ex, ref);
+                throw FineractErrorMapper.mapWriteFailure(ex, ref, debited);
             } catch (ResourceAccessException ex) {
                 throw FineractErrorMapper.mapWriteIoFailure(ex, ref);
             }

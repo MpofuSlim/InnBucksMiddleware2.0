@@ -22,7 +22,8 @@ class IdempotencyRecordPrunerTest {
         Instant now = Instant.parse("2026-05-26T03:35:00Z");
         Clock clock = Clock.fixed(now, ZoneOffset.UTC);
         IdempotencyService service = new IdempotencyService(
-                jdbc, mock(ObjectMapper.class), mock(IdempotencyProperties.class), clock);
+                jdbc, mock(ObjectMapper.class), mock(IdempotencyProperties.class),
+                mock(IdempotencyFingerprinter.class), clock);
 
         service.pruneExpiredIdempotencyRecords();
 

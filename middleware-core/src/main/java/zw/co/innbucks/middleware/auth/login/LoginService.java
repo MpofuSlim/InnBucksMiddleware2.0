@@ -156,8 +156,7 @@ public class LoginService {
                 customer.countryEnum(),
                 customer.getKycTier(),
                 CustomerScopes.DEFAULT,
-                deviceHash,
-                customer.getNationalIdHash()
+                deviceHash
         ));
 
         Instant settledAt = clock.instant();

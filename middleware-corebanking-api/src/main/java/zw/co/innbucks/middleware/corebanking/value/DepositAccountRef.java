@@ -1,5 +1,7 @@
 package zw.co.innbucks.middleware.corebanking.value;
 
+import java.util.Objects;
+
 /**
  * One of a customer's deposit accounts, WITHOUT its balance.
  *
@@ -21,11 +23,23 @@ package zw.co.innbucks.middleware.corebanking.value;
  *                      returns one in its listing — display only, and NULLABLE:
  *                      a core that does not list it leaves this null rather than
  *                      inviting an extra call to find out
+ * @param restriction   the bank's block on the account, from the SAME listing —
+ *                      never null; {@link AccountRestriction#NONE} when nothing
+ *                      is blocked or the core does not say. Carried here
+ *                      because the ownership check already pays for this
+ *                      listing: refusing a debit from a blocked account early,
+ *                      and deciding whether a blocked customer's session may
+ *                      continue, then cost no extra core call
  */
 public record DepositAccountRef(
         AccountRef account,
         String name,
         String currencyCode,
-        String accountNumber
+        String accountNumber,
+        AccountRestriction restriction
 ) {
+
+    public DepositAccountRef {
+        Objects.requireNonNull(restriction, "restriction — report AccountRestriction.NONE, never null");
+    }
 }

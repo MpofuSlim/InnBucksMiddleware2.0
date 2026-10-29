@@ -30,8 +30,7 @@ class JwtRoundTripTest {
                 Country.KE,
                 "standard",
                 Set.of("accounts:read", "transfers:initiate"),
-                "device-hash-xyz",
-                "nid-hash-abc"
+                "device-hash-xyz"
         ));
 
         Jwt decoded = decoder.decode(token);
@@ -42,7 +41,8 @@ class JwtRoundTripTest {
         assertThat(decoded.getClaimAsString(InnbucksClaims.COUNTRY)).isEqualTo("KE");
         assertThat(decoded.getClaimAsString(InnbucksClaims.KYC_TIER)).isEqualTo("standard");
         assertThat(decoded.getClaimAsString(InnbucksClaims.DEVICE_ID)).isEqualTo("device-hash-xyz");
-        assertThat(decoded.getClaimAsString(InnbucksClaims.NATIONAL_ID_HASH)).isEqualTo("nid-hash-abc");
+        // The token carries no national-ID derivative (it used to: nid_hash).
+        assertThat(decoded.getClaims()).doesNotContainKey("nid_hash");
         assertThat(decoded.getClaimAsStringList(InnbucksClaims.SCOPES))
                 .containsExactlyInAnyOrder("accounts:read", "transfers:initiate");
         assertThat(decoded.getExpiresAt()).isAfter(decoded.getIssuedAt());
@@ -55,7 +55,6 @@ class JwtRoundTripTest {
                 Country.KE,
                 "basic",
                 Set.of("accounts:read"),
-                null,
                 null
         ));
 

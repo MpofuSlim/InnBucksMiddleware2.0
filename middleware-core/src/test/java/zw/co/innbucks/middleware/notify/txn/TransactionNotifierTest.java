@@ -10,6 +10,7 @@ import zw.co.innbucks.middleware.corebanking.CoreProvider;
 import zw.co.innbucks.middleware.corebanking.exception.CoreTransientException;
 import zw.co.innbucks.middleware.corebanking.value.AccountBalance;
 import zw.co.innbucks.middleware.corebanking.value.AccountRef;
+import zw.co.innbucks.middleware.corebanking.value.AccountRestriction;
 import zw.co.innbucks.middleware.corebanking.value.CoreCustomerRef;
 import zw.co.innbucks.middleware.corebanking.value.CustomerProfile;
 import zw.co.innbucks.middleware.corebanking.value.DepositAccountRef;
@@ -89,7 +90,7 @@ class TransactionNotifierTest {
         when(customers.findById(RECIPIENT)).thenReturn(Optional.of(customer(RECIPIENT, "+263771234567")));
         when(port.listDepositAccountRefs(new CoreCustomerRef(RECIPIENT.toString())))
                 .thenReturn(List.of(new DepositAccountRef(
-                        new AccountRef(RECIPIENT_ACCT), "Wallet", "USD", RECIPIENT_ACCT_NO)));
+                        new AccountRef(RECIPIENT_ACCT), "Wallet", "USD", RECIPIENT_ACCT_NO, AccountRestriction.NONE)));
         notifier = build(properties(true, false));
     }
 
@@ -271,7 +272,7 @@ class TransactionNotifierTest {
                 .thenThrow(new CoreTransientException(CoreProvider.FINERACT, "no names here", null));
         when(port.listDepositAccountRefs(new CoreCustomerRef(RECIPIENT.toString())))
                 .thenReturn(List.of(new DepositAccountRef(
-                        new AccountRef(RECIPIENT_ACCT), "Wallet", "USD", null)));
+                        new AccountRef(RECIPIENT_ACCT), "Wallet", "USD", null, AccountRestriction.NONE)));
 
         notifier.deliver(event(LedgerTransactionType.TRANSFER, LedgerStatus.COMPLETED,
                 SENDER_ACCT, RECIPIENT_ACCT));

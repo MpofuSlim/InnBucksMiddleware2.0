@@ -9,6 +9,7 @@ import zw.co.innbucks.middleware.audit.AuditAction;
 import zw.co.innbucks.middleware.audit.AuditOutcome;
 import zw.co.innbucks.middleware.audit.AuditService;
 import zw.co.innbucks.middleware.auth.exception.PinSetNotAllowedException;
+import zw.co.innbucks.middleware.auth.refresh.RefreshTokenService;
 import zw.co.innbucks.middleware.common.country.CountryProperties;
 import zw.co.innbucks.middleware.common.msisdn.MsisdnMasking;
 import zw.co.innbucks.middleware.customer.Customer;
@@ -22,6 +23,7 @@ import zw.co.innbucks.middleware.otp.VerifiedToken;
 import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -32,6 +34,13 @@ import java.util.Optional;
  * The verification token's audience + purpose claim is the authentication —
  * the customer doesn't carry a Bearer JWT for this flow because they
  * literally don't have one yet (or have lost the ability to use the old one).
+ *
+ * <p><b>Every PIN change signs the customer out everywhere</b>: all refresh
+ * token families are revoked in the same transaction as the new hash, so the
+ * change and the sign-out commit or roll back together. A reset is the
+ * takeover-recovery path — a session opened with the old PIN (or a stolen
+ * refresh token) must not outlive it. Access tokens already issued are
+ * self-contained JWTs and live out their 10-minute TTL.
  */
 @Slf4j
 @Service
@@ -53,6 +62,7 @@ public class PinService {
     private final ConsumedVerificationTokenStore consumedVerificationTokenStore;
     private final CustomerRepository customerRepository;
     private final PinHasher pinHasher;
+    private final RefreshTokenService refreshTokenService;
     private final AuditService auditService;
     private final CountryProperties countryProperties;
     private final JdbcTemplate jdbcTemplate;
@@ -132,13 +142,22 @@ public class PinService {
             throw new IllegalStateException("Customer update affected " + updated + " rows (expected 1)");
         }
 
+        // AFTER the UPDATE, which already holds the customer row lock that
+        // revokeAllSessions takes — one lock order (customer, then
+        // refresh_token) for every path. On PIN_SETUP this is normally a no-op
+        // (PENDING_VERIFICATION cannot sign in), and kept on purpose: a row an
+        // operator pushed back to pending_verification to force a fresh PIN
+        // still holds whatever sessions it had, and refresh never reads status.
         AuditAction action = switch (expectedPurpose) {
             case PIN_SETUP -> AuditAction.PIN_SET;
             case PIN_RESET -> AuditAction.PIN_RESET;
             case STEP_UP -> throw new IllegalStateException("unreachable: rejected above");
         };
-        auditService.record(action, AuditOutcome.SUCCESS, customer.getId(), null);
-        log.info("PIN {} for customer id={} status_before={} status_after=ACTIVE",
-                expectedPurpose, customer.getId(), current);
+        int revoked = refreshTokenService.revokeAllSessions(customer.getId(), action.dbValue());
+
+        auditService.record(action, AuditOutcome.SUCCESS, customer.getId(), null,
+                Map.of("refreshTokensRevoked", revoked));
+        log.info("PIN {} for customer id={} status_before={} status_after=ACTIVE refresh_tokens_revoked={}",
+                expectedPurpose, customer.getId(), current, revoked);
     }
 }

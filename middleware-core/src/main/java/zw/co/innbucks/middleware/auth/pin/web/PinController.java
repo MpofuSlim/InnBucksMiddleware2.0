@@ -49,9 +49,13 @@ public class PinController {
     @PostMapping("/reset")
     @Operation(summary = "Reset a customer's PIN (forgot-PIN flow)",
             description = "Consumes a verification token issued for purpose=PIN_RESET. Updates the PIN, clears any "
-                    + "failed-attempt counters, and unlocks the customer if they were LOCKED.")
+                    + "failed-attempt counters, unlocks the customer if they were LOCKED, and SIGNS THE CUSTOMER "
+                    + "OUT EVERYWHERE: every refresh token on every device is revoked (the next /auth/refresh "
+                    + "answers 401 refresh_invalid — route to /auth/login). Access tokens already issued stay "
+                    + "valid until they expire (the access-token TTL, 10 minutes by default).")
     @ApiResponses({
-            @ApiResponse(responseCode = "204", description = "PIN reset; customer can /auth/login with the new PIN."),
+            @ApiResponse(responseCode = "204", description = "PIN reset and every session ended; customer can "
+                    + "/auth/login with the new PIN."),
             @ApiResponse(responseCode = "401", description = "Verification token missing / expired / wrong purpose.",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
             @ApiResponse(responseCode = "403", description = "Customer is not in a state that permits PIN_RESET.",

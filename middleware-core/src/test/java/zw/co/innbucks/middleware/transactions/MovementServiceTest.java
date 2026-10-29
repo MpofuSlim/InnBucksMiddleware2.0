@@ -3,13 +3,16 @@ package zw.co.innbucks.middleware.transactions;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.InOrder;
 import org.springframework.mock.env.MockEnvironment;
 import zw.co.innbucks.middleware.audit.AuditService;
 import zw.co.innbucks.middleware.common.country.Country;
 import zw.co.innbucks.middleware.common.country.CountryProperties;
 import zw.co.innbucks.middleware.corebanking.CoreBankingPort;
 import zw.co.innbucks.middleware.corebanking.CoreProvider;
+import zw.co.innbucks.middleware.corebanking.exception.CoreAccountRestrictedException;
 import zw.co.innbucks.middleware.corebanking.value.AccountRef;
+import zw.co.innbucks.middleware.corebanking.value.AccountRestriction;
 import zw.co.innbucks.middleware.corebanking.value.CoreCustomerRef;
 import zw.co.innbucks.middleware.corebanking.value.DepositAccountRef;
 import zw.co.innbucks.middleware.customer.Customer;
@@ -63,6 +66,8 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -93,9 +98,10 @@ class MovementServiceTest {
     private final LedgerTransactionRepository ledger = mock(LedgerTransactionRepository.class);
     private final LimitUsageStore usage = mock(LimitUsageStore.class);
     private final ConsumedVerificationTokenStore consumedTokens = mock(ConsumedVerificationTokenStore.class);
+    private final VerificationTokenVerifier stepUpTokens = mock(VerificationTokenVerifier.class);
     private final StepUpService stepUp = new StepUpService(
             new StepUpProperties(true, new StepUpProperties.Thresholds(50000L, 200000L, 1000000L)),
-            mock(VerificationTokenVerifier.class), consumedTokens, mock(AuditService.class), meters);
+            stepUpTokens, consumedTokens, mock(AuditService.class), meters);
 
     @BeforeEach
     @SuppressWarnings("unchecked")
@@ -107,7 +113,8 @@ class MovementServiceTest {
         when(customers.findById(CUSTOMER)).thenReturn(Optional.of(customer));
         when(port.provider()).thenReturn(CoreProvider.FINERACT);
         when(port.listDepositAccountRefs(any(CoreCustomerRef.class))).thenReturn(List.of(
-                new DepositAccountRef(new AccountRef(WALLET), "InnBucks Wallet", "USD", null)));
+                new DepositAccountRef(new AccountRef(WALLET), "InnBucks Wallet", "USD", null,
+                        AccountRestriction.NONE)));
         when(ledger.findByExternalRef(anyString())).thenReturn(Optional.empty());
         when(usage.usage(any(), any(), any())).thenReturn(LimitUsage.NONE);
         // The idempotency layer is not under test: run the work as the claim owner.
@@ -137,7 +144,7 @@ class MovementServiceTest {
         env.setActiveProfiles("prod");
         DepositGate depositGate = new DepositGate(new DepositProperties(depositsEnabled), env, meters);
         return new MovementService(customers, port, idempotency, executor, ledger, stepUp, resolver, limits,
-                new RateLimiterService(rateLimits), depositGate);
+                new RateLimiterService(rateLimits), depositGate, meters);
     }
 
     private MovementService service() {
@@ -264,5 +271,108 @@ class MovementServiceTest {
                 .isInstanceOf(KycTierUnavailableException.class);
         // What BASIC lets through without an approval still goes through.
         assertThat(service.transfer(CUSTOMER, "k2", transfer(1000), null).body().status()).isEqualTo("SUCCESS");
+    }
+
+    // ------------------------------------------- the bank block against the limits
+
+    private void walletIs(AccountRestriction restriction) {
+        when(port.listDepositAccountRefs(any(CoreCustomerRef.class))).thenReturn(List.of(
+                new DepositAccountRef(new AccountRef(WALLET), "InnBucks Wallet", "USD", null, restriction)));
+    }
+
+    private double restrictedRefusals(String type) {
+        return meters.counter("innbucks.transactions.restricted_refusals", "type", type).count();
+    }
+
+    /**
+     * The two local refusals come before the first core call, so a blocked
+     * source whose payment is ALSO over a limit is told the limit — true, and
+     * free — and the block is not read at all. Reading it first would put the
+     * listing ahead of every limit refusal and every token-less high-value
+     * first attempt.
+     */
+    @Test
+    void aBlockedSourceOverALimitIsToldTheLimitWithoutACoreCall() {
+        walletIs(AccountRestriction.FULLY_BLOCKED);
+
+        assertThatThrownBy(() -> service().transfer(CUSTOMER, "k1", transfer(120000), "step-up-token"))
+                .isInstanceOf(PaymentLimitExceededException.class);
+        assertThatThrownBy(() -> service().withdraw(CUSTOMER, "k2",
+                new WithdrawRequest(WALLET, 120000, "USD", null), "step-up-token"))
+                .isInstanceOf(PaymentLimitExceededException.class);
+
+        verify(port, never()).listDepositAccountRefs(any());
+        verifyNoInteractions(stepUpTokens, consumedTokens, idempotency, executor);
+        assertThat(restrictedRefusals("transfer")).isZero();
+        assertThat(restrictedRefusals("withdrawal")).isZero();
+    }
+
+    /**
+     * Within the limits, the app's two-leg flow on a blocked source: the
+     * token-less first attempt is answered step_up_required from local data
+     * (still no core call — the accepted one-SMS trade-off), and the
+     * token-bearing retry is refused account_restricted by the listing AFTER
+     * the limits were read and BEFORE the token is verified or spent, the key
+     * claimed, or the reservation guard reached.
+     */
+    @Test
+    void aBlockedSourceWithinTheLimitsIsRefusedRestrictedBeforeTheTokenIsSpent() {
+        walletIs(AccountRestriction.DEBITS_BLOCKED);
+        MovementService service = service();
+        WithdrawRequest overTheThreshold = new WithdrawRequest(WALLET, 60000, "USD", null);
+
+        assertThatThrownBy(() -> service.withdraw(CUSTOMER, "k1", overTheThreshold, null))
+                .isInstanceOf(StepUpRequiredException.class);
+        verify(port, never()).listDepositAccountRefs(any());
+        clearInvocations(usage);
+
+        assertThatThrownBy(() -> service.withdraw(CUSTOMER, "k1", overTheThreshold, "step-up-token"))
+                .isInstanceOf(CoreAccountRestrictedException.class);
+
+        InOrder order = inOrder(usage, port);
+        order.verify(usage).usage(any(), any(), any());
+        order.verify(port).listDepositAccountRefs(any());
+        verifyNoInteractions(stepUpTokens, consumedTokens, idempotency, executor);
+        assertThat(restrictedRefusals("withdrawal")).isEqualTo(1.0);
+    }
+
+    /** Below the threshold there is no approval leg: the first attempt meets the block. */
+    @Test
+    void aBlockedSourceBelowTheThresholdIsRefusedOnTheFirstAttempt() {
+        walletIs(AccountRestriction.FULLY_BLOCKED);
+
+        assertThatThrownBy(() -> service().transfer(CUSTOMER, "k1", transfer(1000), null))
+                .isInstanceOf(CoreAccountRestrictedException.class);
+
+        verifyNoInteractions(idempotency, executor);
+        assertThat(restrictedRefusals("transfer")).isEqualTo(1.0);
+    }
+
+    /**
+     * A key that ran before the block, with the day's allowance used up by
+     * that very payment: both early refusals step aside for the ledger row —
+     * the limits skip a key the ledger holds, and the block exempts it — so
+     * the retry learns its payment succeeded.
+     */
+    @Test
+    void aKeyThatRanBeforeTheBlockIsAnsweredFromItsRowNotTheLimitsOrTheBlock() {
+        walletIs(AccountRestriction.FULLY_BLOCKED);
+        String key = IdempotencyKeys.namespaced(CUSTOMER.toString(), "k-ran");
+        LedgerTransaction row = new LedgerTransaction();
+        row.setId(UUID.randomUUID());
+        row.setStatus("COMPLETED");
+        row.setCoreTxRef("CORE-7");
+        row.setExternalRef(key);
+        when(ledger.findByExternalRef(key)).thenReturn(Optional.of(row));
+        when(usage.usage(any(), any(), any())).thenReturn(new LimitUsage(150000, 0, 4, 150000, 0));
+
+        IdempotencyService.Result<TransactionResponse> result =
+                service().transfer(CUSTOMER, "k-ran", transfer(40000), null);
+
+        assertThat(result.body().status()).isEqualTo("SUCCESS");
+        assertThat(result.body().coreTxRef()).isEqualTo("CORE-7");
+        verify(usage, never()).usage(any(), any(), any());
+        verifyNoInteractions(executor);
+        assertThat(restrictedRefusals("transfer")).isZero();
     }
 }
