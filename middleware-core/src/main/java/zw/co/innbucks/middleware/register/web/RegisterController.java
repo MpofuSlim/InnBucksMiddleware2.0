@@ -43,17 +43,26 @@ public class RegisterController {
             description = "Requires a caller-supplied Idempotency-Key (UUID). The key is namespaced "
                     + "per MSISDN server-side: retries with the same key replay the original response; "
                     + "the same key with a different body is rejected. On success the customer exists "
-                    + "in the core with an ACTIVE wallet and locally awaits PIN setup "
-                    + "(/auth/otp/request → /auth/otp/verify → /auth/pin/set).")
+                    + "in the core with an ACTIVE wallet. With status pending_verification it then sets up "
+                    + "a PIN (/auth/otp/request → /auth/otp/verify → /auth/pin/set). A number whose earlier "
+                    + "registration never reached the core is RESUMED on its existing row, and that row "
+                    + "may already have a PIN (status active or locked): skip PIN setup. This is how a "
+                    + "signed-in customer answered 404 customer_not_registered finishes registering.")
     @ApiResponses({
-            @ApiResponse(responseCode = "201", description = "Customer + wallet created (or replayed)",
+            @ApiResponse(responseCode = "201", description = "Customer + wallet created, resumed, or replayed",
                     content = @Content(mediaType = MediaType.APPLICATION_JSON_VALUE,
                             schema = @Schema(implementation = RegisterResponse.class),
-                            examples = @ExampleObject(value = """
-                                    {"customerId":"3f0d1c2e-8a4b-4b6e-9f1d-2c3b4a5d6e7f",
-                                     "status":"pending_verification",
-                                     "walletAccountId":"3f0d1c2e-8a4b-4b6e-9f1d-2c3b4a5d6e7f:wallet"}
-                                    """))),
+                            examples = {
+                                    @ExampleObject(name = "New customer", value = """
+                                            {"customerId":"3f0d1c2e-8a4b-4b6e-9f1d-2c3b4a5d6e7f",
+                                             "status":"pending_verification",
+                                             "walletAccountId":"3f0d1c2e-8a4b-4b6e-9f1d-2c3b4a5d6e7f:wallet"}
+                                            """),
+                                    @ExampleObject(name = "Resumed, PIN already set", value = """
+                                            {"customerId":"9b2e4f61-0c7d-4a38-b5e2-7d1f3a6c8e90",
+                                             "status":"active",
+                                             "walletAccountId":"9b2e4f61-0c7d-4a38-b5e2-7d1f3a6c8e90:wallet"}
+                                            """)})),
             @ApiResponse(responseCode = "400", description = "Invalid MSISDN or missing fields/header",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
             @ApiResponse(responseCode = "409", description = "MSISDN already registered, or an identical "

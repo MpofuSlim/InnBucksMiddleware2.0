@@ -45,6 +45,14 @@ import java.util.UUID;
  *       (the adapter resumes each leg by positive state verification).</li>
  *   <li>A fully registered MSISDN (core mapping present) → 409.</li>
  * </ul>
+ *
+ * <p>The response carries the row's REAL status. A resumed row may already
+ * have its PIN (OTP and PIN setup never needed the core), so it is
+ * {@code active} or {@code locked}, and PIN setup would refuse it
+ * ({@code PIN_SETUP requires PENDING_VERIFICATION}). The app sends a
+ * customer to PIN setup only on {@code pending_verification}. This discloses
+ * nothing {@code /auth/login} does not already answer for the same number
+ * ({@code pin_not_set}, {@code account_locked}).
  */
 @Slf4j
 @Service
@@ -84,7 +92,8 @@ public class RegisterService {
 
     private RegisterResponse doRegister(String namespacedKey, String msisdn, RegisterRequest request) {
         String country = countryProperties.country().name();
-        UUID customerId = resolveCustomerRow(country, msisdn, request);
+        ResolvedRow row = resolveCustomerRow(country, msisdn, request);
+        UUID customerId = row.id();
         String walletExternalId = customerId + ":wallet";
 
         try {
@@ -101,10 +110,9 @@ public class RegisterService {
                     ref.externalId(), Timestamp.from(clock.instant()), customerId);
             auditService.record(AuditAction.REGISTER_SUCCESS, AuditOutcome.SUCCESS, customerId, null,
                     Map.of("msisdn", MsisdnMasking.mask(msisdn), "wallet", wallet.externalId()));
-            log.info("Registered customer id={} msisdn={} wallet={}",
-                    customerId, MsisdnMasking.mask(msisdn), wallet.externalId());
-            return new RegisterResponse(customerId,
-                    CustomerStatus.PENDING_VERIFICATION.dbValue(), wallet.externalId());
+            log.info("Registered customer id={} msisdn={} wallet={} status={}",
+                    customerId, MsisdnMasking.mask(msisdn), wallet.externalId(), row.status().dbValue());
+            return new RegisterResponse(customerId, row.status().dbValue(), wallet.externalId());
         } catch (RuntimeException ex) {
             // The local row stays WITHOUT a core mapping — the next attempt for
             // this MSISDN resumes the saga instead of failing on the unique key.
@@ -114,21 +122,25 @@ public class RegisterService {
         }
     }
 
+    /** The row registration runs on, and its status as read. */
+    private record ResolvedRow(UUID id, CustomerStatus status) {
+    }
+
     /**
      * New MSISDN → fresh row. Known MSISDN without a core mapping → a crashed
-     * earlier registration; reuse the row and resume. Known MSISDN WITH a
-     * mapping → already registered (409).
+     * earlier registration; reuse the row and resume, keeping its status.
+     * Known MSISDN WITH a mapping → already registered (409).
      */
-    private UUID resolveCustomerRow(String country, String msisdn, RegisterRequest request) {
+    private ResolvedRow resolveCustomerRow(String country, String msisdn, RegisterRequest request) {
         Optional<Customer> existing = customerRepository.findByCountryAndMsisdn(country, msisdn);
         if (existing.isPresent()) {
             Customer customer = existing.get();
             if (customer.getCoreExternalId() != null) {
                 throw new CustomerAlreadyExistsException(MsisdnMasking.mask(msisdn));
             }
-            log.info("Registration resume: incomplete customer row id={} msisdn={}",
-                    customer.getId(), MsisdnMasking.mask(msisdn));
-            return customer.getId();
+            log.info("Registration resume: incomplete customer row id={} msisdn={} status={}",
+                    customer.getId(), MsisdnMasking.mask(msisdn), customer.getStatus());
+            return new ResolvedRow(customer.getId(), customer.statusEnum());
         }
         UUID customerId = UUID.randomUUID();
         Instant now = clock.instant();
@@ -144,7 +156,7 @@ public class RegisterService {
                 CustomerStatus.PENDING_VERIFICATION.dbValue(),
                 Timestamp.from(now),
                 Timestamp.from(now));
-        return customerId;
+        return new ResolvedRow(customerId, CustomerStatus.PENDING_VERIFICATION);
     }
 
     private static String safeReason(Throwable ex) {

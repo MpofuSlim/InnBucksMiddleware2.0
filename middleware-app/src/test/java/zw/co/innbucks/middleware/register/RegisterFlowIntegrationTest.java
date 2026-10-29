@@ -32,7 +32,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 /**
  * Full registration flow against real Postgres with a stub core: creation +
  * wallet saga + core mapping, idempotent replay, key-conflict, duplicate
- * MSISDN, and the crashed-registration resume path.
+ * MSISDN, and the crashed-registration resume path (with the row's real
+ * status, PIN already set or not).
  */
 @SpringBootTest
 @Import({PostgresTestContainer.class, RegisterFlowIntegrationTest.StubConfig.class})
@@ -161,13 +162,51 @@ class RegisterFlowIntegrationTest {
         mockMvc.perform(post("/register").header("Idempotency-Key", "reg-key-6")
                         .contentType(MediaType.APPLICATION_JSON).content(body("0712345682")))
                 .andExpect(status().isCreated())
-                .andExpect(jsonPath("$.customerId").value(orphanId.toString()));
+                .andExpect(jsonPath("$.customerId").value(orphanId.toString()))
+                .andExpect(jsonPath("$.status").value("pending_verification"));
 
         assertThat(jdbcTemplate.queryForObject(
                 "SELECT core_external_id FROM customer WHERE id = ?", String.class, orphanId))
                 .isEqualTo(orphanId.toString());
         assertThat(jdbcTemplate.queryForObject("SELECT COUNT(*) FROM customer", Integer.class))
                 .isEqualTo(1);
+    }
+
+    /**
+     * OTP and PIN setup never needed the core, so a customer whose core
+     * registration failed can still have set a PIN and signed in (and then
+     * met 404 customer_not_registered on a payment). Finishing the
+     * registration must say so: answering pending_verification sent the app
+     * to PIN setup, which refuses an active account (403 pin_set_not_allowed).
+     */
+    @Test
+    void aResumedRowThatAlreadyHasAPinAnswersItsRealStatus() throws Exception {
+        UUID customerId = UUID.randomUUID();
+        Instant now = Instant.now();
+        jdbcTemplate.update("""
+                INSERT INTO customer (id, country, msisdn, pin_hash, kyc_tier, core_provider,
+                                      status, failed_pin_attempts, created_at, updated_at)
+                VALUES (?, 'KE', '+254712345684', '$argon2id$stub', 'basic', 'FINERACT',
+                        'active', 0, ?, ?)
+                """, customerId, Timestamp.from(now), Timestamp.from(now));
+
+        mockMvc.perform(post("/register").header("Idempotency-Key", "reg-key-7")
+                        .contentType(MediaType.APPLICATION_JSON).content(body("0712345684")))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.customerId").value(customerId.toString()))
+                .andExpect(jsonPath("$.status").value("active"));
+
+        // The core mapping is written; the PIN and the status are left alone.
+        assertThat(jdbcTemplate.queryForMap(
+                "SELECT core_external_id, pin_hash, status FROM customer WHERE id = ?", customerId))
+                .containsEntry("core_external_id", customerId.toString())
+                .containsEntry("pin_hash", "$argon2id$stub")
+                .containsEntry("status", "active");
+        // Same number again with a new key: now fully registered.
+        mockMvc.perform(post("/register").header("Idempotency-Key", "reg-key-8")
+                        .contentType(MediaType.APPLICATION_JSON).content(body("0712345684")))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.errorCode").value("customer_already_registered"));
     }
 
     @Test
