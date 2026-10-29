@@ -129,6 +129,49 @@ docker compose logs -f fineract   # first boot runs all tenant migrations — mi
 8443 is loopback-only on the host. For the admin UI / provisioning from your
 laptop: `ssh -L 8443:127.0.0.1:8443 <box>`.
 
+### Browser access (CORS)
+
+imari, the CBS portal, calls Fineract from the browser. Fineract's own CORS
+defaults accept every origin with credentials, so `docker-compose.yml` sets two
+things:
+
+- **Credentials are off, always.** Any site a staff member visits could
+  otherwise make credentialed calls to Fineract (cookies, or Basic credentials
+  the browser cached from a sign-in prompt) and read the answers. imari sets
+  `Authorization` itself and never uses credentials mode, so it is unaffected.
+  It is not an `.env` setting: nothing we run needs credentials.
+- **Origins come from `FINERACT_CORS_ALLOWED_ORIGIN_PATTERNS`** in this box's
+  `.env`. Unset is every origin, which is where cells stay until imari serves
+  from its own host. Then set it to that exact origin (comma-separated for
+  several), set the middleware's `CORS_ALLOWED_ORIGINS` to match, and run
+  `docker compose up -d fineract`.
+
+Allowed headers stay `*`. Spring answers that by echoing the headers a
+preflight asks for (`CorsConfiguration.checkHeaders`), so `Authorization` and
+`Fineract-Platform-TenantId` are allowed by name, which the browser requires
+for `Authorization`.
+
+Check it after any change, from `deploy/fineract`:
+
+```sh
+curl -sS --cacert ssl/cell-ca.crt -o /dev/null -D - -X OPTIONS \
+  -H 'Origin: https://<imari origin>' \
+  -H 'Access-Control-Request-Method: GET' \
+  -H 'Access-Control-Request-Headers: authorization,fineract-platform-tenantid' \
+  https://localhost:8443/fineract-provider/api/v1/offices | grep -i '^access-control'
+```
+
+Expect `Access-Control-Allow-Origin` naming the origin,
+`Access-Control-Allow-Headers: authorization, fineract-platform-tenantid`, and
+**no** `Access-Control-Allow-Credentials` line. An origin that is not allowed
+gets a `403` with none of these headers.
+
+Then run the same check against the public URL imari actually calls. If nginx
+on that route adds `Access-Control-*` headers of its own, remove them: the
+browser refuses a response carrying two `Access-Control-Allow-Origin` headers,
+and one nginx sets alone would override this setting. Fineract is the only CORS
+authority for its own API.
+
 ## 4. Provision the tenant
 
 **Per-market policy lives in `deploy/cells/cell.<iso>.env`, not in your shell
@@ -1185,4 +1228,6 @@ is set — login before that is supposed to fail.
   and `provision-cell.sh` step 6f must print `LOCKED` there. A cell provisioned
   before that lock existed keeps the permission until the script runs on it
   again (section 4, "One-time rollout").
+- Fineract's CORS never allows credentials, and once imari has its own host,
+  allows only its origin (section 3, "Browser access (CORS)").
 - The image is pinned + scanned + attested; upgrades are deliberate tags.
