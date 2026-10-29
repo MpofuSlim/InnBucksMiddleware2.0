@@ -82,6 +82,7 @@ class CoreBankingPortRefsDefaultTest {
 
             @Override public CoreProvider provider() { return CoreProvider.FINERACT; }
             @Override public Set<CoreCapability> capabilities() { return Set.of(); }
+            @Override public String cellCurrency() { return "USD"; }
             @Override public CoreCustomerRef createCustomer(CreateCustomerCommand cmd, IdempotencyKey key) {
                 throw new UnsupportedOperationException();
             }

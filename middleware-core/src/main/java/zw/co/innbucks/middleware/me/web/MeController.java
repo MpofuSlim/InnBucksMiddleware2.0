@@ -2,6 +2,7 @@ package zw.co.innbucks.middleware.me.web;
 
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.media.Content;
+import io.swagger.v3.oas.annotations.media.ExampleObject;
 import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
@@ -18,6 +19,8 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import zw.co.innbucks.middleware.limits.LimitsResponse;
+import zw.co.innbucks.middleware.limits.PaymentLimitService;
 import zw.co.innbucks.middleware.me.AccountView;
 import zw.co.innbucks.middleware.me.ProfileNotFoundException;
 import zw.co.innbucks.middleware.me.ProfileResponse;
@@ -47,8 +50,29 @@ public class MeController {
      *  thing to pull into memory, and the port contract forbids an unbounded query. */
     private static final int MAX_PAGE_SIZE = 100;
 
+    /**
+     * Internally consistent on purpose: sendableNowMinor = min(per_payment
+     * 100000, daily remaining 37500, monthly remaining 319000) = 37500; the
+     * month's use includes the day's; the step-up threshold sits below
+     * per_payment so approval can fire. The two money refusal examples on
+     * POST /transactions/withdraw and /transfer are what THIS customer gets
+     * (pinned by PaymentLimitServiceTest#theSwaggerRefusalExamplesFollowFromTheLimitsExample).
+     */
+    private static final String LIMITS_EXAMPLE = """
+            {"kycTier":"basic","currency":"USD","stepUpAtOrAboveMinor":50000,"sendableNowMinor":37500,
+             "limits":[
+               {"kind":"per_payment","limitMinor":100000},
+               {"kind":"daily","limitMinor":150000,"usedMinor":112500,"processingMinor":0,
+                "remainingMinor":37500,"resetsAt":"2026-10-29T00:00:00+02:00"},
+               {"kind":"monthly","limitMinor":500000,"usedMinor":181000,"processingMinor":5000,
+                "remainingMinor":319000,"resetsAt":"2026-11-01T00:00:00+02:00"},
+               {"kind":"daily_count","limit":10,"used":3,"remaining":7,
+                "resetsAt":"2026-10-29T00:00:00+02:00"}]}
+            """;
+
 
     private final ProfileService profileService;
+    private final PaymentLimitService limitService;
 
     @GetMapping("/profile")
     @Operation(summary = "Get the authenticated customer's profile",
@@ -84,6 +108,34 @@ public class MeController {
     @PreAuthorize("hasAuthority('SCOPE_customer:read')")
     public List<AccountView> accounts(@AuthenticationPrincipal Jwt jwt) {
         return profileService.accountsFor(UUID.fromString(jwt.getSubject()));
+    }
+
+    @GetMapping("/limits")
+    @Operation(summary = "The caller's payment limits and what is left of them",
+            description = "Per-tier limits on withdrawals and transfers made through the app (deposits are not "
+                    + "limited), with today's and this month's use. Read from the same policy and the same "
+                    + "ledger query the payment endpoints refuse with, so a payment of sendableNowMinor passes "
+                    + "and one minor unit more is refused (unless another payment lands in between). Only the "
+                    + "kinds configured for the caller's tier are listed; with none, `limits` is empty and "
+                    + "`sendableNowMinor` is null. A PROCESSING payment counts in the day and month it was "
+                    + "made; a FAILED one does not. Days and months are calendar periods in the market's "
+                    + "time zone; `resetsAt` is ISO-8601 at the market offset — show it as is.")
+    @ApiResponses({
+            @ApiResponse(responseCode = "200", description = "Limits returned",
+                    content = @Content(mediaType = MediaType.APPLICATION_JSON_VALUE,
+                            schema = @Schema(implementation = LimitsResponse.class),
+                            examples = @ExampleObject(name = "Basic tier, part-used", value = LIMITS_EXAMPLE))),
+            @ApiResponse(responseCode = "401", description = "Missing or invalid Bearer token",
+                    content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
+            @ApiResponse(responseCode = "404", description = "No registered customer behind this token",
+                    content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
+            @ApiResponse(responseCode = "503", description = "The caller's KYC tier could not be read "
+                    + "(kyc_tier_unavailable); retry",
+                    content = @Content(schema = @Schema(implementation = ProblemDetail.class)))
+    })
+    @PreAuthorize("hasAuthority('SCOPE_customer:read')")
+    public LimitsResponse limits(@AuthenticationPrincipal Jwt jwt) {
+        return limitService.viewFor(UUID.fromString(jwt.getSubject()));
     }
 
     @GetMapping("/accounts/{accountId}/transactions")

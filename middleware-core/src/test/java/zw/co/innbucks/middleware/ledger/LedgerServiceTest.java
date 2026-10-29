@@ -9,20 +9,27 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import zw.co.innbucks.middleware.audit.AuditAction;
 import zw.co.innbucks.middleware.audit.AuditOutcome;
 import zw.co.innbucks.middleware.audit.AuditService;
+import zw.co.innbucks.middleware.corebanking.CoreProvider;
+import zw.co.innbucks.middleware.corebanking.value.MinorUnits;
 
+import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -61,6 +68,70 @@ class LedgerServiceTest {
         tx.setCreatedAt(clock.instant());
         tx.setUpdatedAt(clock.instant());
         return tx;
+    }
+
+    private LedgerDraft withdrawal() {
+        return new LedgerDraft(UUID.randomUUID(), LedgerTransactionType.WITHDRAWAL, "SRC-1", null,
+                new MinorUnits(1234L, "KES"), "cash", "ref-guard-1",
+                CoreProvider.FINERACT);
+    }
+
+    /** A refusing guard (the per-tier limits) leaves nothing behind: no INSERT, no journal, no read. */
+    @Test
+    void aRefusingGuardWritesNothing() {
+        RuntimeException refusal = new IllegalStateException("limit refused");
+
+        assertThatThrownBy(() -> service.openPending(withdrawal(), (draft, openedAt) -> {
+            throw refusal;
+        })).isSameAs(refusal);
+
+        verifyNoInteractions(jdbcTemplate, repository, auditService);
+    }
+
+    /**
+     * The guard runs BEFORE the INSERT (a guard after it would count the
+     * payment against itself), and judges the period on the exact instant the
+     * row is stamped with. The clock ticks on every read, so a second read for
+     * the INSERT would bind a different value.
+     */
+    @Test
+    void theGuardRunsBeforeTheInsertOnTheInstantStampedAsCreatedAt() {
+        Clock ticking = new Clock() {
+            private Instant next = Instant.parse("2026-10-28T21:59:59.999Z");
+
+            @Override
+            public ZoneOffset getZone() {
+                return ZoneOffset.UTC;
+            }
+
+            @Override
+            public Clock withZone(ZoneId zone) {
+                return this;
+            }
+
+            @Override
+            public Instant instant() {
+                Instant now = next;
+                next = next.plusMillis(1);
+                return now;
+            }
+        };
+        LedgerService ticked = new LedgerService(repository, jdbcTemplate, auditService, meterRegistry, events,
+                ticking);
+        when(repository.findById(any())).thenReturn(Optional.of(new LedgerTransaction()));
+        AtomicReference<Instant> seen = new AtomicReference<>();
+
+        ticked.openPending(withdrawal(), (draft, openedAt) -> {
+            assertThat(Mockito.mockingDetails(jdbcTemplate).getInvocations())
+                    .as("nothing written before the guard has decided").isEmpty();
+            seen.set(openedAt);
+        });
+
+        Object[] insert = Mockito.mockingDetails(jdbcTemplate).getInvocations().stream()
+                .map(invocation -> invocation.getArguments())
+                .filter(args -> String.valueOf(args[0]).contains("(id, customer_id"))
+                .findFirst().orElseThrow();
+        assertThat(insert[13]).as("created_at").isEqualTo(Timestamp.from(seen.get()));
     }
 
     @Test

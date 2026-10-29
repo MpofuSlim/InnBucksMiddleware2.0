@@ -27,10 +27,14 @@ public enum Country {
     }
 
     /**
-     * The market's civil time zone, used ONLY to render timestamps in
-     * customer-facing copy (transaction SMS). Everything stored and logged
+     * The market's civil time zone, for what a CUSTOMER reads or is measured
+     * by: timestamps in customer-facing copy (transaction SMS), statement
+     * periods, and the calendar day / month of the per-tier payment limits
+     * (and the {@code resetsAt} they report). Everything stored and logged
      * stays UTC — a customer reading "14.05" for a payment they made at
-     * 16.05 local is the exact class of bug this exists to prevent.
+     * 16.05 local is the exact class of bug this exists to prevent. Windows
+     * are computed here in Java and compared against UTC instants; no SQL
+     * does zone arithmetic.
      */
     public ZoneId zoneId() {
         return ZoneId.of(zoneId);

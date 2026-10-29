@@ -63,7 +63,9 @@ public class StepUpController {
     @PostMapping("/request")
     @Operation(summary = "Send a step-up approval code by SMS",
             description = "Sends a one-time code to the AUTHENTICATED customer's registered mobile number. "
-                    + "Any prior outstanding step-up code is invalidated. Rate-limited per IP and per MSISDN.")
+                    + "Any prior outstanding step-up code is invalidated. Rate-limited per IP and per "
+                    + "CUSTOMER — an allowance of its own, separate from the public PIN-reset code requests "
+                    + "for the same number, so nobody else can use it up.")
     @ApiResponses({
             @ApiResponse(responseCode = "204", description = "Code dispatched to the registered number. No body."),
             @ApiResponse(responseCode = "401", description = "Missing or invalid Bearer token",
@@ -78,7 +80,7 @@ public class StepUpController {
     @PreAuthorize("hasAuthority('SCOPE_customer:write')")
     public ResponseEntity<Void> request(@AuthenticationPrincipal Jwt jwt) {
         Customer customer = requireCustomer(jwt);
-        otpService.request(customer.getMsisdn(), OtpPurpose.STEP_UP);
+        otpService.requestStepUp(customer.getId(), customer.getMsisdn());
         return ResponseEntity.noContent().build();
     }
 

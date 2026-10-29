@@ -56,8 +56,4 @@ public class Customer {
     public CustomerStatus statusEnum() {
         return CustomerStatus.fromDbValue(status);
     }
-
-    public KycTier kycTierEnum() {
-        return KycTier.fromDbValue(kycTier);
-    }
 }
