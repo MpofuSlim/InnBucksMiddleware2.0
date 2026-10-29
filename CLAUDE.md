@@ -24,7 +24,7 @@ ported here; its Oradian integration was NOT and will not be.
 > **Branch naming: always `feature/<short-kebab-description>`, cut from `main`.**
 > Never commit or push feature work on a session's auto-assigned
 > `claude/<random-words>` branch. Create the `feature/*` branch first; open a
-> **draft** PR.
+> normal PR, ready for review — **never a draft** (owner's call, 2026-10-29).
 
 ## Be critical: build the best product, not the request (owner rule, 2026-10-27)
 
