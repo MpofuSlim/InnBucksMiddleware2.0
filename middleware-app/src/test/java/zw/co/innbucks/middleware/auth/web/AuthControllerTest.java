@@ -87,7 +87,8 @@ class AuthControllerTest {
 
     @Test
     void rejectsValidTokenWithoutCustomerReadScope() throws Exception {
-        // Authenticated but missing customer:read -> the @PreAuthorize gate denies with 403.
+        // Authenticated but holding no customer scope -> the security filter's scope rule
+        // denies with 403 (the @PreAuthorize on /auth/me would too).
         String token = issuer.issue(new JwtIssuer.IssueRequest(
                 "customer-42",
                 Country.KE,

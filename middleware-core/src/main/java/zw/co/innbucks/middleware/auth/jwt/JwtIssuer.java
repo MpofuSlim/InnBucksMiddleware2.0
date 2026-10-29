@@ -76,6 +76,11 @@ public class JwtIssuer {
     }
 
     public String issue(IssueRequest request) {
+        return issue(request, ttl);
+    }
+
+    /** As {@link #issue(IssueRequest)}, with its own lifetime (the identity token's). */
+    public String issue(IssueRequest request, Duration lifetime) {
         Instant now = clock.instant();
         try {
             JWTClaimsSet.Builder builder = new JWTClaimsSet.Builder()
@@ -84,7 +89,7 @@ public class JwtIssuer {
                     .audience(audience)
                     .jwtID(UUID.randomUUID().toString())
                     .issueTime(Date.from(now))
-                    .expirationTime(Date.from(now.plus(ttl)))
+                    .expirationTime(Date.from(now.plus(lifetime)))
                     .claim(InnbucksClaims.COUNTRY, request.country().name())
                     .claim(InnbucksClaims.AUTH_TIME, now.getEpochSecond());
 

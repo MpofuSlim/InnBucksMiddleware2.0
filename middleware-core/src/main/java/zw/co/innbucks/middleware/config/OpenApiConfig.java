@@ -21,7 +21,7 @@ public class OpenApiConfig {
                         .version("0.0.1")
                         .description("""
                                 Middleware between the InnBucks super-app and the deployment's core banking system (Fineract; Veengu later) behind the CoreBankingPort.
-                                All non-public endpoints require a Bearer JWT issued by /auth/login.
+                                All non-public endpoints require a Bearer JWT issued by /auth/login, except GET /me/identity, which takes the identity token from POST /me/identity-token.
                                 """))
                 .components(new Components()
                         .addSecuritySchemes(BEARER_SCHEME, new SecurityScheme()
