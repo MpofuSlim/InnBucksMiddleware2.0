@@ -13,6 +13,9 @@ import zw.co.innbucks.middleware.corebanking.value.MinorUnits;
 import zw.co.innbucks.middleware.corebanking.value.TxRef;
 import zw.co.innbucks.middleware.customer.Customer;
 import zw.co.innbucks.middleware.customer.CustomerRepository;
+import zw.co.innbucks.middleware.customer.KycTierResolution;
+import zw.co.innbucks.middleware.customer.KycTierResolver;
+import zw.co.innbucks.middleware.customer.KycTierUnavailableException;
 import zw.co.innbucks.middleware.idempotency.IdempotencyKeys;
 import zw.co.innbucks.middleware.idempotency.IdempotencyService;
 import zw.co.innbucks.middleware.ledger.LedgerDraft;
@@ -22,7 +25,11 @@ import zw.co.innbucks.middleware.ledger.LedgerTransaction;
 import zw.co.innbucks.middleware.ledger.LedgerTransactionRepository;
 import zw.co.innbucks.middleware.ledger.LedgerTransactionType;
 import zw.co.innbucks.middleware.ledger.LedgeredMovementExecutor;
+import zw.co.innbucks.middleware.ledger.PendingReservationGuard;
+import zw.co.innbucks.middleware.limits.PaymentLimitService;
 import zw.co.innbucks.middleware.me.ProfileNotFoundException;
+import zw.co.innbucks.middleware.ratelimit.RateLimiterService;
+import zw.co.innbucks.middleware.stepup.StepUpRequiredException;
 import zw.co.innbucks.middleware.stepup.StepUpService;
 import zw.co.innbucks.middleware.transactions.MovementRequests.DepositRequest;
 import zw.co.innbucks.middleware.transactions.MovementRequests.TransferRequest;
@@ -31,6 +38,7 @@ import zw.co.innbucks.middleware.transactions.MovementRequests.WithdrawRequest;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.Function;
 
 /**
  * Customer money movement. The full guard stack, in order:
@@ -38,7 +46,20 @@ import java.util.UUID;
  * <ol>
  *   <li><b>Cell switch (deposit only):</b> deposits are an unfunded cash-in
  *       and are refused outright unless the cell opts in
- *       ({@link DepositGate}) — before anything is read, asked or written.</li>
+ *       ({@link DepositGate}) — before anything is read, asked or written,
+ *       and before the request budget below: a refusal that costs nothing
+ *       must not spend the customer's {@code /transactions/*} budget, or an
+ *       app that still calls deposit on a switched-off cell would eat into
+ *       the customer's withdrawals and transfers.</li>
+ *   <li><b>Request rate:</b> a per-customer budget on {@code /transactions/*}
+ *       (429 {@code rate_limited}), first after the deposit switch — refused
+ *       attempts are free, so the count limit below is not a rate limit.</li>
+ *   <li><b>Tier:</b> resolved ONCE ({@link KycTierResolver}) and threaded into
+ *       step-up and both limit checks; never re-read, never from the token.</li>
+ *   <li><b>Limits, advisory (withdraw/transfer):</b> the per-tier payment
+ *       limits, checked BEFORE the step-up presence check so a payment that
+ *       will be refused gets 422 {@code limit_exceeded}, never
+ *       {@code step_up_required}. Skips a key the ledger already holds.</li>
  *   <li><b>Ownership:</b> the authenticated customer must OWN the source
  *       account (withdraw/transfer) or target account (deposit) — checked
  *       against the core's own account list BEFORE anything is claimed or
@@ -51,10 +72,12 @@ import java.util.UUID;
  *   <li><b>Idempotency:</b> the caller's key is namespaced per customer
  *       (nobody can collide with or replay another customer's key) and
  *       claim-locked — concurrent duplicates can never double-execute.</li>
- *   <li><b>Ledger:</b> every movement runs through
+ *   <li><b>Ledger + limits, binding:</b> every movement runs through
  *       {@link LedgeredMovementExecutor} — write-ahead row, honest outcome
  *       recording, UNKNOWN parked for reconciliation and rendered as
- *       PROCESSING.</li>
+ *       PROCESSING. For withdraw/transfer the PENDING row is opened only if
+ *       the limits still hold, under a per-customer lock, in the same
+ *       transaction: the row IS the reservation.</li>
  *   <li><b>Crash-retry:</b> if a ledger row already exists for this key, its
  *       recorded outcome IS the answer (the core dedups the same key
  *       upstream; re-driving a FAILED key would just replay the same
@@ -72,14 +95,19 @@ public class MovementService {
     private final LedgeredMovementExecutor executor;
     private final LedgerTransactionRepository ledgerRepository;
     private final StepUpService stepUpService;
+    private final KycTierResolver tierResolver;
+    private final PaymentLimitService limitService;
+    private final RateLimiterService rateLimiter;
     private final DepositGate depositGate;
 
     public IdempotencyService.Result<TransactionResponse> deposit(UUID customerId, String rawKey,
                                                                   DepositRequest request) {
-        // First, ahead of every read: a switched-off cell must not spend a
-        // database read or a core round trip on a request it always refuses,
+        // First, ahead of every read AND the request budget: a switched-off
+        // cell must not spend a database read, a core round trip or the
+        // customer's /transactions/* budget on a request it always refuses,
         // and must leave no idempotency claim or ledger row behind.
         depositGate.requireEnabled(customerId);
+        rateLimiter.enforceCustomerPayment(customerId);
         Customer customer = requireMappedCustomer(customerId);
         requireOwnership(customer, request.accountId());
         String key = IdempotencyKeys.namespaced(customerId.toString(), rawKey);
@@ -89,6 +117,8 @@ public class MovementService {
                                 null, request.accountId(),
                                 new MinorUnits(request.amountMinor(), request.currency()),
                                 request.narrative(), key, corePort.provider()),
+                        // Deposits are not limited: no reservation check.
+                        PendingReservationGuard.NONE,
                         draftKey -> corePort.deposit(new MoneyMovementCommand(
                                         new AccountRef(request.accountId()),
                                         new MinorUnits(request.amountMinor(), request.currency()),
@@ -98,25 +128,32 @@ public class MovementService {
 
     public IdempotencyService.Result<TransactionResponse> withdraw(UUID customerId, String rawKey,
                                                                    WithdrawRequest request, String stepUpToken) {
+        rateLimiter.enforceCustomerPayment(customerId);
         Customer customer = requireMappedCustomer(customerId);
+        KycTierResolution tier = tierResolver.resolve(customer);
+        String key = IdempotencyKeys.namespaced(customerId.toString(), rawKey);
+        // Limits BEFORE step-up: a payment the limits will refuse must never be
+        // answered step_up_required (the customer would fetch an SMS code for
+        // nothing). Local and lock-free, like the step-up presence check.
+        limitService.precheck(customerId, tier, LedgerTransactionType.WITHDRAWAL,
+                request.amountMinor(), key);
         // Purely local, so it runs BEFORE the core round trip that ownership
         // costs: the app's flow sends every high-value movement once WITHOUT a
         // token to collect the fingerprint, and that attempt was always going
         // to be refused. Presence only — the token is verified and consumed by
         // enforce() below, after ownership.
-        stepUpService.requireApprovalToken(customerId, customer.kycTierEnum(),
-                LedgerTransactionType.WITHDRAWAL, request.accountId(), null,
-                request.amountMinor(), request.currency(), stepUpToken);
-        requireOwnership(customer, request.accountId());
-        stepUpService.enforce(customerId, customer.kycTierEnum(), LedgerTransactionType.WITHDRAWAL,
+        requireApprovalToken(customerId, tier, LedgerTransactionType.WITHDRAWAL,
                 request.accountId(), null, request.amountMinor(), request.currency(), stepUpToken);
-        String key = IdempotencyKeys.namespaced(customerId.toString(), rawKey);
+        requireOwnership(customer, request.accountId());
+        stepUpService.enforce(customerId, tier.tier(), LedgerTransactionType.WITHDRAWAL,
+                request.accountId(), null, request.amountMinor(), request.currency(), stepUpToken);
         return idempotencyService.execute(key, "POST", "/transactions/withdraw", request,
                 TransactionResponse.class, () -> run(key, new LedgerDraft(
                                 customerId, LedgerTransactionType.WITHDRAWAL,
                                 request.accountId(), null,
                                 new MinorUnits(request.amountMinor(), request.currency()),
                                 request.narrative(), key, corePort.provider()),
+                        limitService.reservationGuard(tier),
                         draftKey -> corePort.withdraw(new MoneyMovementCommand(
                                         new AccountRef(request.accountId()),
                                         new MinorUnits(request.amountMinor(), request.currency()),
@@ -126,24 +163,32 @@ public class MovementService {
 
     public IdempotencyService.Result<TransactionResponse> transfer(UUID customerId, String rawKey,
                                                                    TransferRequest request, String stepUpToken) {
+        rateLimiter.enforceCustomerPayment(customerId);
         Customer customer = requireMappedCustomer(customerId);
+        KycTierResolution tier = tierResolver.resolve(customer);
+        String key = IdempotencyKeys.namespaced(customerId.toString(), rawKey);
+        // Limits before step-up — see withdraw(). A transfer to one of the
+        // caller's own accounts counts like any other: only the wallet is
+        // app-visible today, and counting is the conservative reading.
+        limitService.precheck(customerId, tier, LedgerTransactionType.TRANSFER,
+                request.amountMinor(), key);
         // Local pre-check ahead of the core call — see withdraw().
-        stepUpService.requireApprovalToken(customerId, customer.kycTierEnum(),
-                LedgerTransactionType.TRANSFER, request.fromAccountId(), request.toAccountId(),
-                request.amountMinor(), request.currency(), stepUpToken);
+        requireApprovalToken(customerId, tier, LedgerTransactionType.TRANSFER,
+                request.fromAccountId(), request.toAccountId(), request.amountMinor(),
+                request.currency(), stepUpToken);
         // Only the SOURCE must be the caller's — the destination may be any
         // account in the cell (that's what a transfer is).
         requireOwnership(customer, request.fromAccountId());
-        stepUpService.enforce(customerId, customer.kycTierEnum(), LedgerTransactionType.TRANSFER,
+        stepUpService.enforce(customerId, tier.tier(), LedgerTransactionType.TRANSFER,
                 request.fromAccountId(), request.toAccountId(), request.amountMinor(),
                 request.currency(), stepUpToken);
-        String key = IdempotencyKeys.namespaced(customerId.toString(), rawKey);
         return idempotencyService.execute(key, "POST", "/transactions/transfer", request,
                 TransactionResponse.class, () -> run(key, new LedgerDraft(
                                 customerId, LedgerTransactionType.TRANSFER,
                                 request.fromAccountId(), request.toAccountId(),
                                 new MinorUnits(request.amountMinor(), request.currency()),
                                 request.narrative(), key, corePort.provider()),
+                        limitService.reservationGuard(tier),
                         draftKey -> corePort.transfer(new TransferCommand(
                                         new AccountRef(request.fromAccountId()),
                                         new AccountRef(request.toAccountId()),
@@ -152,17 +197,40 @@ public class MovementService {
                                 new IdempotencyKey(key))));
     }
 
-    private TransactionResponse run(String key, LedgerDraft draft,
-                                    java.util.function.Function<TxRef,
+    /**
+     * The step-up presence check, on the request's one resolved tier. On a
+     * tier that could not be read, "you need SMS approval" would rest on a
+     * guess (BASIC's threshold), so that refusal becomes 503
+     * {@code kyc_tier_unavailable}; a movement BASIC would let through still
+     * goes through.
+     */
+    private void requireApprovalToken(UUID customerId, KycTierResolution tier, LedgerTransactionType type,
+                                      String sourceAccountId, String targetAccountId,
+                                      long amountMinor, String currency, String stepUpToken) {
+        try {
+            stepUpService.requireApprovalToken(customerId, tier.tier(), type, sourceAccountId,
+                    targetAccountId, amountMinor, currency, stepUpToken);
+        } catch (StepUpRequiredException ex) {
+            if (!tier.authoritative()) {
+                throw new KycTierUnavailableException();
+            }
+            throw ex;
+        }
+    }
+
+    private TransactionResponse run(String key, LedgerDraft draft, PendingReservationGuard reservationGuard,
+                                    Function<TxRef,
                                             zw.co.innbucks.middleware.corebanking.value.TransactionResult> coreCall) {
         // Crash-retry: a ledger row for this key means the movement already ran
         // (or is parked). Its recorded state is the answer — never a second row,
-        // never a re-drive (the core would replay the same result anyway).
+        // never a re-drive (the core would replay the same result anyway). It
+        // is also why a replay is counted once: the binding limit check below
+        // is only reached when no row exists for the key.
         Optional<LedgerTransaction> existing = ledgerRepository.findByExternalRef(key);
         if (existing.isPresent()) {
             return fromExistingRow(existing.get());
         }
-        LedgerOutcome outcome = executor.execute(draft, coreCall);
+        LedgerOutcome outcome = executor.execute(draft, reservationGuard, coreCall);
         return switch (outcome.status()) {
             case COMPLETED -> TransactionResponse.success(outcome.transactionId(), outcome.coreTxRef());
             case FAILED -> TransactionResponse.failed(outcome.transactionId(),

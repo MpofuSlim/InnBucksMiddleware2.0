@@ -22,6 +22,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -47,16 +48,16 @@ class LedgeredMovementExecutorTest {
         row.setId(rowId);
         row.setStatus(LedgerStatus.PENDING.dbValue());
         row.setExternalRef(draft.externalRef());
-        when(ledgerService.openPending(any())).thenReturn(row);
+        when(ledgerService.openPending(any(), any())).thenReturn(row);
     }
 
     @Test
     void pendingRowIsOpenedBeforeTheCoreCall() {
         AtomicBoolean openedFirst = new AtomicBoolean(false);
-        executor.execute(draft, ref -> {
+        executor.execute(draft, PendingReservationGuard.NONE, ref -> {
             // If openPending hasn't happened by the time the core call runs,
             // the write-ahead invariant is broken.
-            verify(ledgerService).openPending(any());
+            verify(ledgerService).openPending(any(), any());
             openedFirst.set(true);
             return new TransactionResult(ref, TransactionState.COMPLETED);
         });
@@ -64,8 +65,39 @@ class LedgeredMovementExecutorTest {
     }
 
     @Test
+    void theReservationGuardIsHandedToOpenPendingUnchanged() {
+        PendingReservationGuard guard = (d, openedAt) -> { };
+
+        executor.execute(draft, guard, ref -> new TransactionResult(ref, TransactionState.COMPLETED));
+
+        verify(ledgerService).openPending(same(draft), same(guard));
+    }
+
+    /**
+     * The per-tier limits refuse by throwing from inside openPending: that must
+     * reach the caller as is, before any core call and without a ledger mark
+     * (there is no row to mark).
+     */
+    @Test
+    void aGuardRefusalMakesNoCoreCallAndMarksNothing() {
+        RuntimeException refusal = new IllegalStateException("limit refused");
+        when(ledgerService.openPending(any(), any())).thenThrow(refusal);
+        AtomicBoolean coreCalled = new AtomicBoolean(false);
+
+        assertThatThrownBy(() -> executor.execute(draft, (d, openedAt) -> { }, ref -> {
+            coreCalled.set(true);
+            return new TransactionResult(ref, TransactionState.COMPLETED);
+        })).isSameAs(refusal);
+
+        assertThat(coreCalled).isFalse();
+        verify(ledgerService, never()).markFailed(any(), any(), any());
+        verify(ledgerService, never()).markUnknown(any(), any());
+        verify(ledgerService, never()).markCompleted(any(), any(), any());
+    }
+
+    @Test
     void completedResultMarksCompleted() {
-        LedgerOutcome outcome = executor.execute(draft,
+        LedgerOutcome outcome = executor.execute(draft, PendingReservationGuard.NONE,
                 ref -> new TransactionResult(new TxRef("CORE-9"), TransactionState.COMPLETED));
 
         assertThat(outcome.status()).isEqualTo(LedgerStatus.COMPLETED);
@@ -75,7 +107,7 @@ class LedgeredMovementExecutorTest {
 
     @Test
     void failedResultMarksFailed() {
-        LedgerOutcome outcome = executor.execute(draft,
+        LedgerOutcome outcome = executor.execute(draft, PendingReservationGuard.NONE,
                 ref -> new TransactionResult(ref, TransactionState.FAILED));
 
         assertThat(outcome.status()).isEqualTo(LedgerStatus.FAILED);
@@ -84,7 +116,7 @@ class LedgeredMovementExecutorTest {
 
     @Test
     void pendingResultMarksSubmitted() {
-        LedgerOutcome outcome = executor.execute(draft,
+        LedgerOutcome outcome = executor.execute(draft, PendingReservationGuard.NONE,
                 ref -> new TransactionResult(ref, TransactionState.PENDING));
 
         assertThat(outcome.status()).isEqualTo(LedgerStatus.SUBMITTED);
@@ -93,7 +125,7 @@ class LedgeredMovementExecutorTest {
 
     @Test
     void unknownResultParksTheRowAndReturns() {
-        LedgerOutcome outcome = executor.execute(draft,
+        LedgerOutcome outcome = executor.execute(draft, PendingReservationGuard.NONE,
                 ref -> new TransactionResult(ref, TransactionState.UNKNOWN));
 
         assertThat(outcome.status()).isEqualTo(LedgerStatus.UNKNOWN);
@@ -103,7 +135,7 @@ class LedgeredMovementExecutorTest {
     @Test
     void unknownOutcomeExceptionParksAndReturnsWithoutThrowing() {
         // The canonical "money may have moved" case: handled, not an error.
-        LedgerOutcome outcome = executor.execute(draft, ref -> {
+        LedgerOutcome outcome = executor.execute(draft, PendingReservationGuard.NONE, ref -> {
             throw new CoreUnknownOutcomeException(CoreProvider.FINERACT, ref,
                     "read timeout mid-flight", null);
         });
@@ -115,7 +147,7 @@ class LedgeredMovementExecutorTest {
 
     @Test
     void clientRejectionMarksFailedAndRethrows() {
-        assertThatThrownBy(() -> executor.execute(draft, ref -> {
+        assertThatThrownBy(() -> executor.execute(draft, PendingReservationGuard.NONE, ref -> {
             throw new CoreClientException(CoreProvider.FINERACT, "insufficient balance", null);
         })).isInstanceOf(CoreClientException.class);
 
@@ -128,7 +160,7 @@ class LedgeredMovementExecutorTest {
         // provisioned without customer deposits) is refused before the command
         // runs, so FAILED is provable. Parking it UNKNOWN would page an
         // operator to reconcile a movement that never existed.
-        assertThatThrownBy(() -> executor.execute(draft, ref -> {
+        assertThatThrownBy(() -> executor.execute(draft, PendingReservationGuard.NONE, ref -> {
             throw new CoreAuthException(CoreProvider.FINERACT,
                     "Fineract refused the middleware AppUser a permission: error.msg.not.authorized: "
                             + "User has no authority to: DEPOSIT_SAVINGSACCOUNT", null);
@@ -154,7 +186,7 @@ class LedgeredMovementExecutorTest {
     @Test
     void transientFailureMarksFailedAndRethrows() {
         // CoreTransientException = provably never sent — FAILED is safe.
-        assertThatThrownBy(() -> executor.execute(draft, ref -> {
+        assertThatThrownBy(() -> executor.execute(draft, PendingReservationGuard.NONE, ref -> {
             throw new CoreTransientException(CoreProvider.FINERACT, "connect refused", null);
         })).isInstanceOf(CoreTransientException.class);
 
@@ -165,7 +197,7 @@ class LedgeredMovementExecutorTest {
     void unclassifiedExceptionParksConservativelyAndRethrows() {
         // A bug/contract violation could have fired AFTER the write reached
         // the core — FAILED would be a guess; the only safe record is parked.
-        assertThatThrownBy(() -> executor.execute(draft, ref -> {
+        assertThatThrownBy(() -> executor.execute(draft, PendingReservationGuard.NONE, ref -> {
             throw new IllegalStateException("adapter bug");
         })).isInstanceOf(IllegalStateException.class);
 

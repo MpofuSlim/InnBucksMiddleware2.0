@@ -6,6 +6,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import zw.co.innbucks.middleware.audit.AuditAction;
@@ -122,11 +123,29 @@ public class LedgerService {
      * that on return) before the core call is made. INSERT goes through
      * JdbcTemplate — client-assigned {@code @Id}, the save()-emits-UPDATE
      * gotcha.
+     *
+     * <p>The row is opened only if {@code guard} lets it, in ONE transaction:
+     * the guard runs first (inside this transaction, before the INSERT) and
+     * may throw to refuse, in which case nothing is written. This is what
+     * makes the row itself the reservation for the per-tier payment limits.
+     * There is no guard-free overload: a caller with nothing to check passes
+     * {@link PendingReservationGuard#NONE} explicitly.
+     *
+     * <p>Isolation is pinned to READ COMMITTED, not merely inherited from
+     * Postgres' default: the limits guard takes a per-customer lock and THEN
+     * sums the customer's rows in a separate statement, and that sum must see
+     * the row the previous lock holder committed while this one waited. Under
+     * REPEATABLE READ / SERIALIZABLE the snapshot would predate that commit
+     * and two racing payments would both pass on the same remaining amount.
      */
-    @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public LedgerTransaction openPending(LedgerDraft draft) {
+    @Transactional(propagation = Propagation.REQUIRES_NEW, isolation = Isolation.READ_COMMITTED)
+    public LedgerTransaction openPending(LedgerDraft draft, PendingReservationGuard guard) {
         UUID id = UUID.randomUUID();
         Instant now = clock.instant();
+        // The guard judges the period on the SAME instant the row is stamped
+        // with, so a payment at 23:59:59.999 cannot be checked against one day
+        // and stored in the next.
+        guard.check(draft, now);
         String correlationId = CorrelationContext.current();
         jdbcTemplate.update(INSERT_SQL,
                 id,

@@ -114,10 +114,14 @@ public class AuthRateLimitFilter extends OncePerRequestFilter {
             case "/auth/refresh" -> new Rule("refresh", properties.ipRefresh());
             case "/auth/otp/request" -> new Rule("otp-request", properties.ipOtpRequest());
             case "/auth/otp/verify" -> new Rule("otp-verify", properties.ipOtpVerify());
-            // Step-up shares the OTP buckets: same SMS cost profile, same abuse
-            // shape — being authenticated bounds but doesn't remove it.
-            case "/auth/step-up/request" -> new Rule("otp-request", properties.ipOtpRequest());
-            case "/auth/step-up/verify" -> new Rule("otp-verify", properties.ipOtpVerify());
+            // Step-up has the OTP buckets' SIZE (same SMS cost profile, same
+            // abuse shape — being authenticated bounds but doesn't remove it)
+            // but buckets of its OWN: on a shared address (carrier CGNAT, an
+            // office) public /auth/otp/* traffic from strangers must not be
+            // able to drain the per-IP budget a signed-in customer needs to
+            // approve a payment. The per-customer allowance sits behind it.
+            case "/auth/step-up/request" -> new Rule("stepup-request", properties.ipOtpRequest());
+            case "/auth/step-up/verify" -> new Rule("stepup-verify", properties.ipOtpVerify());
             case "/auth/pin/set", "/auth/pin/reset" -> new Rule("pin", properties.ipPin());
             // Public + creates core-banking state: the tightest bucket.
             case "/register" -> new Rule("register", properties.ipRegister());

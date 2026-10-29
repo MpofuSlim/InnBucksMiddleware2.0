@@ -9,6 +9,7 @@ import org.springframework.stereotype.Service;
 import zw.co.innbucks.middleware.ratelimit.RateLimitProperties.Limit;
 
 import java.time.Duration;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -62,6 +63,37 @@ public class RateLimiterService {
     public void enforceMsisdnOtpRequest(String normalizedMsisdn) {
         RateLimitDecision decision = tryConsume("msisdn:otp-request:" + normalizedMsisdn,
                 properties.msisdnOtpRequest());
+        if (!decision.allowed()) {
+            throw new RateLimitExceededException(decision.retryAfterSeconds());
+        }
+    }
+
+    /**
+     * Per-CUSTOMER guard for step-up approval SMS. Keyed on the authenticated
+     * customer, NOT the number: the per-number OTP bucket is spendable by
+     * strangers through the public PIN-reset request, and a stranger must not
+     * be able to block the owner's high-value payments.
+     */
+    public void enforceCustomerStepUpRequest(UUID customerId) {
+        enforce("customer:stepup-otp:" + customerId, properties.customerStepUpRequest());
+    }
+
+    /** Per-CUSTOMER request budget on the money-movement endpoints. */
+    public void enforceCustomerPayment(UUID customerId) {
+        enforce("customer:payment:" + customerId, properties.customerPayment());
+    }
+
+    /**
+     * Throwing form of {@link #tryConsume}. A {@code null} limit (the key
+     * missing from configuration) allows rather than failing every request
+     * with a NullPointerException — the shipped application.yaml always sets
+     * one.
+     */
+    private void enforce(String key, Limit limit) {
+        if (!properties.enabled() || limit == null) {
+            return;
+        }
+        RateLimitDecision decision = tryConsume(key, limit);
         if (!decision.allowed()) {
             throw new RateLimitExceededException(decision.retryAfterSeconds());
         }

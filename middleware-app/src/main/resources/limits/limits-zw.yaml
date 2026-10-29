@@ -1,0 +1,56 @@
+# Per-tier payment limits — ZW cell.
+#
+# VALUES ARE PENDING COMPLIANCE. Every limit below is deliberately ABSENT, and
+# an absent limit means "no limit of that kind for that tier", so this file is
+# DORMANT: it enforces nothing until compliance supplies the numbers and they
+# are merged here. The middleware logs a WARN at every boot while it is.
+#
+# What it governs: WITHDRAWALS and TRANSFERS made through the app
+# (POST /transactions/withdraw and /transfer). Deposits are not limited here.
+# Movements posted in Fineract by a teller or the console never pass through
+# the middleware and are NOT counted. A transfer to the customer's own other
+# account counts like any other transfer.
+#
+# Kinds, per tier, each optional:
+#   per_payment   largest single payment, MINOR units of `currency`
+#   daily         sum sent in the calendar day, MINOR units
+#   monthly       sum sent in the calendar month, MINOR units
+#   daily_count   NUMBER of withdrawals + transfers in the calendar day
+# Minor units: 100 = 1.00. Whole numbers only, > 0. Omit a kind for no limit
+# (never write `daily:` with no value — that refuses boot).
+#
+# Day and month are calendar periods in the cell's civil time (Africa/Harare).
+# A payment counts on the day and month it was MADE, including while it is
+# PROCESSING; a FAILED payment does not count. A reversal posted later in the
+# core does not give the amount back — the allowance returns at the next day
+# or month.
+#
+# The middleware REFUSES TO BOOT unless:
+#   * `country` is this cell's INNBUCKS_COUNTRY and `currency` the cell
+#     currency (FINERACT_CURRENCY);
+#   * every tier is listed (`{}` = no limits);
+#   * per_payment <= daily <= monthly wherever both are present;
+#   * no higher tier is stricter than a lower one for the same kind. Absent
+#     means unlimited, so once a lower tier is unlimited for a kind every
+#     higher tier must be too.
+#
+# This file is packaged into the scanned, attested image and is the ONLY
+# source of limit values; its SHA-256 is logged and audited at every boot.
+# The environment can never loosen it: LIMITS_OVERRIDE_<TIER>_<KIND> exists
+# for emergencies and may only TIGHTEN (a looser value refuses boot); every
+# active override is logged loudly and audited. The repository is public, so
+# whatever is merged here is public too.
+#
+# Shape, for illustration only — NOT live values:
+#   tiers:
+#     basic:
+#       per_payment: 100000    # 1,000.00 per payment
+#       daily: 150000          # 1,500.00 a day
+#       monthly: 500000        # 5,000.00 a month
+#       daily_count: 10        # 10 payments a day
+country: ZW
+currency: USD
+tiers:
+  basic: {}
+  standard: {}
+  enhanced: {}

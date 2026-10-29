@@ -24,6 +24,7 @@ import zw.co.innbucks.middleware.corebanking.value.TransactionState;
 import zw.co.innbucks.middleware.corebanking.value.TxRef;
 import zw.co.innbucks.middleware.customer.Customer;
 import zw.co.innbucks.middleware.customer.CustomerRepository;
+import zw.co.innbucks.middleware.customer.KycTierResolver;
 import zw.co.innbucks.middleware.idempotency.IdempotencyService;
 import zw.co.innbucks.middleware.ledger.LedgerDraft;
 import zw.co.innbucks.middleware.ledger.LedgerOutcome;
@@ -31,6 +32,9 @@ import zw.co.innbucks.middleware.ledger.LedgerStatus;
 import zw.co.innbucks.middleware.ledger.LedgerTransactionRepository;
 import zw.co.innbucks.middleware.ledger.LedgerTransactionType;
 import zw.co.innbucks.middleware.ledger.LedgeredMovementExecutor;
+import zw.co.innbucks.middleware.ledger.PendingReservationGuard;
+import zw.co.innbucks.middleware.limits.PaymentLimitService;
+import zw.co.innbucks.middleware.ratelimit.RateLimiterService;
 import zw.co.innbucks.middleware.stepup.StepUpService;
 import zw.co.innbucks.middleware.transactions.DepositGate;
 import zw.co.innbucks.middleware.transactions.DepositProperties;
@@ -77,6 +81,9 @@ class TransactionControllerDepositSwitchTest {
     private final LedgeredMovementExecutor executor = mock(LedgeredMovementExecutor.class);
     private final LedgerTransactionRepository ledgerRepository = mock(LedgerTransactionRepository.class);
     private final StepUpService stepUpService = mock(StepUpService.class);
+    private final KycTierResolver tierResolver = mock(KycTierResolver.class);
+    private final PaymentLimitService limitService = mock(PaymentLimitService.class);
+    private final RateLimiterService rateLimiter = mock(RateLimiterService.class);
 
     private final UUID customerId = UUID.randomUUID();
     private final String wallet = customerId + ":wallet";
@@ -101,7 +108,7 @@ class TransactionControllerDepositSwitchTest {
         env.setActiveProfiles("prod");
         DepositGate gate = new DepositGate(new DepositProperties(depositsEnabled), env, new SimpleMeterRegistry());
         MovementService service = new MovementService(customerRepository, corePort, idempotencyService,
-                executor, ledgerRepository, stepUpService, gate);
+                executor, ledgerRepository, stepUpService, tierResolver, limitService, rateLimiter, gate);
         return MockMvcBuilders.standaloneSetup(new TransactionController(service))
                 .setControllerAdvice(new GlobalExceptionHandler())
                 .setCustomArgumentResolvers(new AuthenticationPrincipalArgumentResolver())
@@ -122,9 +129,11 @@ class TransactionControllerDepositSwitchTest {
                 .andExpect(jsonPath("$.errorCode").value("deposit_disabled"));
 
         // No customer read, no ownership listing, no idempotency claim, no
-        // crash-retry lookup, no ledger row, no core call, no step-up.
+        // crash-retry lookup, no ledger row, no core call, no step-up — and
+        // none of the customer's /transactions/* request budget spent, no
+        // tier read, no limit check.
         verifyNoInteractions(customerRepository, corePort, idempotencyService,
-                executor, ledgerRepository, stepUpService);
+                executor, ledgerRepository, stepUpService, rateLimiter, tierResolver, limitService);
     }
 
     @Test
@@ -148,8 +157,8 @@ class TransactionControllerDepositSwitchTest {
                 });
         // The executor drives the core call, as the real one does after the PENDING row.
         UUID rowId = UUID.randomUUID();
-        when(executor.execute(any(), any())).thenAnswer(inv -> {
-            Function<TxRef, TransactionResult> coreCall = inv.getArgument(1);
+        when(executor.execute(any(), any(), any())).thenAnswer(inv -> {
+            Function<TxRef, TransactionResult> coreCall = inv.getArgument(2);
             TransactionResult result = coreCall.apply(new TxRef("ignored"));
             return new LedgerOutcome(rowId, LedgerStatus.COMPLETED, result.ref().reference());
         });
@@ -163,8 +172,11 @@ class TransactionControllerDepositSwitchTest {
                 .andExpect(jsonPath("$.coreTxRef").value("CORE-501"))
                 .andExpect(jsonPath("$.transactionId").value(rowId.toString()));
 
+        // Switched on, a deposit spends the shared request budget like any
+        // other movement, and is opened without a limits reservation.
+        verify(rateLimiter).enforceCustomerPayment(customerId);
         var draft = forClass(LedgerDraft.class);
-        verify(executor).execute(draft.capture(), any());
+        verify(executor).execute(draft.capture(), eq(PendingReservationGuard.NONE), any());
         assertThat(draft.getValue().type()).isEqualTo(LedgerTransactionType.DEPOSIT);
         assertThat(draft.getValue().destinationAccount()).isEqualTo(wallet);
 

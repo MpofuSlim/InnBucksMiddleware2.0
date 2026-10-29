@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 import zw.co.innbucks.middleware.ratelimit.RateLimitProperties.Limit;
 
 import java.time.Duration;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -11,7 +12,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class RateLimiterServiceTest {
 
     private static RateLimitProperties props(boolean enabled, Limit limit) {
-        return new RateLimitProperties(enabled, false, 1, limit, limit, limit, limit, limit, limit, limit, limit);
+        return new RateLimitProperties(enabled, false, 1, limit, limit, limit, limit, limit, limit, limit, limit,
+                limit, limit);
     }
 
     @Test
@@ -65,6 +67,45 @@ class RateLimiterServiceTest {
         RateLimiterService service = new RateLimiterService(props(false, null));
         for (int i = 0; i < 50; i++) {
             service.enforceMsisdnOtpRequest("254712000111");
+        }
+    }
+
+    @Test
+    void thePaymentBudgetIsPerCustomer() {
+        Limit limit = new Limit(2, Duration.ofMinutes(1));
+        RateLimiterService service = new RateLimiterService(props(true, limit));
+        UUID alice = UUID.randomUUID();
+
+        service.enforceCustomerPayment(alice);
+        service.enforceCustomerPayment(alice);
+        assertThatThrownBy(() -> service.enforceCustomerPayment(alice))
+                .isInstanceOf(RateLimitExceededException.class)
+                .satisfies(ex -> assertThat(((RateLimitExceededException) ex).getRetryAfterSeconds()).isPositive());
+        // Another customer is untouched, and so is alice's step-up allowance.
+        service.enforceCustomerPayment(UUID.randomUUID());
+        service.enforceCustomerStepUpRequest(alice);
+    }
+
+    @Test
+    void aMissingPerCustomerLimitAllowsInsteadOfFailingEveryRequest() {
+        Limit limit = new Limit(1, Duration.ofMinutes(1));
+        RateLimitProperties noPaymentLimit = new RateLimitProperties(true, false, 1,
+                limit, limit, limit, limit, limit, limit, limit, limit, null, null);
+        RateLimiterService service = new RateLimiterService(noPaymentLimit);
+        UUID alice = UUID.randomUUID();
+        for (int i = 0; i < 20; i++) {
+            service.enforceCustomerPayment(alice);
+            service.enforceCustomerStepUpRequest(alice);
+        }
+    }
+
+    @Test
+    void disabledDoesNotThrowFromThePerCustomerGuards() {
+        RateLimiterService service = new RateLimiterService(props(false, null));
+        UUID alice = UUID.randomUUID();
+        for (int i = 0; i < 50; i++) {
+            service.enforceCustomerPayment(alice);
+            service.enforceCustomerStepUpRequest(alice);
         }
     }
 }
