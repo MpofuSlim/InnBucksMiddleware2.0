@@ -39,7 +39,10 @@ import java.util.Set;
  *   <li>401 → {@link CoreAuthException} (our AppUser creds — ops incident).
  *       Fineract uses 403 for BUSINESS rule vetoes (insufficient balance,
  *       wrong account state), so 403 with a domain-error body →
- *       {@link CoreClientException}; a bare 403 → auth.</li>
+ *       {@link CoreClientException}; a 403 that is Fineract refusing OUR
+ *       AppUser a permission ({@value #NOT_AUTHORIZED_CODE}) → auth, on every
+ *       write, transfers included — a permission gap is ours, never a
+ *       refusal of the customer's payment.</li>
  *   <li>A savings BLOCK / DEBIT block on the account a write DEBITS →
  *       {@link CoreAccountRestrictedException} (a {@link CoreClientException},
  *       so still FAILED in the ledger). A block on any OTHER account — a
@@ -55,6 +58,26 @@ import java.util.Set;
  */
 @Slf4j
 final class FineractErrorMapper {
+
+    /**
+     * The globalisation code of Fineract's permission denial, read out of the
+     * fork: {@code AppUser.validateHasPermissionTo} throws
+     * {@code NoAuthorizationException("User has no authority to: <CODE>")},
+     * and {@code NoAuthorizationExceptionMapper} answers 403 with
+     * {@code ApiGlobalErrorResponse.unAuthorized}, which carries this code both
+     * at the top level and on its single error. The check runs in
+     * {@code PortfolioCommandSourceWritePlatformServiceImpl.logCommandSource}
+     * BEFORE the command executes, so a write refused this way provably did not
+     * apply.
+     *
+     * <p>Keyed on the exact code because nothing else in the body matches a
+     * word list: the message says "authority", the developer message says
+     * "privileges", neither says "permission" or "authorization". Matching on
+     * those words alone sent every permission denial down the domain-veto
+     * branch, which showed the customer {@code 422 core_rejected} with "User
+     * has no authority to: DEPOSIT_SAVINGSACCOUNT" as the reason.
+     */
+    static final String NOT_AUTHORIZED_CODE = "error.msg.not.authorized";
 
     private static final ObjectMapper JSON = new ObjectMapper();
 
@@ -403,13 +426,42 @@ final class FineractErrorMapper {
 
     private static CoreBankingException forbidden(String detail, RestClientResponseException ex) {
         // Fineract's domain-rule vetoes (insufficient balance, invalid account
-        // state) come back 403 WITH a structured error body; permission/auth
-        // problems carry permission-flavoured codes or no error list at all.
+        // state) come back 403 WITH a structured error body. A permission our
+        // AppUser lacks is ALSO a 403 with a structured body, told apart only by
+        // its code (see NOT_AUTHORIZED_CODE). It is our configuration, never the
+        // customer's request, so it is an auth failure: an ops incident with a
+        // generic answer to the customer, not their request "refused".
+        if (hasGlobalisationCode(ex, NOT_AUTHORIZED_CODE)) {
+            return new CoreAuthException(CoreProvider.FINERACT,
+                    "Fineract refused the middleware AppUser a permission: " + detail, ex);
+        }
         String lower = detail.toLowerCase(Locale.ROOT);
         if (lower.contains("permission") || lower.contains("unauthorized") || lower.contains("authorization")) {
             return new CoreAuthException(CoreProvider.FINERACT, "Fineract authorization failed: " + detail, ex);
         }
         return new CoreClientException(CoreProvider.FINERACT, "Fineract vetoed the request: " + detail, ex);
+    }
+
+    /** True when Fineract's error envelope carries {@code code}, at the top level or on any error. */
+    private static boolean hasGlobalisationCode(RestClientResponseException ex, String code) {
+        String body = ex.getResponseBodyAsString();
+        if (body == null || body.isBlank()) {
+            return false;
+        }
+        try {
+            JsonNode root = JSON.readTree(body);
+            if (code.equals(root.path("userMessageGlobalisationCode").asText(""))) {
+                return true;
+            }
+            for (JsonNode error : root.path("errors")) {
+                if (code.equals(error.path("userMessageGlobalisationCode").asText(""))) {
+                    return true;
+                }
+            }
+        } catch (Exception ignored) {
+            // Not Fineract's envelope: the word-list fallback decides.
+        }
+        return false;
     }
 
     /** First error's globalisation code + message from Fineract's error envelope; body preview as fallback. */

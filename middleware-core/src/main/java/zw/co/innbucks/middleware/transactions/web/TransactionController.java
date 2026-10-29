@@ -64,6 +64,23 @@ public class TransactionController {
             """;
 
     /**
+     * {@code CoreBankingExceptionHandler.upstreamAuth}, verbatim: the core refused
+     * this service's own credentials or a permission they need. Our fault, never
+     * the request's, so the wording is generic and the detail stays in the logs.
+     */
+    private static final String CORE_REFUSED_US = """
+            {"type":"about:blank","title":"Service temporarily unavailable","status":502,
+             "detail":"We couldn't reach the banking system. Please try again shortly.",
+             "errorCode":"core_banking_unavailable"}
+            """;
+    private static final String CORE_REFUSED_US_DESCRIPTION = "The core banking system refused this "
+            + "service's own credentials or a permission they need (errorCode core_banking_unavailable): "
+            + "an operations fault, never the request's, and nothing moved. If the core refused the "
+            + "movement itself, its ledger row is FAILED (failureCode core_auth_failed) and a retry with "
+            + "the SAME Idempotency-Key is answered 200 FAILED from that row, so a fresh attempt needs a "
+            + "fresh key; if it refused an earlier read, nothing was recorded";
+
+    /**
      * The customer of the GET /me/limits example (basic, 112,500 of 150,000
      * sent today, 37,500 sendable now) paying 50,000. remainingMinor is the
      * screen's sendableNowMinor.
@@ -139,7 +156,12 @@ public class TransactionController {
     private final MovementService movementService;
 
     @PostMapping("/deposit")
-    @Operation(summary = "Deposit into the caller's own account")
+    @Operation(summary = "Deposit into the caller's own account",
+            description = "A test cash-in: it credits the wallet with no source of funds behind it, so it "
+                    + "is OFF unless the deployment switches it on (staging does; production does not). "
+                    + "Off, every call answers 403 deposit_disabled before anything is read or written — "
+                    + "no idempotency record, no ledger row, no core call. Fund a production wallet "
+                    + "through a real cash-in channel, not this endpoint.")
     @ApiResponses({
             @ApiResponse(responseCode = "200", description = "Movement outcome (SUCCESS / PROCESSING / FAILED)",
                     content = @Content(mediaType = MediaType.APPLICATION_JSON_VALUE,
@@ -147,8 +169,21 @@ public class TransactionController {
                             examples = @ExampleObject(value = COMMON_RESPONSES))),
             @ApiResponse(responseCode = "401", description = "Missing or invalid Bearer token",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
-            @ApiResponse(responseCode = "403", description = "Account does not belong to the caller",
-                    content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
+            @ApiResponse(responseCode = "403", description = "Deposits are switched off in this deployment "
+                    + "(errorCode deposit_disabled — permanent for the deployment, do not retry), or the "
+                    + "account does not belong to the caller (errorCode account_ownership_mismatch)",
+                    content = @Content(schema = @Schema(implementation = ProblemDetail.class),
+                            examples = {
+                                    @ExampleObject(name = "Deposits disabled", value = """
+                                            {"type":"about:blank","title":"Deposits unavailable","status":403,
+                                             "detail":"Deposits are not available in this deployment.",
+                                             "errorCode":"deposit_disabled"}
+                                            """),
+                                    @ExampleObject(name = "Not your account", value = """
+                                            {"type":"about:blank","title":"Not your account","status":403,
+                                             "detail":"You can only access accounts that belong to you.",
+                                             "errorCode":"account_ownership_mismatch"}
+                                            """)})),
             @ApiResponse(responseCode = "409", description = "An identical request is still in progress",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
             @ApiResponse(responseCode = "422", description = "Key reused with a different body, or the core "
@@ -156,9 +191,16 @@ public class TransactionController {
                     + "subject to the per-tier payment limits.",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
             @ApiResponse(responseCode = "429", description = "Too many /transactions/* requests from this "
-                    + "customer (errorCode rate_limited); retry after Retry-After seconds",
+                    + "customer (errorCode rate_limited); retry after Retry-After seconds. A deposit on a "
+                    + "deployment with deposits switched off is answered 403 deposit_disabled BEFORE this "
+                    + "budget and never spends it",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class),
                             examples = @ExampleObject(name = "Rate limited", value = RATE_LIMITED_EXAMPLE))),
+            @ApiResponse(responseCode = "502", description = CORE_REFUSED_US_DESCRIPTION + ". On a "
+                    + "deposit this is also what a cell provisioned WITHOUT customer deposits at the core answers "
+                    + "while the deposit switch is on: the core's own lock refusing it",
+                    content = @Content(schema = @Schema(implementation = ProblemDetail.class),
+                            examples = @ExampleObject(name = "Core refused this service", value = CORE_REFUSED_US))),
             @ApiResponse(responseCode = "503", description = "Core banking system unreachable",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class)))
     })
@@ -214,6 +256,9 @@ public class TransactionController {
                     + "customer (errorCode rate_limited); retry after Retry-After seconds",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class),
                             examples = @ExampleObject(name = "Rate limited", value = RATE_LIMITED_EXAMPLE))),
+            @ApiResponse(responseCode = "502", description = CORE_REFUSED_US_DESCRIPTION,
+                    content = @Content(schema = @Schema(implementation = ProblemDetail.class),
+                            examples = @ExampleObject(name = "Core refused this service", value = CORE_REFUSED_US))),
             @ApiResponse(responseCode = "503", description = "Core banking system unreachable "
                     + "(core_banking_unavailable), or the caller's KYC tier could not be read for a decision "
                     + "that would refuse (kyc_tier_unavailable). Retry unchanged.",
@@ -291,6 +336,9 @@ public class TransactionController {
                     + "customer (errorCode rate_limited); retry after Retry-After seconds",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class),
                             examples = @ExampleObject(name = "Rate limited", value = RATE_LIMITED_EXAMPLE))),
+            @ApiResponse(responseCode = "502", description = CORE_REFUSED_US_DESCRIPTION,
+                    content = @Content(schema = @Schema(implementation = ProblemDetail.class),
+                            examples = @ExampleObject(name = "Core refused this service", value = CORE_REFUSED_US))),
             @ApiResponse(responseCode = "503", description = "Core banking system unreachable "
                     + "(core_banking_unavailable), or the caller's KYC tier could not be read for a decision "
                     + "that would refuse (kyc_tier_unavailable). Retry unchanged.",

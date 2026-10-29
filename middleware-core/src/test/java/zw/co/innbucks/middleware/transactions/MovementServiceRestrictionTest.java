@@ -63,7 +63,8 @@ class MovementServiceRestrictionTest {
     private final PaymentLimitService limits = mock(PaymentLimitService.class);
     private final MovementService service = new MovementService(
             customers, port, idempotency, executor, ledger, stepUp,
-            new CustomerRecordKycTierResolver(meters), limits, mock(RateLimiterService.class), meters);
+            new CustomerRecordKycTierResolver(meters), limits, mock(RateLimiterService.class),
+            mock(DepositGate.class), meters);
 
     private final UUID customerId = UUID.randomUUID();
     private final String wallet = customerId + ":wallet";

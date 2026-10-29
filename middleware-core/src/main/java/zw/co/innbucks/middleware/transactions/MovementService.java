@@ -42,7 +42,6 @@ import zw.co.innbucks.middleware.transactions.MovementRequests.WithdrawRequest;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
-import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
 
@@ -50,9 +49,16 @@ import java.util.function.Function;
  * Customer money movement. The full guard stack, in order:
  *
  * <ol>
+ *   <li><b>Cell switch (deposit only):</b> deposits are an unfunded cash-in
+ *       and are refused outright unless the cell opts in
+ *       ({@link DepositGate}) — before anything is read, asked or written,
+ *       and before the request budget below: a refusal that costs nothing
+ *       must not spend the customer's {@code /transactions/*} budget, or an
+ *       app that still calls deposit on a switched-off cell would eat into
+ *       the customer's withdrawals and transfers.</li>
  *   <li><b>Request rate:</b> a per-customer budget on {@code /transactions/*}
- *       (429 {@code rate_limited}), FIRST — refused attempts are free, so the
- *       count limit below is not a rate limit.</li>
+ *       (429 {@code rate_limited}), first after the deposit switch — refused
+ *       attempts are free, so the count limit below is not a rate limit.</li>
  *   <li><b>Tier:</b> resolved ONCE ({@link KycTierResolver}) and threaded into
  *       step-up and both limit checks; never re-read, never from the token.</li>
  *   <li><b>Limits, advisory (withdraw/transfer):</b> the per-tier payment
@@ -121,18 +127,16 @@ import java.util.function.Function;
 public class MovementService {
 
     /**
-     * What a same-key replay says for a movement that FAILED because the core
-     * could not be reached or refused our credential: the first answer was a
-     * generic 503/502, and the row's failure_message is the adapter's ops
-     * detail, which can quote the core's reply.
+     * What a same-key replay says for a movement that FAILED for a reason of
+     * OURS — the core unreachable or erroring, or refusing our credential or a
+     * permission ({@link LedgeredMovementExecutor#isOperationalFailure}): the
+     * first answer was a generic 503/502, and the row's failure_message is the
+     * adapter's ops detail, which can quote the core's reply. Neutral on
+     * purpose: "could not be reached" would be false for a permission refusal.
      */
-    static final String NOT_APPLIED_CORE_UNAVAILABLE = "The banking system could not be reached, so the "
-            + "movement did not apply. Use a new Idempotency-Key for a fresh attempt.";
+    static final String NOT_APPLIED_CORE_UNAVAILABLE =
+            "The movement did not apply. Use a new Idempotency-Key for a fresh attempt.";
 
-    private static final Set<String> CORE_UNAVAILABLE_CODES = Set.of(
-            LedgeredMovementExecutor.CORE_AUTH_FAILED,
-            LedgeredMovementExecutor.CORE_UNREACHABLE,
-            LedgeredMovementExecutor.CORE_SERVER_ERROR);
 
     private final CustomerRepository customerRepository;
     private final CoreBankingPort corePort;
@@ -143,6 +147,7 @@ public class MovementService {
     private final KycTierResolver tierResolver;
     private final PaymentLimitService limitService;
     private final RateLimiterService rateLimiter;
+    private final DepositGate depositGate;
     private final Counter withdrawalsRefusedRestricted;
     private final Counter transfersRefusedRestricted;
 
@@ -155,6 +160,7 @@ public class MovementService {
                            KycTierResolver tierResolver,
                            PaymentLimitService limitService,
                            RateLimiterService rateLimiter,
+                           DepositGate depositGate,
                            MeterRegistry meterRegistry) {
         this.customerRepository = customerRepository;
         this.corePort = corePort;
@@ -165,6 +171,7 @@ public class MovementService {
         this.tierResolver = tierResolver;
         this.limitService = limitService;
         this.rateLimiter = rateLimiter;
+        this.depositGate = depositGate;
         // An early refusal leaves no ledger row (that is the point), so the
         // "which failures were blocked accounts" question the ledger's
         // account_restricted code answers for core refusals needs this.
@@ -181,6 +188,11 @@ public class MovementService {
 
     public IdempotencyService.Result<TransactionResponse> deposit(UUID customerId, String rawKey,
                                                                   DepositRequest request) {
+        // First, ahead of every read AND the request budget: a switched-off
+        // cell must not spend a database read, a core round trip or the
+        // customer's /transactions/* budget on a request it always refuses,
+        // and must leave no idempotency claim or ledger row behind.
+        depositGate.requireEnabled(customerId);
         rateLimiter.enforceCustomerPayment(customerId);
         Customer customer = requireMappedCustomer(customerId);
         requireOwnership(customer, request.accountId());
@@ -324,6 +336,10 @@ public class MovementService {
                 row.getId(), row.getExternalRef(), status);
         return switch (status) {
             case COMPLETED -> TransactionResponse.success(row.getId(), row.getCoreTxRef());
+            // The stored detail is shown only for a refusal of the request
+            // itself. For our own failures (credentials or permissions refused,
+            // core down) it is operator detail, which the first answer kept in
+            // the logs behind a generic 502/503, so the replay does too.
             case FAILED -> TransactionResponse.failed(row.getId(),
                     row.getFailureCode() == null ? "core_reported_failed" : row.getFailureCode(),
                     replayedFailureMessage(row));
@@ -341,8 +357,7 @@ public class MovementService {
         // Same rule for an unreachable core or a refused credential: the first
         // answer was generic, and the stored message is the adapter's detail
         // (on a transfer it can quote the core's reply about another account).
-        // (Null-checked first: Set.of(...).contains(null) throws.)
-        if (row.getFailureCode() != null && CORE_UNAVAILABLE_CODES.contains(row.getFailureCode())) {
+        if (LedgeredMovementExecutor.isOperationalFailure(row.getFailureCode())) {
             return NOT_APPLIED_CORE_UNAVAILABLE;
         }
         // core_rejected: the first 422's own detail. The adapter words every

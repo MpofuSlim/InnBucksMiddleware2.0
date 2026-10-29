@@ -19,6 +19,7 @@ import zw.co.innbucks.middleware.auth.jwt.JwtIssuer;
 import zw.co.innbucks.middleware.common.country.Country;
 import zw.co.innbucks.middleware.corebanking.CoreProvider;
 import zw.co.innbucks.middleware.corebanking.exception.CoreAccountRestrictedException;
+import zw.co.innbucks.middleware.corebanking.exception.CoreAuthException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreClientException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreServerException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreUnknownOutcomeException;
@@ -45,6 +46,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.not;
 import static org.springframework.security.test.web.servlet.setup.SecurityMockMvcConfigurers.springSecurity;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -359,6 +362,56 @@ class TransactionFlowIntegrationTest {
                 "SELECT status FROM ledger_transaction", String.class)).isEqualTo("FAILED");
     }
 
+    /**
+     * The core-side deposit lock firing behind a wrongly-open switch: this
+     * suite turns the deposit switch ON, and the core refuses the middleware's
+     * write user the deposit permission, as on a cell provisioned without
+     * {@code MIDDLEWARE_CUSTOMER_DEPOSITS=1}. The adapter maps Fineract's
+     * permission denial to {@link CoreAuthException} (pinned on the wire by
+     * {@code FineractClientContractTest}).
+     */
+    @Test
+    void aDepositTheCoreRefusesOnPermissionIsACleanFailureThatLeaksNoDetail() throws Exception {
+        String operatorDetail = "Fineract refused the middleware AppUser a permission: "
+                + "error.msg.not.authorized: User has no authority to: DEPOSIT_SAVINGSACCOUNT";
+        stubPort.onDeposit = (cmd, key) -> {
+            coreDeposits.incrementAndGet();
+            throw new CoreAuthException(CoreProvider.FINERACT, operatorDetail, null);
+        };
+
+        // An ops fault, so the generic 502, never "Request refused" with the
+        // permission name as the customer's reason.
+        mockMvc.perform(post("/transactions/deposit")
+                        .header(HttpHeaders.AUTHORIZATION, bearer).header("Idempotency-Key", "dep-locked")
+                        .contentType(MediaType.APPLICATION_JSON).content(depositBody(1000)))
+                .andExpect(status().isBadGateway())
+                .andExpect(jsonPath("$.errorCode").value("core_banking_unavailable"))
+                .andExpect(jsonPath("$.detail").value(not(containsString("DEPOSIT_SAVINGSACCOUNT"))));
+
+        // FAILED, never parked UNKNOWN: the core refused before the command ran,
+        // so there is nothing for the reconciler or an operator to chase.
+        assertThat(jdbcTemplate.queryForMap("SELECT status, failure_code FROM ledger_transaction"))
+                .containsEntry("status", "FAILED")
+                .containsEntry("failure_code", "core_auth_failed");
+        // The claim was released, so the app's retry is answered, not 409'd.
+        assertThat(jdbcTemplate.queryForObject("SELECT COUNT(*) FROM idempotency_record", Integer.class))
+                .isZero();
+
+        // The app retries with the same key: the ledger row answers, FAILED,
+        // without the operator detail the row holds, and the core is not asked twice.
+        mockMvc.perform(post("/transactions/deposit")
+                        .header(HttpHeaders.AUTHORIZATION, bearer).header("Idempotency-Key", "dep-locked")
+                        .contentType(MediaType.APPLICATION_JSON).content(depositBody(1000)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("FAILED"))
+                .andExpect(jsonPath("$.failureCode").value("core_auth_failed"))
+                .andExpect(jsonPath("$.failureMessage").value(
+                        "The movement did not apply. Use a new Idempotency-Key for a fresh attempt."));
+        assertThat(coreDeposits.get()).isEqualTo(1);
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT failure_message FROM ledger_transaction", String.class)).isEqualTo(operatorDetail);
+    }
+
     @Test
     void aBlockedSourceAccountIs403AccountRestrictedAndReplaysTheSameCopy() throws Exception {
         stubPort.onWithdraw = (cmd, key) -> {
@@ -540,8 +593,8 @@ class TransactionFlowIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("FAILED"))
                 .andExpect(jsonPath("$.failureCode").value("core_server_error"))
-                .andExpect(jsonPath("$.failureMessage").value("The banking system could not be reached, so the "
-                        + "movement did not apply. Use a new Idempotency-Key for a fresh attempt."));
+                .andExpect(jsonPath("$.failureMessage").value(
+                        "The movement did not apply. Use a new Idempotency-Key for a fresh attempt."));
     }
 
     @Test

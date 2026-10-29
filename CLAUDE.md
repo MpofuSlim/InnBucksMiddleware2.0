@@ -92,7 +92,11 @@ Build: `./mvnw verify` at the root. Run locally:
 * Adapters map upstream failures to the core-neutral taxonomy
   (`CoreAuthException` / `CoreClientException` / `CoreServerException` /
   `CoreTransientException` / `CoreUnknownOutcomeException`); nothing upstream
-  of an adapter sees a core-specific exception or raw body.
+  of an adapter sees a core-specific exception or raw body. `CoreAuthException`
+  means the core refused OUR service credentials or a permission they lack —
+  never anyone else's. The operator port's refusal of an OPERATOR's credential
+  is its own type, `CoreOperatorAuthException`, so no handler can mistake one
+  for the other (slice 10b).
 * **A bank block on the account a movement DEBITS is
   `CoreAccountRestrictedException`** (a `CoreClientException`, so the ledger
   still marks it FAILED, coded `account_restricted`) → **403
@@ -136,13 +140,17 @@ Build: `./mvnw verify` at the root. Run locally:
   existence probe, no id echoed). Ops get the Fineract code — never an
   account id or sentence — in one INFO line keyed by ref. Deposits and
   withdrawals touch only the caller's own account and keep Fineract's
-  wording. The one transfer refusal that is not fixed copy never reaches
+  wording. A permission Fineract refuses OUR AppUser on a transfer
+  (`error.msg.not.authorized`) is still `CoreAuthException` — 502, ledger
+  `core_auth_failed` — never the fixed-copy decline: `transferRefusal` only
+  rewords refusals of the customer's request. The one transfer refusal that is not fixed copy never reaches
   Fineract: an amount not in the cell's currency is refused by the adapter in
   its own words, naming only the two currencies (documented as the transfer
   422's fourth detail). A same-key replay of a `core_auth_failed` / `core_unreachable` /
   `core_server_error` row answers fixed copy too
-  (`MovementService.replayedFailureMessage`): the stored message is adapter
-  detail the first (generic 502/503) answer never showed. Pinned by
+  (`MovementService.replayedFailureMessage`, deciding "ours" with the one
+  `LedgeredMovementExecutor.isOperationalFailure`): the stored message is
+  adapter detail the first (generic 502/503) answer never showed. Pinned by
   `FineractTransferRefusalContractTest` and `MovementServiceRestrictionTest`.
 * **The account listing carries the bank's block**, so nothing pays a second
   call to learn it. `DepositAccountRef` / `DepositAccountSummary` carry an
@@ -396,6 +404,63 @@ Build: `./mvnw verify` at the root. Run locally:
   concurrent same-key requests can never double-execute. Replays return the
   ORIGINAL stored status. Same key + different body → 422; fresh claim in
   flight → 409; stale claim (>60s) taken over.
+* **`POST /transactions/deposit` is an unfunded cash-in, shut by TWO
+  independent locks, both closed by default — the core's once the cell has
+  been provisioned by a `provision-cell.sh` that carries it.** A cell
+  provisioned before the lock keeps the permission until the script runs there
+  again: a one-time rollout step, not an image roll (Operational conventions;
+  runbook §4 "One-time rollout"). (1) The middleware's switch,
+  `innbucks.transactions.deposit.enabled` / `TRANSACTIONS_DEPOSIT_ENABLED`
+  (`DepositGate`, below). (2) The core's permission: `provision-cell.sh` grants
+  the write AppUser `DEPOSIT_SAVINGSACCOUNT` only when the box sets
+  `MIDDLEWARE_CUSTOMER_DEPOSITS=1` in its gitignored `deploy/fineract/.env`, and
+  otherwise REVOKES it, so Fineract refuses the deposit even when (1) is wrong.
+  The second lock exists because the first is one line in a gitignored `.env`
+  that a copy from staging would carry to production. Its opt-in is per box,
+  never in a cell file: `cell.zw.env` is shared by staging and production, and
+  the script refuses to run while any `deploy/cells/*.env` assigns it, or on
+  any value but `1`/`0`/unset. A cell file cannot reach the lock another way
+  either: step 6b refuses any `BANK_ROLE_GRANTS` entry naming
+  `innbucks-mw-read`/`-write` (the run fails until it is removed). Step 6f
+  proves the lock from what Fineract will enforce (every role the user holds;
+  `ALL_FUNCTIONS` counts), and runs LAST of the role steps: it used to run
+  before 6b, which could grant the code back after it had printed `LOCKED`. The
+  smoke proves it with a zero-amount deposit the core must refuse, and a lock
+  that is not as asked FAILS the run after every other step has run. With (1)
+  on and (2) closed the app gets `502 core_banking_unavailable` and a
+  `FAILED`/`core_auth_failed` ledger row, never `UNKNOWN` (see the
+  `FineractErrorMapper` note in slice 3a). Staging opens both; production
+  neither. Selftest cases in `provision-selftest.sh`.
+  **The switch, in detail.** Every customer token carries `customer:write`, and
+  the endpoint books a plain savings deposit (the cell's non-cash wallet payment
+  type) of any amount into the caller's own wallet: no source of funds, no
+  step-up, no maximum, and the wallet product's accounting rule is None, so no
+  GL trail. Open, any customer mints money and then spends it, and no outgoing
+  limit means anything. Off, it answers `403 deposit_disabled` as the FIRST
+  statement of `MovementService.deposit`, ahead of the per-customer
+  `/transactions/*` request budget (slice 11), the customer read, the
+  ownership call, the idempotency claim, the ledger row and the core. Ahead of
+  the budget on purpose: the refusal costs nothing, and charging it to the one
+  budget all three endpoints share would let an app that still calls deposit on
+  a switched-off cell eat the customer's withdrawals and transfers (pinned by
+  `MovementServiceTest.aSwitchedOffDepositSpendsNoneOfThePaymentBudget`). Like
+  `step_up_required`, a refusal is a counter
+  (`innbucks.transactions.deposit.refused`, registered at 0) and an INFO line,
+  never an audit row. The property is a primitive `boolean`, so a cell whose
+  config never names it is OFF. **Never on where real money is held.** Staging
+  turns it on (testers fund wallets; the runbook smoke deposits), and every
+  boot under a deployment profile then logs a WARN banner
+  (`ProductionSecretsGuard.isDeployment`, the guard's own notion, empty set
+  included). Production stays off until a FUNDED cash-in rail exists, and that
+  rail is a new design, never this flag flipped. **The packaged files are the
+  deployed default, and no Spring test reads them**: the test suite turns the
+  switch on in `middleware-app/src/test/resources/application.yaml`, which
+  REPLACES the main file on the test classpath. So `PackagedDepositDefaultTest`
+  reads `src/main/resources` from disk and fails if the default, or any
+  packaged profile but `dev`, resolves ON with the variable unset. A staging
+  cell turns it on with the variable, never a packaged file. Also pinned by
+  `DepositGateTest`, `TransactionControllerDepositSwitchTest` and
+  `DepositDisabledFlowIntegrationTest`.
 * **Credential-spray detection** (`anomaly/AuthAnomalyDetector`): the
   brute-force shape the other two controls are blind to — one source trying a
   FEW PINs against MANY accounts. Per-account lockout fires at 7 failures (so
@@ -602,9 +667,13 @@ Fineract does NOT mean "not authorised."** `PlatformDataIntegrityExceptionMapper
 and `PlatformDomainRuleExceptionMapper:53` both map to `Status.FORBIDDEN`, so a
 SQL failure and a business-rule veto are indistinguishable from a real permission
 denial by status alone — read `errors[].userMessageGlobalisationCode` from the
-body instead. (This is why `FineractErrorMapper` already splits Fineract's 403
-into `CoreClientException` for domain vetoes vs auth; the same care is owed
-anywhere else a 403 is interpreted.) Report parameters ride a `R_<variable>`
+body instead. (`FineractErrorMapper` splits Fineract's 403 on exactly that:
+the permission-denial code `error.msg.not.authorized` is auth, everything else
+a domain veto. It used to look for the words "permission"/"authorization",
+which Fineract's real denial body never contains — "User has no authority to:
+X" — so every permission denial read as a veto and reached the customer as
+`422 core_rejected` naming the permission. The same care is owed anywhere else
+a 403 is interpreted.) Report parameters ride a `R_<variable>`
 prefix that `AbstractReportingProcessService:36-47` strips — anything unprefixed
 is silently ignored — and `ReportParameterData` does NOT expose
 `parameter_variable`, so the name→variable map has to come from
@@ -653,6 +722,20 @@ reason to copy the rule rather than fork it.
 * Containers pin `-Duser.timezone=UTC` in the Dockerfile ENTRYPOINT.
 * Single-replica per cell assumption (in-memory rate limits, unlocked
   `@Scheduled` jobs) — wrap with ShedLock before ever scaling horizontally.
+* **The deposit switch is per environment, and so is the core's lock.**
+  Staging's `.env` carries `TRANSACTIONS_DEPOSIT_ENABLED=true` AND its
+  `deploy/fineract/.env` carries `MIDDLEWARE_CUSTOMER_DEPOSITS=1`; production's
+  carry neither, its boot must log `Customer deposits: OFF`, and its
+  `provision-cell.sh` step 6f must print `LOCKED`. On a cell rolling to the
+  first image with the switch, add the staging line BEFORE the roll, or staging
+  stops taking deposits on that roll; likewise add the opt-in before
+  re-provisioning staging, because a run without it revokes the permission.
+  Re-provisioning production with no change closes the core lock, and **that
+  re-provision is REQUIRED, once, on every cell provisioned before the lock**:
+  the permission lives in Fineract's roles, so rolling the image leaves it in
+  place and the switch stays the only lock there. Done means the run exits 0
+  and 6f prints `LOCKED`. Runbook §4 ("Customer deposits at the core", "One-time
+  rollout") and §5.
 
 ## Environments (EC2, af-south-1)
 
@@ -703,6 +786,16 @@ rollback is then re-pinning the previous tag and re-running the same two
 commands, with the exact bytes that were running before. Full procedure
 (TLS, truststore, edge, smoke) in `docs/fineract-cell-runbook.md`.
 
+**When the merge touches `deploy/fineract/provision-*.sh`, the image roll is
+not the whole deploy.** Fineract's roles and permissions change only when
+`provision-cell.sh` runs on the cell, so the post-merge commands must include
+that run, per cell, with what it must print. The customer-deposit lock is the
+standing case: after the merge that introduced it, every non-staging cell needs
+one re-provision with nothing new in `deploy/fineract/.env` (exit 0, 6f
+`LOCKED`), and staging needs `MIDDLEWARE_CUSTOMER_DEPOSITS=1` added first (6f
+`ON`). Until a cell has had that run, its core lock is open (runbook §4,
+"One-time rollout").
+
 ## Slice progression
 
 1. **Scaffold + core port** — multi-module build; ported OradianMiddleware's
@@ -745,8 +838,12 @@ commands, with the exact bytes that were running before. Full procedure
    (the taxonomy: write 5xx / HTTP 425 / read-timeout-mid-write →
    `CoreUnknownOutcomeException` because the command reached the core; only
    connect-phase failures → `CoreTransientException`; Fineract's 403
-   domain-rule vetoes → `CoreClientException`, permission-flavoured 403 →
-   auth), `FineractResilience` (breaker both ways, retry READS ONLY),
+   domain-rule vetoes → `CoreClientException`, a 403 carrying
+   `error.msg.not.authorized` (our AppUser lacks a permission) →
+   `CoreAuthException`: an ops fault, 502 generic to the customer, ledger
+   `FAILED`/`core_auth_failed`, and a same-key replay of that row shows a
+   generic message, never the stored operator detail), `FineractResilience`
+   (breaker both ways, retry READS ONLY),
    `FineractAdapter` (capabilities SERVER_SIDE_DEDUP +
    CLIENT_ASSIGNED_EXTERNAL_ID; savings saga create→approve→activate with
    per-leg keys `<key>:create|approve|activate`, every leg resumable by
@@ -788,6 +885,8 @@ commands, with the exact bytes that were running before. Full procedure
    /me/profile` + `GET /me/accounts` (local identity merged with core
    names/balances; missing core mapping → 404 customer_not_registered),
    `POST /transactions/{deposit|withdraw|transfer}` (JWT `customer:write`;
+   deposit is now OFF by default, an unfunded cash-in — see Security
+   invariants;
    ownership checked against the CORE's account list BEFORE any claim/write —
    source for withdraw/transfer, target for deposit; key namespaced per
    customer → becomes idempotency_record key, ledger external_ref AND the
@@ -1048,16 +1147,19 @@ commands, with the exact bytes that were running before. Full procedure
    reviewable as a diff, sourced before `provision-cell.sh`, applied by its
    steps 6b–6e additively and idempotently. Deliberately NOT configurable is
    **6e's assertion that the middleware's own permission codes are never
-   `can_maker_checker`** — it is derived from the script's `READ_PERMS`/
-   `WRITE_PERMS` arrays (so a new middleware permission is protected
-   automatically, never a copied list that drifts), it runs on EVERY provision
+   `can_maker_checker`** — it is derived from what step 5 GRANTS (`READ_PERMS`
+   plus the write role's grant list, so a new middleware permission is
+   protected automatically, never a copied list that drifts; and
+   `DEPOSIT_SAVINGSACCOUNT` only on a box opted in to customer deposits, so
+   production's bank may dual-control teller deposits), it runs on EVERY provision
    even on a cell that never enables maker-checker (the flag can be set from
    the console too), and it unflags + screams rather than merely warning. A
    cell file can widen what the bank dual-controls; it can never switch off the
    thing that keeps the customer rail moving. Ordering inside 6e is the rest of
    the safety argument: flag the bank's tasks → assert → only then flip the
    global switch. Parsing + set arithmetic are in `provision-lib.sh`, covered
-   by `provision-selftest.sh` (no cell, no network, 25 cases); the
+   by `provision-selftest.sh` (no cell, no network, 123 cases, run by CI on
+   every push so its guards on the committed cell files gate a merge); the
    `_CHECKER`-sibling case there is why the check is `grep -xF` and never a
    substring match — every protected code has a `<CODE>_CHECKER` sibling whose
    flagging is normal and harmless. **The script runs `set -euo pipefail`, so a
@@ -1076,6 +1178,26 @@ commands, with the exact bytes that were running before. Full procedure
    ("Test Internal Auditor" vs the cell's real "TEST Internal Audit"). Role
    names in a cell file come from the cell's own `GET /v1/roles`, and a grant
    to a role with no members is worth nothing — check `GET /v1/users` too.
+
+   **Not every provisioning choice is market policy.** The customer-deposit
+   opt-in differs between two boxes of ONE market, so it is a per-box value
+   (`deploy/fineract/.env`), and the script refuses a cell file that sets it
+   (Security invariants). It is also the one revoke the script makes, and only
+   on the middleware's own role. **The middleware's two roles are code, not
+   policy**: their codes (`READ_PERMS`/`WRITE_PERMS`) and names live in
+   `provision-lib.sh`, 6b refuses a cell-file grant to either and fails the run,
+   and the selftest fails on a committed one. **A check must read the state the
+   run leaves behind**: the deposit-lock verification (now 6f) once ran right
+   after step 5, so a later 6b grant reopened the lock after it had printed
+   `LOCKED`, exit 0. Lib cases cannot see that kind of bug, so the selftest also
+   pins the script's WIRING by grep: which list reaches `ensure_role`, that the
+   revoke is sent, that 6e's set and 6b's refusal come from the lib, and that no
+   role or user write follows 6f. Each check needs a positive match, so a
+   reworded line fails until its check is updated, never passes vacuously. **A selftest of `set -e` behaviour must not
+   put the subshell on the left of `||`**: bash suspends errexit for anything
+   whose status `||`, `&&` or `if` tests, so `$( (set -e; …) || echo stopped )`
+   can never stop and the case passes vacuously. Capture the output and test
+   that instead (the `parse_deposit_opt_in` case does).
 
    **Two Fineract facts the step depends on, verified in the fork 2026-09-18.**
    (1) **Fineract SEEDS three of our write permissions maker-checkerable** —
@@ -1217,6 +1339,16 @@ commands, with the exact bytes that were running before. Full procedure
      still ride our read-only AppUser; only the account authz read carries the
      operator's credential. Fineract serves both search path variants from the
      same method (read from the fork, `SavingsAccountTransactionsApiResource`).
+   - **Whose credential was refused decides the answer.** The 401
+     `operator_unauthorized` is for the OPERATOR's credential only
+     (`CoreOperatorAuthException`, from `FineractOperatorGateway`). A refusal
+     of OUR read AppUser during the transaction reads (a permission missing
+     from its role, a wrong password in `.env`) is `CoreAuthException` and
+     answers `502 core_banking_unavailable` "Your credential was accepted…",
+     logged at ERROR. When both were `CoreAuthException`, a provisioning gap on
+     our side told the operator their working password had been rejected.
+     Pinned by `ConsoleStatementAuthSplitTest` (standalone) and
+     `ConsoleStatementFlowIntegrationTest`.
    - **Throttled BEFORE the credential is touched** — the endpoint would
      otherwise be an operator-password oracle. Keyed per source ADDRESS
      deliberately (per-operator keying would let a spray widen itself by
@@ -1387,7 +1519,9 @@ commands, with the exact bytes that were running before. Full procedure
      binding check → core. The two LOCAL refusals come before the first core
      call, so a blocked source over a limit is told `limit_exceeded`; the
      block is reported on the next attempt within the limits.
-     Deposits: no limits.
+     Deposits: the deposit switch (`DepositGate`, Security invariants) → the
+     request budget → customer → ownership → claim → `openPending` with
+     `PendingReservationGuard.NONE` → core; no limits.
    - **The tier is read ONCE per request through `KycTierResolver`** and that one
      `KycTierResolution` goes to step-up and both limit checks — never re-read,
      never the token's `kyc_tier` claim. Today it is the local row the request
@@ -1458,9 +1592,12 @@ commands, with the exact bytes that were running before. Full procedure
      this middleware; teller, console, payroll and journal movements are not
      counted. A transfer to the caller's own other account counts like any
      other (only the wallet is app-visible today; counting is the conservative
-     reading). Outflow limits mean little while `POST /transactions/deposit`
-     lets a customer credit their own wallet unfunded — an owner decision
-     outside this slice.
+     reading). Outflow limits mean little on a cell where
+     `POST /transactions/deposit` is switched ON, because a customer can then
+     credit their own wallet unfunded and spend it in limit-sized pieces; that
+     is why the switch is off by default and the core holds a second lock
+     (Security invariants, "unfunded cash-in"). Staging, which opens both, is
+     the one place the limits can be walked around this way.
    - **Never compute a limit from the in-memory `RateLimiterService`**: buckets
      forget everything on restart and are per replica. The ledger is the only
      source of usage, which is also why these limits stay correct if the cell
@@ -1514,8 +1651,9 @@ commands, with the exact bytes that were running before. Full procedure
      the step-up endpoints too.
    - **`/transactions/*` has a per-customer request budget**
      (`RATE_LIMIT_CUSTOMER_PAYMENT_*`, 10 / min, first thing in every
-     `MovementService` method). A count limit is not a rate limit: refused and
-     failed attempts are free against it.
+     `MovementService` method — in `deposit` second, after the deposit switch,
+     whose refusal never spends it). A count limit is not a rate limit: refused
+     and failed attempts are free against it.
    Contract pinned by `PaymentLimitsPolicyLoaderTest` (every refusal rule,
    overrides incl. lowering that never changes an outcome and the tier WARN, the
    empty-env binding, the step-up WARN), `PaymentLimitsPolicyAuditorTest`,
