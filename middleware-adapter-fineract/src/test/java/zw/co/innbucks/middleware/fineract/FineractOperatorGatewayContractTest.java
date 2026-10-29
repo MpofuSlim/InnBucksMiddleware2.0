@@ -8,6 +8,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import zw.co.innbucks.middleware.corebanking.exception.CoreAuthException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreClientException;
+import zw.co.innbucks.middleware.corebanking.exception.CoreOperatorAuthException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreTransientException;
 import zw.co.innbucks.middleware.corebanking.value.DepositAccountKind;
 import zw.co.innbucks.middleware.corebanking.value.LoanEntryKind;
@@ -192,12 +193,19 @@ class FineractOperatorGatewayContractTest {
         assertThat(view.kind()).isEqualTo(DepositAccountKind.OTHER);
     }
 
+    /**
+     * The OPERATOR's credential, so {@link CoreOperatorAuthException} and never
+     * {@link CoreAuthException}: that one means the core refused this
+     * middleware's own service account, and the console answers the two
+     * differently (401 for the operator, 502 for ours).
+     */
     @Test
-    void rejectedCredentialIsAnAuthFailure() {
+    void rejectedCredentialIsAnOperatorAuthFailureNeverOurs() {
         stubJson("/v1/savingsaccounts/17", 401, "{\"error\":\"Unauthorized\"}");
 
         assertThatThrownBy(() -> gateway.authorizeAndDescribeAccount(operator(), "17"))
-                .isInstanceOf(CoreAuthException.class);
+                .isInstanceOf(CoreOperatorAuthException.class)
+                .isNotInstanceOf(CoreAuthException.class);
     }
 
     @Test
@@ -486,9 +494,9 @@ class FineractOperatorGatewayContractTest {
                 "{\"errors\":[{\"userMessageGlobalisationCode\":\"error.msg.not.authorized\"}]}");
 
         assertThatThrownBy(() -> gateway.authorizeAndDescribeLoan(operator(), "9"))
-                .isInstanceOf(CoreAuthException.class);
+                .isInstanceOf(CoreOperatorAuthException.class);
         assertThatThrownBy(() -> gateway.listLoanTransactions(operator(), "9", 0, 50))
-                .isInstanceOf(CoreAuthException.class);
+                .isInstanceOf(CoreOperatorAuthException.class);
         assertThatThrownBy(() -> gateway.authorizeAndDescribeLoan(operator(), "999"))
                 .isInstanceOf(CoreClientException.class);
         assertThatThrownBy(() -> gateway.authorizeAndDescribeLoan(operator(), "998"))

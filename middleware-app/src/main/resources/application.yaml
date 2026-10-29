@@ -197,6 +197,17 @@ innbucks:
       # alert still sends) rather than spill into a second segment.
       max-length: ${TXN_ALERTS_MAX_LENGTH:160}
       max-narrative-length: ${TXN_ALERTS_MAX_NARRATIVE:24}
+  transactions:
+    deposit:
+      # POST /transactions/deposit is an UNFUNDED cash-in: any signed-in
+      # customer credits their own wallet with a plain savings deposit of any
+      # amount, with no source of funds, no step-up, no maximum and no GL trail
+      # (the wallet product's accounting rule is None). OFF by default; off, it
+      # answers 403 deposit_disabled before anything is read or written.
+      # Staging turns it on (testers fund wallets; the runbook smoke deposits),
+      # and a deployment profile then logs a WARN banner at every boot. NEVER
+      # true on a cell that holds real money.
+      enabled: ${TRANSACTIONS_DEPOSIT_ENABLED:false}
   limits:
     # Per-tier payment limits on app withdrawals/transfers. The VALUES live in
     # the reviewed policy file packaged into the image —

@@ -3,6 +3,7 @@ package zw.co.innbucks.middleware.transactions;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.mock.env.MockEnvironment;
 import zw.co.innbucks.middleware.audit.AuditService;
 import zw.co.innbucks.middleware.common.country.Country;
 import zw.co.innbucks.middleware.common.country.CountryProperties;
@@ -71,10 +72,10 @@ import static org.mockito.Mockito.when;
 
 /**
  * The ORDER of the money path's guards, which is where the limits' promises
- * live: the payment request budget before anything, the limits before the
- * step-up answer, a replay answered from its ledger row instead of being
- * counted again, and the binding check handed to the ledger for withdrawals
- * and transfers only.
+ * live: the deposit switch before anything on a deposit, the payment request
+ * budget before anything else, the limits before the step-up answer, a replay
+ * answered from its ledger row instead of being counted again, and the
+ * binding check handed to the ledger for withdrawals and transfers only.
  */
 class MovementServiceTest {
 
@@ -118,6 +119,11 @@ class MovementServiceTest {
     }
 
     private MovementService service(TierLimits basic, KycTierResolver resolver, int paymentCapacity) {
+        return service(basic, resolver, paymentCapacity, true);
+    }
+
+    private MovementService service(TierLimits basic, KycTierResolver resolver, int paymentCapacity,
+                                    boolean depositsEnabled) {
         PaymentLimitsPolicy policy = new PaymentLimitsPolicy(Country.ZW, "USD", "limits/limits-zw.yaml",
                 "0".repeat(64), Map.of(KycTier.BASIC, basic, KycTier.STANDARD, TierLimits.none(),
                 KycTier.ENHANCED, TierLimits.none()), List.of());
@@ -127,8 +133,11 @@ class MovementServiceTest {
         RateLimitProperties rateLimits = new RateLimitProperties(true, false, 0,
                 generous, generous, generous, generous, generous, generous, generous, generous, generous,
                 new Limit(paymentCapacity, Duration.ofMinutes(1)));
+        MockEnvironment env = new MockEnvironment();
+        env.setActiveProfiles("prod");
+        DepositGate depositGate = new DepositGate(new DepositProperties(depositsEnabled), env, meters);
         return new MovementService(customers, port, idempotency, executor, ledger, stepUp, resolver, limits,
-                new RateLimiterService(rateLimits));
+                new RateLimiterService(rateLimits), depositGate);
     }
 
     private MovementService service() {
@@ -151,6 +160,35 @@ class MovementServiceTest {
                 new WithdrawRequest(WALLET, 1000, "USD", null), null))
                 .isInstanceOf(RateLimitExceededException.class);
         verify(customers, times(2)).findById(CUSTOMER);
+    }
+
+    /**
+     * The deposit switch sits AHEAD of the request budget all three endpoints
+     * share. Its refusal costs nothing (no read, no write), and spending the
+     * budget on it would let an app that still calls deposit on a switched-off
+     * cell block the customer's withdrawals and transfers for the window.
+     */
+    @Test
+    void aSwitchedOffDepositSpendsNoneOfThePaymentBudget() {
+        MovementService service = service(BASIC, new CustomerRecordKycTierResolver(meters), 2, false);
+
+        for (int i = 0; i < 5; i++) {
+            String key = "d" + i;
+            assertThatThrownBy(() -> service.deposit(CUSTOMER, key,
+                    new DepositRequest(WALLET, 1000, "USD", null)))
+                    .isInstanceOf(DepositDisabledException.class);
+        }
+        verifyNoInteractions(customers, executor, usage);
+        assertThat(meters.get("innbucks.transactions.deposit.refused").counter().count()).isEqualTo(5.0);
+
+        // The budget of two is untouched by the five refusals...
+        assertThat(service.transfer(CUSTOMER, "t1", transfer(1000), null).body().status())
+                .isEqualTo("SUCCESS");
+        assertThat(service.withdraw(CUSTOMER, "w1", new WithdrawRequest(WALLET, 1000, "USD", null), null)
+                .body().status()).isEqualTo("SUCCESS");
+        // ...and still binds the movements that do run.
+        assertThatThrownBy(() -> service.transfer(CUSTOMER, "t2", transfer(1000), null))
+                .isInstanceOf(RateLimitExceededException.class);
     }
 
     /** "Check the limits before answering step_up_required, so nobody is sent a code." */

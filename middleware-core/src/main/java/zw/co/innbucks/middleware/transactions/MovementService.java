@@ -44,9 +44,16 @@ import java.util.function.Function;
  * Customer money movement. The full guard stack, in order:
  *
  * <ol>
+ *   <li><b>Cell switch (deposit only):</b> deposits are an unfunded cash-in
+ *       and are refused outright unless the cell opts in
+ *       ({@link DepositGate}) — before anything is read, asked or written,
+ *       and before the request budget below: a refusal that costs nothing
+ *       must not spend the customer's {@code /transactions/*} budget, or an
+ *       app that still calls deposit on a switched-off cell would eat into
+ *       the customer's withdrawals and transfers.</li>
  *   <li><b>Request rate:</b> a per-customer budget on {@code /transactions/*}
- *       (429 {@code rate_limited}), FIRST — refused attempts are free, so the
- *       count limit below is not a rate limit.</li>
+ *       (429 {@code rate_limited}), first after the deposit switch — refused
+ *       attempts are free, so the count limit below is not a rate limit.</li>
  *   <li><b>Tier:</b> resolved ONCE ({@link KycTierResolver}) and threaded into
  *       step-up and both limit checks; never re-read, never from the token.</li>
  *   <li><b>Limits, advisory (withdraw/transfer):</b> the per-tier payment
@@ -91,9 +98,15 @@ public class MovementService {
     private final KycTierResolver tierResolver;
     private final PaymentLimitService limitService;
     private final RateLimiterService rateLimiter;
+    private final DepositGate depositGate;
 
     public IdempotencyService.Result<TransactionResponse> deposit(UUID customerId, String rawKey,
                                                                   DepositRequest request) {
+        // First, ahead of every read AND the request budget: a switched-off
+        // cell must not spend a database read, a core round trip or the
+        // customer's /transactions/* budget on a request it always refuses,
+        // and must leave no idempotency claim or ledger row behind.
+        depositGate.requireEnabled(customerId);
         rateLimiter.enforceCustomerPayment(customerId);
         Customer customer = requireMappedCustomer(customerId);
         requireOwnership(customer, request.accountId());
@@ -232,9 +245,14 @@ public class MovementService {
                 row.getId(), row.getExternalRef(), status);
         return switch (status) {
             case COMPLETED -> TransactionResponse.success(row.getId(), row.getCoreTxRef());
+            // The stored detail is shown only for a refusal of the request
+            // itself. For our own failures (credentials or permissions refused,
+            // core down) it is operator detail, which the first answer kept in
+            // the logs behind a generic 502/503, so the replay does too.
             case FAILED -> TransactionResponse.failed(row.getId(),
                     row.getFailureCode() == null ? "core_reported_failed" : row.getFailureCode(),
                     row.getFailureMessage() == null
+                            || LedgeredMovementExecutor.isOperationalFailure(row.getFailureCode())
                             ? "The movement did not apply. Use a new Idempotency-Key for a fresh attempt."
                             : row.getFailureMessage());
             default -> TransactionResponse.processing(row.getId(), row.getCoreTxRef());

@@ -45,8 +45,11 @@ public class CoreBankingExceptionHandler {
 
     @ExceptionHandler(CoreAuthException.class)
     public ResponseEntity<ProblemDetail> upstreamAuth(CoreAuthException ex) {
-        // Our service credentials — an ops incident, never customer detail.
-        log.error("Core banking credentials rejected: {}", ex.getMessage());
+        // Our service credentials, or a permission they lack (e.g. a cell
+        // provisioned without customer deposits while the deposit switch is
+        // on) — an ops incident, never customer detail.
+        log.error("Core banking refused our service credentials or a permission they need: {}",
+                ex.getMessage());
         return problem(HttpStatus.BAD_GATEWAY,
                 "Service temporarily unavailable",
                 "We couldn't reach the banking system. Please try again shortly.",

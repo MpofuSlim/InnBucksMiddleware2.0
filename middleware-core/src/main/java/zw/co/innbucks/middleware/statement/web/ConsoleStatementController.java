@@ -3,12 +3,14 @@ package zw.co.innbucks.middleware.statement.web;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.media.Content;
+import io.swagger.v3.oas.annotations.media.ExampleObject;
 import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.security.SecurityRequirements;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.servlet.http.HttpServletRequest;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -25,6 +27,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import zw.co.innbucks.middleware.corebanking.exception.CoreAuthException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreClientException;
+import zw.co.innbucks.middleware.corebanking.exception.CoreOperatorAuthException;
 import zw.co.innbucks.middleware.corebanking.value.OperatorCredential;
 import zw.co.innbucks.middleware.ratelimit.ClientIpResolver;
 import zw.co.innbucks.middleware.statement.StatementDocument;
@@ -57,6 +60,7 @@ import java.time.LocalDate;
  * browser would answer one with its native Basic-auth popup over the Mifos
  * UI, which handles its own login.
  */
+@Slf4j
 @RestController
 @RequestMapping("/console")
 @Validated
@@ -108,6 +112,16 @@ public class ConsoleStatementController {
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
             @ApiResponse(responseCode = "429", description = "Too many requests from this source",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
+            @ApiResponse(responseCode = "502", description = "The operator's credential was ACCEPTED, but "
+                    + "the core refused this service's own read account (a permission missing, or its "
+                    + "password wrong) — errorCode core_banking_unavailable. A service configuration "
+                    + "fault for operations, never the operator's credential: do not re-enter it",
+                    content = @Content(schema = @Schema(implementation = ProblemDetail.class),
+                            examples = @ExampleObject(name = "Service account refused", value = """
+                                    {"type":"about:blank","title":"Statement unavailable","status":502,
+                                     "detail":"Your credential was accepted, but the statement service could not read this account's transactions from the core banking system. This is a service configuration fault; report it to operations.",
+                                     "errorCode":"core_banking_unavailable"}
+                                    """))),
             @ApiResponse(responseCode = "503", description = "Core banking system unreachable, no operator "
                     + "gateway on this cell, or no running balances (errorCode statement_unavailable)",
                     content = @Content(schema = @Schema(implementation = ProblemDetail.class)))
@@ -236,12 +250,33 @@ public class ConsoleStatementController {
                 ex.getMessage(), "statement_unavailable");
     }
 
-    /** Fineract said the credential itself is bad. */
-    @ExceptionHandler(CoreAuthException.class)
-    public ResponseEntity<ProblemDetail> operatorRejected(CoreAuthException ex) {
+    /** Fineract said the OPERATOR's credential itself is bad. */
+    @ExceptionHandler(CoreOperatorAuthException.class)
+    public ResponseEntity<ProblemDetail> operatorRejected(CoreOperatorAuthException ex) {
         return problem(HttpStatus.UNAUTHORIZED, "Operator not authenticated",
                 "The core banking system rejected the presented credential.",
                 "operator_unauthorized");
+    }
+
+    /**
+     * Fineract refused THIS MIDDLEWARE's own service account, not the
+     * operator. A deposit statement authorises as the operator and then reads
+     * the transactions with the middleware's read-only account, so a gap there
+     * (a permission missing from its role, a wrong password in this cell's
+     * .env) surfaces on the console. It must never read as the 401 above: the
+     * operator's credential was accepted, and telling them otherwise sends
+     * them to reset a password that was never the problem. An operations
+     * fault, logged at ERROR like everywhere else, with a 502 that says whose.
+     */
+    @ExceptionHandler(CoreAuthException.class)
+    public ResponseEntity<ProblemDetail> middlewareRejected(CoreAuthException ex) {
+        log.error("Console statement: the core refused this middleware's own service credentials "
+                + "or a permission they need: {}", ex.getMessage());
+        return problem(HttpStatus.BAD_GATEWAY, "Statement unavailable",
+                "Your credential was accepted, but the statement service could not read this "
+                        + "account's transactions from the core banking system. This is a service "
+                        + "configuration fault; report it to operations.",
+                "core_banking_unavailable");
     }
 
     /**
