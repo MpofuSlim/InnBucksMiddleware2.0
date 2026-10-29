@@ -12,6 +12,7 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.context.WebApplicationContext;
 import zw.co.innbucks.middleware.auth.CustomerScopes;
@@ -51,6 +52,7 @@ import static org.hamcrest.Matchers.not;
 import static org.springframework.security.test.web.servlet.setup.SecurityMockMvcConfigurers.springSecurity;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 import zw.co.innbucks.middleware.corebanking.value.TransactionDirection;
@@ -663,6 +665,67 @@ class TransactionFlowIntegrationTest {
                 .isZero();
         assertThat(jdbcTemplate.queryForObject("SELECT COUNT(*) FROM idempotency_record", Integer.class))
                 .isZero();
+    }
+
+    /**
+     * Registration crashed before the core mapping landed: the row exists but
+     * core_external_id is NULL. The movement endpoints used to answer 500 here
+     * — the "not registered" handler lived only on the read controllers.
+     */
+    @Test
+    void movementByACustomerNeverLinkedToTheCoreIsNotRegisteredNotA500() throws Exception {
+        jdbcTemplate.update("UPDATE customer SET core_external_id = NULL WHERE id = ?", customerId);
+
+        expectNotRegistered(mockMvc.perform(post("/transactions/withdraw")
+                .header(HttpHeaders.AUTHORIZATION, bearer).header("Idempotency-Key", "wd-unmapped")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                        {"accountId":"%s","amountMinor":1000,"currency":"KES"}
+                        """.formatted(wallet))));
+        expectNotRegistered(mockMvc.perform(post("/transactions/deposit")
+                .header(HttpHeaders.AUTHORIZATION, bearer).header("Idempotency-Key", "dep-unmapped")
+                .contentType(MediaType.APPLICATION_JSON).content(depositBody(1000))));
+        expectNotRegistered(mockMvc.perform(post("/transactions/transfer")
+                .header(HttpHeaders.AUTHORIZATION, bearer).header("Idempotency-Key", "tr-unmapped")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                        {"fromAccountId":"%s","toAccountId":"other:wallet",
+                         "amountMinor":1000,"currency":"KES"}
+                        """.formatted(wallet))));
+
+        // Refused before anything is claimed or written.
+        assertThat(jdbcTemplate.queryForObject("SELECT COUNT(*) FROM ledger_transaction", Integer.class))
+                .isZero();
+        assertThat(jdbcTemplate.queryForObject("SELECT COUNT(*) FROM idempotency_record", Integer.class))
+                .isZero();
+    }
+
+    /** The surfaces that already answered 404 keep the exact same body from the shared handler. */
+    @Test
+    void everyNotRegisteredSurfaceAnswersTheSameBody() throws Exception {
+        jdbcTemplate.update("UPDATE customer SET core_external_id = NULL WHERE id = ?", customerId);
+
+        expectNotRegistered(mockMvc.perform(get("/me/profile").header(HttpHeaders.AUTHORIZATION, bearer)));
+        expectNotRegistered(mockMvc.perform(get("/me/accounts/{id}/statement", wallet)
+                .param("from", "2026-07-01").param("to", "2026-07-31")
+                .header(HttpHeaders.AUTHORIZATION, bearer)));
+
+        // Step-up's own lookup: a token whose customer has no row at all.
+        String orphan = "Bearer " + issuer.issue(new JwtIssuer.IssueRequest(
+                UUID.randomUUID().toString(), Country.KE, "basic", CustomerScopes.DEFAULT, null));
+        expectNotRegistered(mockMvc.perform(post("/auth/step-up/request")
+                .header(HttpHeaders.AUTHORIZATION, orphan)));
+    }
+
+    private static void expectNotRegistered(ResultActions result) throws Exception {
+        result.andExpect(status().isNotFound())
+                .andExpect(content().contentType(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.type").value("about:blank"))
+                .andExpect(jsonPath("$.title").value("Not registered"))
+                .andExpect(jsonPath("$.status").value(404))
+                .andExpect(jsonPath("$.detail").value(
+                        "We couldn't find a registered account for this login. Please register first."))
+                .andExpect(jsonPath("$.errorCode").value("customer_not_registered"));
     }
 
     @Test

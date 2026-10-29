@@ -106,6 +106,13 @@ public class LoginController {
         //    its own device) may cost a core read or learn of a block.
         Optional<UUID> liveCustomerId = refreshTokenService.liveSessionCustomer(secret, request.deviceHash());
 
+        // Deliberately NO gate on the customer's 'locked' status: refresh does
+        // not refuse a PIN-locked customer. That lock is driven by wrong PINs,
+        // which anyone can type against a number — gating refresh on it would
+        // let an attacker sign a victim out of every device by guessing wrong
+        // 7 times (the default cap). Ending sessions is the job of explicit
+        // actions: a PIN set/reset revokes every family, and so does the
+        // bank's full block below.
         // 2. The bank's block, read while the presented token is still UNSPENT
         //    and with no transaction open (rotate() holds a pooled connection
         //    and the customer-row lock; an HTTP call must not run inside it).

@@ -1,10 +1,12 @@
 package zw.co.innbucks.middleware.fineract;
 
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
 import io.github.resilience4j.core.IntervalFunction;
 import io.github.resilience4j.retry.Retry;
 import io.github.resilience4j.retry.RetryConfig;
+import zw.co.innbucks.middleware.corebanking.CoreProvider;
 import zw.co.innbucks.middleware.corebanking.exception.CoreServerException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreTransientException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreUnknownOutcomeException;
@@ -31,6 +33,18 @@ import java.util.function.Supplier;
  * {@link CoreServerException} / {@link CoreTransientException} /
  * {@link CoreUnknownOutcomeException} (timeouts). A 4xx is our bad request,
  * not the core being unavailable, and never trips it.
+ *
+ * <p>An OPEN (or saturated half-open) breaker refuses with Resilience4j's
+ * {@link CallNotPermittedException}, which is translated here into
+ * {@link CoreTransientException}: the refusal happens before the supplier
+ * runs, so the request provably never left this process — exactly the
+ * connect-phase, not-applied class that exception means. Left raw it is a
+ * type nothing upstream knows: the web layer answered a 500, and the ledger
+ * parked as UNKNOWN a movement that was never sent. Translated, the ledger
+ * records FAILED and the caller gets 503 {@code core_banking_unavailable}.
+ * The translation sits OUTSIDE the decorated call, so the breaker never
+ * records it as a failure and the read retry (inside the breaker) never
+ * sees it.
  */
 public class FineractResilience {
 
@@ -58,8 +72,12 @@ public class FineractResilience {
         if (!enabled) {
             return call.get();
         }
-        return CircuitBreaker.decorateSupplier(circuitBreaker,
-                Retry.decorateSupplier(readRetry, call)).get();
+        try {
+            return CircuitBreaker.decorateSupplier(circuitBreaker,
+                    Retry.decorateSupplier(readRetry, call)).get();
+        } catch (CallNotPermittedException ex) {
+            throw notAttempted(ex);
+        }
     }
 
     /** State-changing write: circuit breaker only, NEVER auto-retried. */
@@ -67,7 +85,21 @@ public class FineractResilience {
         if (!enabled) {
             return call.get();
         }
-        return CircuitBreaker.decorateSupplier(circuitBreaker, call).get();
+        try {
+            return CircuitBreaker.decorateSupplier(circuitBreaker, call).get();
+        } catch (CallNotPermittedException ex) {
+            throw notAttempted(ex);
+        }
+    }
+
+    /** Package-private seam so tests can read the breaker's own metrics. */
+    CircuitBreaker circuitBreaker() {
+        return circuitBreaker;
+    }
+
+    private static CoreTransientException notAttempted(CallNotPermittedException ex) {
+        return new CoreTransientException(CoreProvider.FINERACT,
+                "Fineract call not attempted, request never sent: " + ex.getMessage(), ex);
     }
 
     private static CircuitBreaker buildCircuitBreaker(FineractProperties.Resilience p) {
