@@ -12,12 +12,15 @@ import zw.co.innbucks.middleware.corebanking.value.AccountRestriction;
 import zw.co.innbucks.middleware.corebanking.value.CoreCustomerRef;
 import zw.co.innbucks.middleware.corebanking.value.DepositAccountRef;
 import zw.co.innbucks.middleware.customer.Customer;
+import zw.co.innbucks.middleware.customer.CustomerRecordKycTierResolver;
 import zw.co.innbucks.middleware.customer.CustomerRepository;
 import zw.co.innbucks.middleware.idempotency.IdempotencyKeys;
 import zw.co.innbucks.middleware.idempotency.IdempotencyService;
 import zw.co.innbucks.middleware.ledger.LedgerTransaction;
 import zw.co.innbucks.middleware.ledger.LedgerTransactionRepository;
 import zw.co.innbucks.middleware.ledger.LedgeredMovementExecutor;
+import zw.co.innbucks.middleware.limits.PaymentLimitService;
+import zw.co.innbucks.middleware.ratelimit.RateLimiterService;
 import zw.co.innbucks.middleware.stepup.StepUpService;
 import zw.co.innbucks.middleware.transactions.MovementRequests.TransferRequest;
 import zw.co.innbucks.middleware.transactions.MovementRequests.WithdrawRequest;
@@ -55,8 +58,12 @@ class MovementServiceRestrictionTest {
     private final LedgerTransactionRepository ledger = mock(LedgerTransactionRepository.class);
     private final StepUpService stepUp = mock(StepUpService.class);
     private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
+    // The limits and the request budget are not under test here (their order
+    // against the block is, in MovementServiceTest): they let everything by.
+    private final PaymentLimitService limits = mock(PaymentLimitService.class);
     private final MovementService service = new MovementService(
-            customers, port, idempotency, executor, ledger, stepUp, meters);
+            customers, port, idempotency, executor, ledger, stepUp,
+            new CustomerRecordKycTierResolver(meters), limits, mock(RateLimiterService.class), meters);
 
     private final UUID customerId = UUID.randomUUID();
     private final String wallet = customerId + ":wallet";

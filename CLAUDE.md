@@ -84,6 +84,11 @@ Build: `./mvnw verify` at the root. Run locally:
   blind-retried, never auto-expired. Blocked beats double-charged.
 * Orchestration branches on `capabilities()` flags (`SERVER_SIDE_DEDUP`,
   `CLIENT_ASSIGNED_EXTERNAL_ID`, `REVERSAL`) — never on `instanceof` adapter.
+* `cellCurrency()` is the ONE currency the cell transacts in, and must be
+  exactly the value the adapter enforces on every write and balance. Policy
+  above the port (the payment limits, slice 11) refuses to boot on a mismatch
+  and sums the ledger in it — an adapter that reported one currency and
+  enforced another would make every limit compare the wrong money.
 * Adapters map upstream failures to the core-neutral taxonomy
   (`CoreAuthException` / `CoreClientException` / `CoreServerException` /
   `CoreTransientException` / `CoreUnknownOutcomeException`); nothing upstream
@@ -159,12 +164,26 @@ Build: `./mvnw verify` at the root. Run locally:
   the step-up PRESENCE check still runs first (PR #53: a tokenless
   high-value attempt costs no core call), so a blocked source at or above the
   threshold is told `account_restricted` only on the token-bearing retry,
-  after one SMS approval (bounded by the per-number OTP allowance). Checking
-  the block first would cost every high-value payment a second listing to
-  spare a rare blocked customer one SMS, and a full block signs the customer
-  out anyway. Pinned by the
+  after one SMS approval (bounded by the per-customer step-up allowance,
+  slice 11). Checking the block first would cost every high-value payment a
+  second listing to spare a rare blocked customer one SMS, and a full block
+  signs the customer out anyway. **The per-tier limits (slice 11) run before
+  both, for the same reason:** the advisory limit check is local and the
+  block is only known from the listing, the first core call on the path. So
+  a blocked source whose payment is ALSO over a limit is answered 422
+  `limit_exceeded`, not `account_restricted`. Reading the block first would
+  have to precede the limits, and so the step-up presence check, putting a
+  core call on every limit refusal and every token-less high-value first
+  attempt (`MovementServiceTest` pins that a limit refusal makes none). The
+  limit answer is still true — the payment is over the limit, block or no
+  block — and costs no SMS and no state; the next attempt within the limits
+  meets the listing and gets `account_restricted`. What it does mislead on:
+  the refusal's `remainingMinor` / `nextTier` describe a payment the block
+  will refuse anyway. Pinned by the
   sub-status cases in `FineractAccountListingContractTest`,
-  `MovementServiceRestrictionTest` and `TransactionFlowIntegrationTest`.
+  `MovementServiceRestrictionTest`, `TransactionFlowIntegrationTest` and, for
+  the order against the limits, the `aBlockedSource*` cases in
+  `MovementServiceTest`.
 * **A maker-checker-PARKED command is UNKNOWN, never a success.** Fineract
   answers a parked command with a success-shaped
   `200 {"commandId":N,"rollbackTransaction":true}` and no resourceId/echo —
@@ -195,7 +214,9 @@ Build: `./mvnw verify` at the root. Run locally:
   so it was a stable personal identifier on the device and in every log that
   captures a bearer. Do not add it back; the app must not rely on it.
   High-value withdrawals/transfers additionally need a step-up SMS approval
-  bound to the exact transaction (`X-Step-Up-Token`; `innbucks.stepup.*`).
+  bound to the exact transaction (`X-Step-Up-Token`; `innbucks.stepup.*`),
+  and every withdrawal/transfer is checked against the caller's per-tier
+  payment limits first (slice 11).
 * **SMS/notifications ride the InnBucks notification gateway**
   (`NOTIFY_PROVIDER=innbucks-gateway` + `NOTIFY_API_*` — same platform
   gateway as the ticketing fleet; email surface pinned for later), with an
@@ -1098,11 +1119,12 @@ commands, with the exact bytes that were running before. Full procedure
    443 is open to the world, so an attacker who finds it skips Cloudflare and
    forges the whole XFF chain — which is what still makes (1) decorative, and
    is now the top item rather than the second. (3)
-   `/fineract-provider/**` answers from the public internet. (4) **No rate
-   limit on `/transactions/*`** — a stolen token can fire movements as fast as
-   the core accepts them, and repeated transfers just under the step-up
-   threshold are unthrottled. (5) Velocity/amount limit tables (already
-   deferred below) are the real fix for (4).
+   `/fineract-provider/**` answers from the public internet. (4) **DONE in
+   slice 11** — `/transactions/*` has a per-customer request budget. (5) **Built
+   in slice 11** as per-tier payment limits from the ledger (per payment, day,
+   month, payments a day); they enforce nothing until compliance's values are
+   merged into the policy file, so until then repeated transfers just under the
+   step-up threshold are still bounded only by the request budget.
 
    **Two auth-concurrency gaps deliberately deferred** (found while making the
    lockout counter atomic; both need the SAME mechanism, so they ship together):
@@ -1298,8 +1320,223 @@ commands, with the exact bytes that were running before. Full procedure
    the FD title cases in the deposit renderer tests, and the loan + FD cases
    in `ConsoleStatementFlowIntegrationTest` (full JSON contract on the wire).
 
+11. **Per-tier payment limits — DONE (values dormant, pending compliance).**
+   `limits/` in middleware-core: per-KYC-tier `per_payment`, `daily`, `monthly`
+   (minor units) and `daily_count` on app WITHDRAWALS and TRANSFERS, enforced
+   atomically and counted once, plus `GET /me/limits`. Built on the ledger,
+   with no counter table.
+   - **The PENDING ledger row IS the reservation.** The binding check runs
+     inside `LedgerService.openPending(draft, guard)` — still the ONE
+     transaction on the payment path before the core call, REQUIRES_NEW — as a
+     `PendingReservationGuard`: `pg_advisory_xact_lock(<"ILMT">,
+     hashtext(customer_id::text))`, then ONE usage query, then refuse (throw:
+     the transaction rolls back, no row, and because the executor opens the row
+     before its try block, no core call) or let the INSERT go ahead. A later
+     FAILED releases the amount by itself, because the sum excludes FAILED —
+     there is no release step to forget and nothing to drift. The guard judges
+     the period on the SAME instant the row is stamped with (`openedAt`).
+     **No network call inside that transaction, ever** — the tier is resolved
+     before it and passed in. `openPending(draft, guard)` and
+     `LedgeredMovementExecutor.execute(draft, guard, call)` have **no guard-free
+     overload**: every caller names its guard, so a withdrawal or transfer
+     opened with `PendingReservationGuard.NONE` (past the limits) shows up in
+     review instead of being a default. The wiring and the guard-before-INSERT
+     order are pinned by unit tests (`LedgeredMovementExecutorTest`,
+     `LedgerServiceTest`), not only by the timing-dependent concurrency IT.
+   - **The lock is an ADVISORY lock, deliberately not a customer-row lock**:
+     it contends with nothing else (login's counter UPDATE, PIN reset, and the
+     `FOR KEY SHARE` every ledger/refresh-token INSERT takes on `customer`). If
+     it is ever swapped for a row lock it MUST be `FOR NO KEY UPDATE`, never
+     `FOR UPDATE` (see slice 9). `LimitUsageStore.lockCustomer` refuses to run
+     outside a transaction — in autocommit the lock would be released at once.
+   - **`openPending` pins READ COMMITTED.** The sum is a separate statement
+     after the lock and must see the row the previous holder committed while
+     this one waited; a REPEATABLE READ snapshot predates that commit. Measured
+     (local Postgres 16, mutation run): REPEATABLE READ, or removing the lock,
+     each let both of two racing payments through; the concurrency ITs fail.
+   - **What counts — ONE predicate** (`LimitUsageStore.USAGE_SQL`, shared by
+     the advisory check, the binding check and `/me/limits`, so the screen and
+     the refusal cannot disagree): `type IN (WITHDRAWAL, TRANSFER)`,
+     `status <> FAILED`, `currency =` the cell's, `created_at` in the window.
+     PROCESSING (PENDING/SUBMITTED/UNKNOWN) counts in the day and month it was
+     MADE — a transfer the core never confirms holds its amount until that
+     period ends, and only an operator settling it could free it sooner. The
+     windows are the market's calendar day and month (`Country.zoneId()`,
+     Africa/Harare), computed in Java as UTC `[start, end)` and compared with
+     the `timestamptz` column; no SQL does zone arithmetic.
+   - **Two layers, same rules.** ADVISORY (`PaymentLimitService.precheck`, no
+     lock) runs in `MovementService` BEFORE the step-up presence check, so a
+     payment the limits will refuse is answered 422 `limit_exceeded`, never 403
+     `step_up_required` (nobody fetches an SMS code for it). It **skips a key the
+     ledger already holds**: a replay must return its recorded outcome, not be
+     counted against itself. And it **reads the key again before refusing**: a
+     double-tap whose original commits its PENDING row between the skip and the
+     sum would otherwise be refused on its own payment. The re-read comes after
+     the sum, so any row the sum counted is visible to it, and it keeps ONE usage
+     predicate (no `external_ref <> ?` variant). BINDING is the guard above.
+     Count-once is the unique `external_ref` (= the namespaced Idempotency-Key) — the binding
+     check is only reached when no row exists for the key. **Accepted race:** a
+     payment can pass the advisory check, spend its SMS approval, and lose the
+     binding check to a concurrent payment; the approval is bound to the amount,
+     so any retry re-approves anyway, and the money is never wrong.
+   - **Order on withdraw/transfer:** per-customer request budget → load
+     customer → tier (ONCE) → advisory limits → step-up presence → ownership
+     listing (+ the early 403 `account_restricted` on a blocked source, unless
+     the key already has a ledger row — see "The account listing carries the
+     bank's block") → step-up enforce → idempotency claim → `openPending` +
+     binding check → core. The two LOCAL refusals come before the first core
+     call, so a blocked source over a limit is told `limit_exceeded`; the
+     block is reported on the next attempt within the limits.
+     Deposits: no limits.
+   - **The tier is read ONCE per request through `KycTierResolver`** and that one
+     `KycTierResolution` goes to step-up and both limit checks — never re-read,
+     never the token's `kyc_tier` claim. Today it is the local row the request
+     already loaded; an UNRECOGNISED stored value is BASIC + WARN +
+     `innbucks.kyc_tier.unrecognised`, never an exception. The throwing
+     `KycTier.fromDbValue` and `Customer.kycTierEnum()` over it made one garbage
+     row a 500 on every payment of that customer; the payment path was their
+     only caller, so they are DELETED — login and `/me/profile` carry the
+     stored string as is, and a tier for a DECISION comes from the seam only,
+     never from parsing the column again. The seam can already say
+     UNAVAILABLE for the live core read that will replace it: BASIC is then used
+     only to ALLOW, and anything that would refuse (a limit, or step-up) is 503
+     `kyc_tier_unavailable` — never a `limit_exceeded` / `step_up_required`
+     resting on a guessed tier. That live read must happen OUTSIDE the ledger
+     transaction and must not be cached (caching policy above).
+   - **Values live in a reviewed policy file, not env, not code:**
+     `middleware-app/src/main/resources/limits/limits-<iso>.yaml`, picked by
+     `INNBUCKS_COUNTRY`, packaged into the attested image. Parsed STRICTLY
+     (`PaymentLimitsPolicyLoader`: unknown or duplicate keys, a decimal, a
+     quoted number, `daily:` with no value, a missing tier — all refuse boot;
+     a typo must never read as "absent = unlimited"). Boot also refuses unless
+     `country`/`currency` match the cell (`CoreBankingPort.cellCurrency()`, new
+     on the port: the one currency the adapter already enforces), every value
+     is positive, `per_payment <= daily <= monthly`, and no higher tier is
+     stricter than a lower one (absent = unlimited). The location is not configurable — that
+     would be an env override of the values by another name. Every
+     supported country must ship a file (`PaymentLimitsPolicyFilesTest`). **The
+     shipped ZW and KE files are DORMANT** (every kind absent; boot WARNs), and
+     that test asserts they are, so whoever merges compliance's values edits
+     the test in the same PR. At boot: the file's SHA-256 and effective values
+     are logged, and `LIMITS_POLICY_LOADED` is audited — **best-effort**, like
+     every audit today: a lost row must not turn an audit blip into a payments
+     outage, and the boot log plus the image sha carry the same facts.
+   - **Emergency overrides are TIGHTEN-ONLY** (`LIMITS_OVERRIDE_<TIER>_<KIND>`):
+     a looser value refuses boot, any value tightens an absent one, each active
+     override is a boot WARN plus a `LIMITS_OVERRIDE_ACTIVE` audit row on every
+     boot. No other env override of a limit value exists — the old trap where a
+     box's `.env` silently beats reviewed values.
+     **An override that tightens NEVER refuses boot.** The emergency lever must
+     not be able to take the cell down — login and statements included — at the
+     moment someone clamps a limit, for being too cautious. (It used to: the
+     effective policy re-ran the file's consistency rules, so clamping
+     `STANDARD_DAILY` on the dormant file, where basic is unlimited, was a dead
+     cell.) The consistency rules bind the FILE only. On the effective policy:
+     within a tier, a present daily above the monthly, or a present per_payment
+     above either, is **LOWERED** to it (absent kinds are never invented). Each
+     lowered value is its own `LIMITS_OVERRIDE_ACTIVE` row with `derivedFrom`.
+     Lowering changes no payment's outcome: a payment over the daily is refused
+     by the daily whatever per_payment says, and a day lies inside its month.
+     It changes only which limit a refusal names and what `/me/limits` shows,
+     which becomes true (`PaymentLimitsPolicyLoaderTest` checks this over a
+     grid). A higher tier left stricter than a lower one is a **boot WARN** plus
+     `warnings` on `LIMITS_POLICY_LOADED`, never lowered to match: each tier is
+     enforced on its own, so the only cost is that upgrading lowers that limit
+     while the override stands, and lowering the lower tiers would tighten
+     customers nobody named.
+   - **Second approver and visibility, stated honestly:** a PR review is the
+     second approver on a value change only once `main` requires a review from
+     someone other than the author — it does not today. The repo is public, so
+     merged values are public (they are shown to customers anyway).
+   - **No reversal give-back.** COMPLETED rows are terminal and the middleware
+     never learns of a core-side undo: a withdrawal can be undone in Fineract
+     (UNDOTRANSACTION), and a whole transfer only through
+     `POST /v1/accounttransfers/{id}?command=undo`, which no seeded permission
+     but `ALL_FUNCTIONS` reaches — and no hook reports either. The allowance
+     comes back at the next day or month.
+   - **App-channel only.** Ledger rows exist only for movements made through
+     this middleware; teller, console, payroll and journal movements are not
+     counted. A transfer to the caller's own other account counts like any
+     other (only the wallet is app-visible today; counting is the conservative
+     reading). Outflow limits mean little while `POST /transactions/deposit`
+     lets a customer credit their own wallet unfunded — an owner decision
+     outside this slice.
+   - **Never compute a limit from the in-memory `RateLimiterService`**: buckets
+     forget everything on restart and are per replica. The ledger is the only
+     source of usage, which is also why these limits stay correct if the cell
+     ever runs two replicas.
+   - **Errors and the screen.** 422 `limit_exceeded` (`LimitExceededProblem`):
+     `limit` (`per_payment|daily|monthly|daily_count`), `limitMinor` +
+     `remainingMinor` (money) or `limitCount` + `remainingCount`, `resetsAt`
+     (ISO-8601 at the MARKET offset, e.g. `2026-10-29T00:00:00+02:00`; null for
+     per_payment — the cap itself never resets), `kycTier`, `nextTier` (null at
+     enhanced). **`remainingMinor` of every money refusal is the most that passes
+     NOW**: exactly `/me/limits`' `sendableNowMinor`. For daily and monthly
+     that follows from the precedence below. For per_payment it is set to that
+     explicitly, and can be BELOW `limitMinor` (0 once the count is used up). Offering the cap
+     when the day had less left sent the customer into a second refusal. One
+     limit is reported:
+     per_payment, then an exhausted daily count, then whichever of daily/monthly
+     has LESS left (tie: monthly). `GET /me/limits` (`customer:read`):
+     `kycTier`, `currency`, `stepUpAtOrAboveMinor` (null when step-up is off),
+     `sendableNowMinor` = min(per_payment, daily remaining, monthly remaining),
+     0 when the count is used up, **null when the tier has no money limit**
+     (never a made-up number), and `limits` listing only configured kinds
+     (`usedMinor` includes `processingMinor`). Refusals are metered
+     (`innbucks.payment_limits.refused{limit,check=advisory|binding,outcome}`;
+     a rising `binding` count means payments are racing for one allowance), not
+     audited — they cost nothing and an audit row each would serialise a burst
+     on `audit_chain_head`.
+   - **The 00:00–02:00 Harare seam.** We post every Fineract movement with
+     the UTC date (`FineractClient.today()` on the UTC clock), so a payment made
+     between midnight and 02:00 Harare counts on the NEW day for limits while
+     its statement line shows the PREVIOUS date. Known, labelled, not a bug in
+     either; aligning them means changing the transaction date we send.
+   - **Step-up stays where it was, with one new check.** The thresholds remain
+     env (`innbucks.stepup.thresholds.*`) because ZW's live values are not
+     confirmed and moving them into the policy file would change behaviour
+     silently — **follow-up: move them into the policy file once ZW's values are
+     confirmed.** At boot, a tier whose threshold sits ABOVE its per_payment
+     limit is a WARN, not a refusal: approval could never fire, but the result
+     is strictly safer than either setting alone (nothing that needed approval
+     can move at all), and refusing would let a stale env value block a
+     reviewed limits deploy.
+   - **Step-up SMS has its own allowance.** `/auth/step-up/request` used to
+     spend the per-NUMBER OTP bucket that the public `/auth/otp/request` also
+     spends, so anyone who knew a number could exhaust it with PIN_RESET
+     requests and block the owner's high-value payments. It now spends a
+     per-CUSTOMER bucket (`OtpService.requestStepUp`,
+     `RATE_LIMIT_CUSTOMER_STEPUP_REQUEST_*`, 5 / 15 min — still the anti-cost
+     cap, same 429 `rate_limited` + `Retry-After`), `OtpService.request` refuses
+     STEP_UP, and the per-IP filter gives step-up buckets of their own (same
+     size) so strangers on a shared CGNAT address cannot drain them either.
+     Still open in the same family: a spray-BLOCKED source address is refused
+     the step-up endpoints too.
+   - **`/transactions/*` has a per-customer request budget**
+     (`RATE_LIMIT_CUSTOMER_PAYMENT_*`, 10 / min, first thing in every
+     `MovementService` method). A count limit is not a rate limit: refused and
+     failed attempts are free against it.
+   Contract pinned by `PaymentLimitsPolicyLoaderTest` (every refusal rule,
+   overrides incl. lowering that never changes an outcome and the tier WARN, the
+   empty-env binding, the step-up WARN), `PaymentLimitsPolicyAuditorTest`,
+   `LedgeredMovementExecutorTest` + `LedgerServiceTest` (guard handed through,
+   refusal = no row and no core call, guard before INSERT on the stamped
+   instant), `LimitWindowsTest` (the
+   seam, month end, Dec → Jan, offsets), `PaymentLimitServiceTest` (the rules,
+   precedence, `sendableNowMinor` = every money refusal's `remainingMinor`, the
+   Swagger examples as one reachable state, skip-on-existing-key and the
+   re-read before refusing, lock-before-sum),
+   `LimitUsageStoreTest` (the predicate and every bound slot),
+   `LimitExceededProblemTest`, `MovementServiceTest` (guard order, withdraw and
+   transfer),
+   `OtpServiceStepUpAllowanceTest`, the step-up case in
+   `AuthRateLimitFilterTest`, `PaymentLimitsPolicyFilesTest`, and against real
+   Postgres by `PaymentLimitsIntegrationTest` (two racing payments → exactly one;
+   the binding check alone over five rounds; same-key replay counted once;
+   `/me/limits` agreeing with the refusal; FAILED released, PROCESSING counted).
+
 Next (in order):
-11. **Veengu adapter** behind the same port (`V-Tenant`/`V-Access-Token`
+12. **Veengu adapter** behind the same port (`V-Tenant`/`V-Access-Token`
    headers, consent-then-execute saga, REVERSAL capability).
    **ON HOLD until the full Veengu API spec is in hand (owner's call,
    2026-07-30)** — do NOT start it from the older specs pinned in
@@ -1361,8 +1598,9 @@ lifetime of read access; gating login costs a core read per sign-in and a new
 permission reads as a client refusal (422, ledger `core_rejected`) rather than
 an auth incident — match the code. KMS/Secrets Manager custody + rotation
 runbook; per-customer namespacing of inbound Idempotency-Keys
-(HMAC(customerUuid ‖ key)) before propagation; velocity/amount limit tables;
-**offsite/automated** backup scheduling (the scripts are manual and write to the
+(HMAC(customerUuid ‖ key)) before propagation; the payment-limit VALUES
+(slice 11 ships the mechanism dormant, pending compliance) and moving the
+step-up thresholds into the same policy file; **offsite/automated** backup scheduling (the scripts are manual and write to the
 box — copying them off is still an operator step); ShedLock;
 PENDING_VERIFICATION expiry job; drop `IdempotencyFingerprinter`'s legacy
 (unprefixed SHA-256) match once a full idempotency TTL has passed since the

@@ -60,7 +60,7 @@ class RecipientLookupServiceTest {
         Limit generous = new Limit(1000, Duration.ofMinutes(1));
         return new RateLimitProperties(true, false, 0,
                 generous, generous, generous, generous, generous, generous, generous,
-                new Limit(lookupCapacity, Duration.ofMinutes(1)));
+                new Limit(lookupCapacity, Duration.ofMinutes(1)), generous, generous);
     }
 
     @SuppressWarnings("unchecked")

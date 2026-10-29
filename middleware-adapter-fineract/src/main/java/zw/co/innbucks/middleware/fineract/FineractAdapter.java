@@ -80,6 +80,12 @@ public class FineractAdapter implements CoreBankingPort {
         return Set.of(CoreCapability.SERVER_SIDE_DEDUP, CoreCapability.CLIENT_ASSIGNED_EXTERNAL_ID);
     }
 
+    /** {@code fineract.currency} — the same value every write and balance is checked against. */
+    @Override
+    public String cellCurrency() {
+        return properties.currency();
+    }
+
     @Override
     public CoreCustomerRef createCustomer(CreateCustomerCommand cmd, IdempotencyKey key) {
         String externalId = cmd.requestedExternalId();

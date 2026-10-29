@@ -160,6 +160,21 @@ public class GlobalExceptionHandler {
                 "validation_failed");
     }
 
+    /**
+     * A limit or step-up decision would have REFUSED on a KYC tier that could
+     * not be read. 503 and retry — never a limit_exceeded / step_up_required
+     * built on a guessed tier. Unreachable while the tier is the local row.
+     */
+    @ExceptionHandler(zw.co.innbucks.middleware.customer.KycTierUnavailableException.class)
+    public ResponseEntity<ProblemDetail> kycTierUnavailable(
+            zw.co.innbucks.middleware.customer.KycTierUnavailableException ex) {
+        log.warn("KYC tier unavailable for a refusal: {}", ex.getMessage());
+        return problem(HttpStatus.SERVICE_UNAVAILABLE,
+                "Service temporarily unavailable",
+                "We couldn't confirm your account level just now. Please try again shortly.",
+                "kyc_tier_unavailable");
+    }
+
     @ExceptionHandler(zw.co.innbucks.middleware.idempotency.IdempotencyConflictException.class)
     public ResponseEntity<ProblemDetail> idempotencyConflict(
             zw.co.innbucks.middleware.idempotency.IdempotencyConflictException ex) {

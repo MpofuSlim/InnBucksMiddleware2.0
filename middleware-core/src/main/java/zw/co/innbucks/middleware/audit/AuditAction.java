@@ -43,7 +43,23 @@ public enum AuditAction {
     // Ledger lifecycle (money-significant transitions sealed by LedgerService).
     TXN_COMPLETED,
     TXN_FAILED,
-    TXN_UNKNOWN;
+    TXN_UNKNOWN,
+    /**
+     * The per-tier payment-limits policy this process enforces, written once
+     * per boot: source file, its SHA-256, country, currency, dormant flag, the
+     * number of active overrides and any tier inversions they left
+     * ({@code warnings}). With the deployed image sha this answers "which
+     * limits were in force when".
+     */
+    LIMITS_POLICY_LOADED,
+    /**
+     * One effective limit value an emergency (tighten-only) override changed,
+     * in force at boot: tier, kind, the file's value and the enforced one, plus
+     * {@code derivedFrom} when it was lowered to keep {@code per_payment <=
+     * daily <= monthly} after another override. Written per value, every boot,
+     * so an override left set for months stays visible in the trail.
+     */
+    LIMITS_OVERRIDE_ACTIVE;
 
     public String dbValue() {
         return name().toLowerCase();
