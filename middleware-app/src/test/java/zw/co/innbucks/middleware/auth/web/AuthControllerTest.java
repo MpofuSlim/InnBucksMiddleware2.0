@@ -61,8 +61,7 @@ class AuthControllerTest {
                 Country.KE,
                 "standard",
                 scopes,
-                "device-hash-xyz",
-                null
+                "device-hash-xyz"
         ));
 
         mockMvc.perform(get("/auth/me")
@@ -73,6 +72,8 @@ class AuthControllerTest {
                 .andExpect(jsonPath("$.country").value("KE"))
                 .andExpect(jsonPath("$.kycTier").value("standard"))
                 .andExpect(jsonPath("$.deviceHash").value("device-hash-xyz"))
+                // No national-ID derivative in the token, so none to echo.
+                .andExpect(jsonPath("$.nationalIdHash").doesNotExist())
                 .andExpect(jsonPath("$.scopes", containsInAnyOrder(
                         "customer:read", "customer:write", "accounts:read")));
     }
@@ -92,8 +93,7 @@ class AuthControllerTest {
                 Country.KE,
                 "standard",
                 Set.of("accounts:read"),
-                "device-hash-xyz",
-                null
+                "device-hash-xyz"
         ));
 
         mockMvc.perform(get("/auth/me")

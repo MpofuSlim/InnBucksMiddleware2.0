@@ -3,6 +3,7 @@ package zw.co.innbucks.middleware.ledger;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+import zw.co.innbucks.middleware.corebanking.exception.CoreAccountRestrictedException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreAuthException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreClientException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreServerException;
@@ -41,12 +42,38 @@ import java.util.function.Function;
 @RequiredArgsConstructor
 public class LedgeredMovementExecutor {
 
+    /*
+     * failure_code values for the infrastructure failures below. Their
+     * failure_message is the adapter's ops detail (it can quote the core's
+     * reply), which the first answer never showed the customer — a same-key
+     * replay must not either (MovementService).
+     */
+    public static final String CORE_AUTH_FAILED = "core_auth_failed";
+    public static final String CORE_UNREACHABLE = "core_unreachable";
+    public static final String CORE_SERVER_ERROR = "core_server_error";
+
     private final LedgerService ledgerService;
 
+    /**
+     * Opens the write-ahead PENDING row — committed (REQUIRES_NEW) before the
+     * core call goes out — but only if {@code reservationGuard} lets it,
+     * checked inside the same transaction as the INSERT (see
+     * {@link LedgerService#openPending}). A refusal propagates from HERE,
+     * before the try block below: no row, no core call, nothing to reconcile.
+     *
+     * <p>There is deliberately no overload without a guard: every caller names
+     * one, so a withdrawal or transfer opened with
+     * {@link PendingReservationGuard#NONE} — i.e. past the per-tier payment
+     * limits — is visible in review rather than a default.
+     */
     public LedgerOutcome execute(LedgerDraft draft,
+                                 PendingReservationGuard reservationGuard,
                                  Function<TxRef, TransactionResult> coreCall) {
-        // Write-ahead: committed (REQUIRES_NEW) before the core call goes out.
-        LedgerTransaction row = ledgerService.openPending(draft);
+        return callCore(draft, ledgerService.openPending(draft, reservationGuard), coreCall);
+    }
+
+    private LedgerOutcome callCore(LedgerDraft draft, LedgerTransaction row,
+                                   Function<TxRef, TransactionResult> coreCall) {
         TxRef ref = new TxRef(draft.externalRef());
 
         TransactionResult result;
@@ -91,11 +118,31 @@ public class LedgeredMovementExecutor {
         };
     }
 
+    private static final String CORE_REJECTED = "core_rejected";
+
     private static String failureCode(RuntimeException ex) {
-        if (ex instanceof CoreClientException) return "core_rejected";
-        if (ex instanceof CoreAuthException) return "core_auth_failed";
-        if (ex instanceof CoreTransientException) return "core_unreachable";
-        return "core_server_error";
+        // Before its parent: a restriction is worth telling apart in the ledger
+        // (ops: "which failures were blocked accounts"), and the same-key
+        // replay answers from this code.
+        if (ex instanceof CoreAccountRestrictedException) return "account_restricted";
+        if (ex instanceof CoreClientException) return CORE_REJECTED;
+        if (ex instanceof CoreAuthException) return CORE_AUTH_FAILED;
+        if (ex instanceof CoreTransientException) return CORE_UNREACHABLE;
+        return CORE_SERVER_ERROR;
+    }
+
+    /**
+     * True for a failure code this executor records when the failure was OURS
+     * (credentials or permissions refused, core unreachable, core erroring),
+     * not a refusal of the customer's request. The row's failure message then
+     * holds operator detail (Fineract's error codes, a permission name), which
+     * the web layer keeps in the logs, so a replay of the row must not hand it
+     * to the customer either.
+     */
+    public static boolean isOperationalFailure(String failureCode) {
+        return CORE_AUTH_FAILED.equals(failureCode)
+                || CORE_UNREACHABLE.equals(failureCode)
+                || CORE_SERVER_ERROR.equals(failureCode);
     }
 
     private static String safeMessage(Throwable ex) {

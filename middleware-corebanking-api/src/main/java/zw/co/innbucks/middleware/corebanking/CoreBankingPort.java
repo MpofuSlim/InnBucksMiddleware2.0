@@ -58,6 +58,17 @@ public interface CoreBankingPort {
     Set<CoreCapability> capabilities();
 
     /**
+     * The ONE currency this cell transacts in (ISO 4217 alphabetic code,
+     * e.g. {@code USD}). A cell is pinned to one (country, core) pair and
+     * holds exactly one currency: every adapter already refuses a write in
+     * any other currency and a balance reported in one. Exposed so
+     * core-agnostic policy above the port (the per-tier payment limits) can
+     * refuse to boot on a policy written for a different currency, and can
+     * sum the ledger in the currency the limits are written in.
+     */
+    String cellCurrency();
+
+    /**
      * Create the banking relationship for a middleware customer. With
      * {@link CoreCapability#CLIENT_ASSIGNED_EXTERNAL_ID} the adapter sends
      * {@code cmd.requestedExternalId()} (our customer UUID) and the returned
@@ -105,10 +116,17 @@ public interface CoreBankingPort {
      * balance path applies: this method feeds pre-write ownership checks, so
      * relaxing the check here would let a wrong-currency account through a
      * route the balance path would have refused.
+     *
+     * <p>Each entry carries the account's {@link
+     * zw.co.innbucks.middleware.corebanking.value.AccountRestriction} from the
+     * same listing, so the callers that already pay for it (payment ownership
+     * checks, the session-refresh block check) learn of a bank block without a
+     * second call. An override must report it exactly as the full listing does.
      */
     default List<DepositAccountRef> listDepositAccountRefs(CoreCustomerRef ref) {
         return listDepositAccounts(ref).stream()
-                .map(a -> new DepositAccountRef(a.account(), a.name(), a.currencyCode(), null))
+                .map(a -> new DepositAccountRef(a.account(), a.name(), a.currencyCode(), null,
+                        a.restriction()))
                 .toList();
     }
 

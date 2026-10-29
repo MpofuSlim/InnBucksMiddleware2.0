@@ -61,6 +61,8 @@ public class SettableCorePort implements CoreBankingPort {
     @Override public Set<CoreCapability> capabilities() {
         return Set.of(CoreCapability.SERVER_SIDE_DEDUP, CoreCapability.CLIENT_ASSIGNED_EXTERNAL_ID);
     }
+    /** The test cell's currency (fineract.currency in the test yaml). */
+    @Override public String cellCurrency() { return "KES"; }
     @Override public CoreCustomerRef createCustomer(CreateCustomerCommand cmd, IdempotencyKey key) {
         return onCreateCustomer.apply(cmd, key);
     }

@@ -162,6 +162,23 @@ public class GlobalExceptionHandler {
     }
 
     /**
+     * The cell has customer deposits switched off (DepositGate). 403, not 404
+     * or 503: the request is understood and authenticated, and the answer is a
+     * standing policy refusal that no retry changes — the same family as
+     * {@code account_ownership_mismatch} and {@code step_up_required}. A 404
+     * would read as a wrong URL; a 503 would invite retries. Logged and counted
+     * by the gate, so nothing more here.
+     */
+    @ExceptionHandler(zw.co.innbucks.middleware.transactions.DepositDisabledException.class)
+    public ResponseEntity<ProblemDetail> depositDisabled(
+            zw.co.innbucks.middleware.transactions.DepositDisabledException ex) {
+        return problem(HttpStatus.FORBIDDEN,
+                "Deposits unavailable",
+                "Deposits are not available in this deployment.",
+                "deposit_disabled");
+    }
+
+    /**
      * Bean-validation on @RequestParam/@PathVariable (an @Validated controller)
      * raises ConstraintViolationException, NOT MethodArgumentNotValidException —
      * a different type that the body-validation handler above does not catch.
@@ -175,6 +192,21 @@ public class GlobalExceptionHandler {
                 "Invalid request",
                 "One or more query parameters are out of range.",
                 "validation_failed");
+    }
+
+    /**
+     * A limit or step-up decision would have REFUSED on a KYC tier that could
+     * not be read. 503 and retry — never a limit_exceeded / step_up_required
+     * built on a guessed tier. Unreachable while the tier is the local row.
+     */
+    @ExceptionHandler(zw.co.innbucks.middleware.customer.KycTierUnavailableException.class)
+    public ResponseEntity<ProblemDetail> kycTierUnavailable(
+            zw.co.innbucks.middleware.customer.KycTierUnavailableException ex) {
+        log.warn("KYC tier unavailable for a refusal: {}", ex.getMessage());
+        return problem(HttpStatus.SERVICE_UNAVAILABLE,
+                "Service temporarily unavailable",
+                "We couldn't confirm your account level just now. Please try again shortly.",
+                "kyc_tier_unavailable");
     }
 
     @ExceptionHandler(zw.co.innbucks.middleware.idempotency.IdempotencyConflictException.class)

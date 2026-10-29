@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import zw.co.innbucks.middleware.audit.AuditAction;
 import zw.co.innbucks.middleware.audit.AuditOutcome;
@@ -40,6 +41,23 @@ public class RefreshTokenService {
             """;
 
     /**
+     * The two locks that make "sign out everywhere" race-free against a
+     * rotation in flight. They CONFLICT with each other (SHARE vs NO KEY
+     * UPDATE) and with nothing else that matters: concurrent rotations of one
+     * customer take SHARE together, and the FK checks behind every
+     * refresh_token / ledger_transaction INSERT take KEY SHARE, which neither
+     * blocks. Never FOR UPDATE on the revoke side (it would queue those
+     * INSERTs) — same reasoning as the deferred login re-read in CLAUDE.md.
+     */
+    private static final String LOCK_CUSTOMER_FOR_ROTATION_SQL = """
+            SELECT id FROM customer WHERE id = ? FOR SHARE
+            """;
+
+    private static final String LOCK_CUSTOMER_FOR_REVOKE_ALL_SQL = """
+            SELECT id FROM customer WHERE id = ? FOR NO KEY UPDATE
+            """;
+
+    /**
      * How long after a refresh token's expiry we keep its row around. Tokens
      * are invalid the moment {@code expires_at} passes — the post-expiry
      * grace window is purely forensic ("which session was active at time X")
@@ -57,7 +75,35 @@ public class RefreshTokenService {
 
     @Transactional
     public RefreshToken issueNewFamily(UUID customerId, String deviceHash) {
-        return persist(customerId, UUID.randomUUID(), deviceHash);
+        return persist(UUID.randomUUID(), customerId, UUID.randomUUID(), deviceHash);
+    }
+
+    /**
+     * Whether the presented token would rotate right now — known, unrevoked,
+     * unexpired, not yet replaced, presented on its own device — and if so,
+     * whose it is. A single read: no lock, no transaction held, NOTHING spent
+     * and nothing revoked. Empty for every other case.
+     *
+     * <p>It exists so {@code /auth/refresh} can ask the core about a bank block
+     * BEFORE the token is spent: a full block then rotates nothing, and a
+     * refresh that fails in the check leaves the token unspent for the client
+     * to present again. It does not make a slow core harmless — a refresh whose
+     * client gave up still goes on to rotate, so that client's retry is a
+     * replay; the check's timeout is what bounds that (see
+     * {@link AccountBlockSessionGuard}).
+     *
+     * <p>It decides nothing on its own: {@link #rotate} still re-checks every
+     * condition, under its lock, and is the ONE place a replay or a device
+     * mismatch revokes the family and is audited — so a caller that gets empty
+     * here just calls {@link #rotate} and lets it refuse.
+     */
+    public Optional<UUID> liveSessionCustomer(String presentedSecret, String deviceHash) {
+        return repository.findByTokenHash(sha256HexLower(presentedSecret))
+                .filter(token -> token.getRevokedAt() == null)
+                .filter(token -> !token.getExpiresAt().isBefore(clock.instant()))
+                .filter(token -> token.getReplacedByJti() == null)
+                .filter(token -> sameDevice(token.getDeviceHash(), deviceHash))
+                .map(RefreshToken::getCustomerId);
     }
 
     /**
@@ -83,13 +129,7 @@ public class RefreshTokenService {
         }
 
         if (current.getReplacedByJti() != null) {
-            repository.revokeFamily(current.getFamilyId(), now, "replay_detected");
-            auditService.record(
-                    AuditAction.REFRESH_REPLAY_DETECTED,
-                    AuditOutcome.FAILURE,
-                    current.getCustomerId(),
-                    deviceHash);
-            throw new RefreshTokenReplayException();
+            throw replayDetected(current, now, deviceHash);
         }
 
         // Device binding (auth slice 4): the refresh token only rotates on the
@@ -101,11 +141,7 @@ public class RefreshTokenService {
         // the legitimate app just routes to a fresh login. Constant-time
         // compare; a NULL stored hash cannot occur (login always binds one)
         // but is treated as a mismatch — fail closed, not open.
-        String storedDeviceHash = current.getDeviceHash();
-        if (storedDeviceHash == null || deviceHash == null
-                || !MessageDigest.isEqual(
-                        storedDeviceHash.getBytes(StandardCharsets.UTF_8),
-                        deviceHash.getBytes(StandardCharsets.UTF_8))) {
+        if (!sameDevice(current.getDeviceHash(), deviceHash)) {
             repository.revokeFamily(current.getFamilyId(), now, "device_mismatch");
             auditService.record(
                     AuditAction.REFRESH_DEVICE_MISMATCH,
@@ -115,9 +151,27 @@ public class RefreshTokenService {
             throw new RefreshTokenInvalidException();
         }
 
-        RefreshToken next = persist(current.getCustomerId(), current.getFamilyId(), deviceHash);
-        current.setReplacedByJti(next.getJti());
-        repository.save(current);
+        // Serialise against revokeAllSessions (PIN set/reset). Without it a
+        // rotation straddling the revocation survives it: the revoking UPDATE
+        // reads from a snapshot taken when it STARTS, so a successor this
+        // transaction inserts and commits after that moment is never seen —
+        // and a client refreshing in a loop is inside that window most of the
+        // time. Holding SHARE on the customer row means either the revocation
+        // committed before this line (markReplaced below then sees it) or it
+        // waits for this commit and then sees the successor.
+        jdbcTemplate.queryForList(LOCK_CUSTOMER_FOR_ROTATION_SQL, current.getCustomerId());
+
+        // Mark the presented row replaced BEFORE inserting its successor, and
+        // only while it is still unrevoked and unrotated: a revocation (logout,
+        // replay, sign-out-everywhere) or another rotation of the same token
+        // that committed after the read above must win, and the successor
+        // must not exist if it does — this method's noRollbackFor would
+        // otherwise commit an orphan.
+        UUID successorJti = UUID.randomUUID();
+        if (repository.markReplaced(current.getJti(), successorJti) != 1) {
+            throw lostTheRowAfterReadingIt(current, deviceHash);
+        }
+        RefreshToken next = persist(successorJti, current.getCustomerId(), current.getFamilyId(), deviceHash);
 
         auditService.record(
                 AuditAction.REFRESH_SUCCESS,
@@ -128,12 +182,78 @@ public class RefreshTokenService {
         return next;
     }
 
+    /**
+     * The presented row changed between rotation's read and its guarded mark.
+     * Re-read it (READ COMMITTED: this statement sees what committed in
+     * between) and judge it exactly as the opening checks would have: revoked
+     * first — a revocation is not a theft signal — then rotated, which is a
+     * REPLAY. That second case is two requests presenting the same token at
+     * once — a client's double submit, or an attacker racing the real holder
+     * with a stolen token and device hash — and is treated exactly like the
+     * same two requests one after the other: the family is revoked, the
+     * successor the winner just minted included, and audited.
+     *
+     * <p>The revocation is stamped NOW, after the mark waited on the winner's
+     * row lock — not with the instant rotation read the row at. That earlier
+     * instant can predate the winner's successor, which would then carry a
+     * {@code revoked_at} before its own {@code issued_at}: a session that,
+     * to a forensic "which session was live at time X" query, never was.
+     */
+    private RuntimeException lostTheRowAfterReadingIt(RefreshToken read, String deviceHash) {
+        Optional<RefreshToken> reread = repository.findById(read.getJti());
+        if (reread.isEmpty() || reread.get().getRevokedAt() != null) {
+            return new RefreshTokenInvalidException();
+        }
+        if (reread.get().getReplacedByJti() != null) {
+            return replayDetected(read, clock.instant(), deviceHash);
+        }
+        // Unreachable: the row is unrevoked and unrotated, so the guarded
+        // UPDATE would have matched it. Refuse rather than guess.
+        log.warn("Refresh rotation could not mark token jti={} although it is live; refusing", read.getJti());
+        return new RefreshTokenInvalidException();
+    }
+
+    /**
+     * A token presented after it was rotated away: its secret has left the
+     * device that rotated it, or it is being raced. Revokes the WHOLE family
+     * and audits it; the caller throws what this returns (the
+     * {@code noRollbackFor} on {@link #rotate} keeps the revocation).
+     */
+    private RefreshTokenReplayException replayDetected(RefreshToken token, Instant now, String deviceHash) {
+        repository.revokeFamily(token.getFamilyId(), now, "replay_detected");
+        auditService.record(
+                AuditAction.REFRESH_REPLAY_DETECTED,
+                AuditOutcome.FAILURE,
+                token.getCustomerId(),
+                deviceHash);
+        return new RefreshTokenReplayException();
+    }
+
     @Transactional
     public Optional<RefreshToken> revokeFamily(String presentedSecret, String reason) {
         Optional<RefreshToken> maybe = repository.findByTokenHash(sha256HexLower(presentedSecret));
         maybe.ifPresent(token ->
                 repository.revokeFamily(token.getFamilyId(), clock.instant(), reason));
         return maybe;
+    }
+
+    /**
+     * Sign out everywhere: revokes every refresh-token family the customer
+     * holds, in the CALLER's transaction (MANDATORY — the revocation must
+     * commit or roll back with the change that motivates it, e.g. the new
+     * PIN). Returns the number of rows revoked (a family's rotated ancestors
+     * count too; 0 = nothing was signed in).
+     *
+     * <p>Takes the customer row {@code FOR NO KEY UPDATE} first, which
+     * conflicts with the {@code FOR SHARE} every {@link #rotate} takes before
+     * minting a successor — see there for why that ordering is the guarantee.
+     * Access tokens already issued are NOT revoked: they are self-contained
+     * JWTs and live out their TTL (10 minutes by default).
+     */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public int revokeAllSessions(UUID customerId, String reason) {
+        jdbcTemplate.queryForList(LOCK_CUSTOMER_FOR_REVOKE_ALL_SQL, customerId);
+        return repository.revokeAllForCustomer(customerId, clock.instant(), reason);
     }
 
     /**
@@ -158,11 +278,10 @@ public class RefreshTokenService {
                 deleted, cutoff, FORENSIC_RETENTION_DAYS);
     }
 
-    private RefreshToken persist(UUID customerId, UUID familyId, String deviceHash) {
+    private RefreshToken persist(UUID jti, UUID customerId, UUID familyId, String deviceHash) {
         // INSERT via JdbcTemplate: Spring Data JDBC's CrudRepository.save() treats
         // an entity with a manually-assigned @Id as already-existing and emits UPDATE
         // that affects zero rows, so the new row never lands in the DB.
-        UUID jti = UUID.randomUUID();
         // The client secret is a fresh random UUID, separate from the internal jti:
         // a DB read yields only token_hash, never a usable token. ~122 bits of entropy
         // makes unsalted SHA-256 at rest safe (no brute force / rainbow table).
@@ -190,6 +309,18 @@ public class RefreshTokenService {
         token.setIssuedAt(now);
         token.setExpiresAt(expiresAt);
         return token;
+    }
+
+    /**
+     * The device binding, in ONE place so {@link #liveSessionCustomer} and
+     * {@link #rotate} can never disagree about it. Constant-time; a null on
+     * either side is a mismatch (fail closed).
+     */
+    private static boolean sameDevice(String storedDeviceHash, String presentedDeviceHash) {
+        return storedDeviceHash != null && presentedDeviceHash != null
+                && MessageDigest.isEqual(
+                        storedDeviceHash.getBytes(StandardCharsets.UTF_8),
+                        presentedDeviceHash.getBytes(StandardCharsets.UTF_8));
     }
 
     /**

@@ -47,8 +47,7 @@ public class DevTokenController {
                 deploymentCountry,
                 request.kycTier(),
                 scopes,
-                request.deviceHash(),
-                request.nationalIdHash()
+                request.deviceHash()
         ));
         return new TokenResponse(token, "Bearer");
     }
@@ -65,10 +64,7 @@ public class DevTokenController {
             Set<String> scopes,
 
             @Schema(description = "Device hash claim. Used by slice 4 device binding when that ships.")
-            String deviceHash,
-
-            @Schema(description = "Hash of the customer's national ID. Useful for audit attribution.")
-            String nationalIdHash
+            String deviceHash
     ) {
     }
 

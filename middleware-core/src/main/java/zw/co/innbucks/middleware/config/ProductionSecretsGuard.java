@@ -53,14 +53,23 @@ public class ProductionSecretsGuard {
         this.environment = environment;
     }
 
+    /**
+     * The one definition of "deployment": no {@code dev/test/it/local} profile
+     * among the active ones, the EMPTY set included. Anything that must behave
+     * differently where real customers are (a refusal, a boot warning) asks
+     * this rather than keeping its own copy of the profile list.
+     */
+    public static boolean isDeployment(Environment environment) {
+        return Arrays.stream(environment.getActiveProfiles()).noneMatch(p ->
+                NON_DEPLOYMENT_PROFILES.contains(p.toLowerCase(Locale.ROOT)));
+    }
+
     @PostConstruct
     void verifySecrets() {
         verifySigningKeysDiffer();
 
         List<String> active = Arrays.asList(environment.getActiveProfiles());
-        boolean deployment = active.stream().noneMatch(p ->
-                NON_DEPLOYMENT_PROFILES.contains(p.toLowerCase(Locale.ROOT)));
-        if (!deployment) {
+        if (!isDeployment(environment)) {
             log.debug("ProductionSecretsGuard: non-deployment profiles {} — placeholder secrets permitted", active);
             return;
         }

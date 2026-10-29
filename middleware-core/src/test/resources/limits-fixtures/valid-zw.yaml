@@ -1,0 +1,19 @@
+# Test fixture — NOT live values. A complete, valid ZW policy with every kind
+# exercised, including an unlimited kind on the top tier.
+country: ZW
+currency: USD
+tiers:
+  basic:
+    per_payment: 100000
+    daily: 150000
+    monthly: 500000
+    daily_count: 10
+  standard:
+    per_payment: 200000
+    daily: 400000
+    monthly: 1500000
+    daily_count: 20
+  enhanced:
+    per_payment: 1000000
+    daily: 2000000
+    monthly: 10000000

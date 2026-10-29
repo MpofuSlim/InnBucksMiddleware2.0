@@ -1,0 +1,19 @@
+# Per-tier payment limits — KE cell.
+#
+# VALUES ARE PENDING COMPLIANCE. Every limit below is deliberately ABSENT, and
+# an absent limit means "no limit of that kind for that tier", so this file is
+# DORMANT: it enforces nothing until compliance supplies the numbers and they
+# are merged here. The middleware logs a WARN at every boot while it is.
+#
+# Same format and boot rules as limits-zw.yaml, which documents them in full:
+# kinds per_payment / daily / monthly (MINOR units of `currency`) and
+# daily_count (number of withdrawals + transfers); calendar day and month in
+# the cell's civil time (Africa/Nairobi); absent = no limit; per_payment <=
+# daily <= monthly; no higher tier stricter than a lower one; `currency` must
+# be the cell currency. Overrides from the environment may only tighten.
+country: KE
+currency: KES
+tiers:
+  basic: {}
+  standard: {}
+  enhanced: {}

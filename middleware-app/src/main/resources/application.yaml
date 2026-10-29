@@ -102,6 +102,18 @@ innbucks:
       max-failed-attempts-before-lock: ${AUTH_MAX_FAILED_ATTEMPTS:7}
       lock-duration: ${AUTH_LOCK_DURATION:1h}
       backoff-base: ${AUTH_BACKOFF_BASE:1s}
+    # /auth/refresh reads the wallet's bank block from the core (a FULL block
+    # ends every session). The read runs BEFORE the refresh token is spent and
+    # never holds the request longer than `timeout`; past it, or with every
+    # slot busy (a stalled core holds them), the refresh goes through — the
+    # money is already blocked in the core. Keep `timeout` well under the app's
+    # own HTTP timeout: that margin, not the read-before-spend order, is what
+    # keeps a slow core from signing customers out (a refresh whose client gave
+    # up still spends the token, and the client's retry is then a replay).
+    # Watch innbucks.auth.refresh.block_check{outcome}.
+    refresh-block-check:
+      timeout: ${REFRESH_BLOCK_CHECK_TIMEOUT:2s}
+      max-concurrent-reads: ${REFRESH_BLOCK_CHECK_MAX_CONCURRENT:8}
   audit:
     # Keys the tamper-evidence HMAC chain over audit_event. Per-deployment,
     # openssl rand -base64 48. Rotation breaks the chain at the rotation point
@@ -197,12 +209,59 @@ innbucks:
       # alert still sends) rather than spill into a second segment.
       max-length: ${TXN_ALERTS_MAX_LENGTH:160}
       max-narrative-length: ${TXN_ALERTS_MAX_NARRATIVE:24}
+  transactions:
+    deposit:
+      # POST /transactions/deposit is an UNFUNDED cash-in: any signed-in
+      # customer credits their own wallet with a plain savings deposit of any
+      # amount, with no source of funds, no step-up, no maximum and no GL trail
+      # (the wallet product's accounting rule is None). OFF by default; off, it
+      # answers 403 deposit_disabled before anything is read or written.
+      # Staging turns it on (testers fund wallets; the runbook smoke deposits),
+      # and a deployment profile then logs a WARN banner at every boot. NEVER
+      # true on a cell that holds real money.
+      enabled: ${TRANSACTIONS_DEPOSIT_ENABLED:false}
+  limits:
+    # Per-tier payment limits on app withdrawals/transfers. The VALUES live in
+    # the reviewed policy file packaged into the image —
+    # limits/limits-<iso>.yaml, picked by INNBUCKS_COUNTRY — and NOWHERE else.
+    # Its SHA-256 and effective values are logged (and audited) at every boot.
+    #
+    # What follows is the one runtime lever: EMERGENCY, TIGHTEN-ONLY overrides
+    # (minor units; daily-count is a number of payments). Blank = none. A value
+    # looser than the file refuses boot; any value tightens a kind the file
+    # leaves unlimited. Every active override is logged as a WARN and audited
+    # (LIMITS_OVERRIDE_ACTIVE) on every boot — move it into the file and unset
+    # it. A value that tightens NEVER refuses boot: a per_payment or daily left
+    # above a tighter period limit in the same tier is lowered to it (logged and
+    # audited as derived; no payment's outcome changes), and a higher tier left
+    # stricter than a lower one is a boot WARN — clamp the lower tiers too only
+    # if that was the intent.
+    override:
+      basic:
+        per-payment: ${LIMITS_OVERRIDE_BASIC_PER_PAYMENT:}
+        daily: ${LIMITS_OVERRIDE_BASIC_DAILY:}
+        monthly: ${LIMITS_OVERRIDE_BASIC_MONTHLY:}
+        daily-count: ${LIMITS_OVERRIDE_BASIC_DAILY_COUNT:}
+      standard:
+        per-payment: ${LIMITS_OVERRIDE_STANDARD_PER_PAYMENT:}
+        daily: ${LIMITS_OVERRIDE_STANDARD_DAILY:}
+        monthly: ${LIMITS_OVERRIDE_STANDARD_MONTHLY:}
+        daily-count: ${LIMITS_OVERRIDE_STANDARD_DAILY_COUNT:}
+      enhanced:
+        per-payment: ${LIMITS_OVERRIDE_ENHANCED_PER_PAYMENT:}
+        daily: ${LIMITS_OVERRIDE_ENHANCED_DAILY:}
+        monthly: ${LIMITS_OVERRIDE_ENHANCED_MONTHLY:}
+        daily-count: ${LIMITS_OVERRIDE_ENHANCED_DAILY_COUNT:}
   stepup:
     # SMS re-approval of high-value withdrawals/transfers (deposits never step
     # up). A movement >= the caller's KYC-tier threshold (MINOR units of the
     # cell currency) 403s with step_up_required + a txnFp; the app approves it
     # via /auth/step-up/request + /verify and retries with X-Step-Up-Token.
     enabled: ${STEPUP_ENABLED:true}
+    # Still env, unlike the payment limits: the live ZW values are not yet
+    # confirmed, and moving them into the reviewed policy file would change
+    # behaviour silently. At boot, a tier whose threshold sits ABOVE its
+    # per_payment limit is WARNed about (approval could never fire).
     thresholds:
       # Defaults assume 2-decimal minor units: 500.00 / 2,000.00 / 10,000.00.
       basic: ${STEPUP_THRESHOLD_BASIC:50000}
@@ -255,6 +314,20 @@ innbucks:
     customer-lookup:
       capacity: ${RATE_LIMIT_CUSTOMER_LOOKUP_CAPACITY:15}
       refill-period: ${RATE_LIMIT_CUSTOMER_LOOKUP_WINDOW:1m}
+    # Per-CUSTOMER budget on step-up approval SMS (POST /auth/step-up/request).
+    # Its OWN allowance — NOT msisdn-otp-request, which anyone who knows the
+    # number can spend through the public PIN-reset request (and so block the
+    # owner's high-value payments). Still a cap: every approval is a billed SMS.
+    customer-step-up-request:
+      capacity: ${RATE_LIMIT_CUSTOMER_STEPUP_REQUEST_CAPACITY:5}
+      refill-period: ${RATE_LIMIT_CUSTOMER_STEPUP_REQUEST_WINDOW:15m}
+    # Per-CUSTOMER request budget on POST /transactions/* (deposit, withdraw,
+    # transfer). The payment limits are not a rate limit — refused attempts are
+    # free — so this is what bounds how fast one token can hit the money path.
+    # The app's step-up flow sends each high-value payment twice; retries count.
+    customer-payment:
+      capacity: ${RATE_LIMIT_CUSTOMER_PAYMENT_CAPACITY:10}
+      refill-period: ${RATE_LIMIT_CUSTOMER_PAYMENT_WINDOW:1m}
   security:
     # Credential-spray detection: the brute-force shape the per-account lockout
     # and the per-IP buckets both miss — one source trying a few PINs against

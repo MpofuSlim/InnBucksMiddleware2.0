@@ -2,6 +2,7 @@ package zw.co.innbucks.middleware.auth.web;
 
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.media.Content;
+import io.swagger.v3.oas.annotations.media.ExampleObject;
 import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
@@ -26,11 +27,13 @@ import zw.co.innbucks.middleware.auth.config.AuthProperties;
 import zw.co.innbucks.middleware.auth.jwt.JwtIssuer;
 import zw.co.innbucks.middleware.auth.login.LoginResult;
 import zw.co.innbucks.middleware.auth.login.LoginService;
+import zw.co.innbucks.middleware.auth.refresh.AccountBlockSessionGuard;
 import zw.co.innbucks.middleware.auth.refresh.RefreshToken;
 import zw.co.innbucks.middleware.auth.refresh.RefreshTokenService;
 import zw.co.innbucks.middleware.customer.Customer;
 import zw.co.innbucks.middleware.customer.CustomerRepository;
 
+import java.util.Optional;
 import java.util.UUID;
 
 @RestController
@@ -46,6 +49,7 @@ public class LoginController {
     private final JwtIssuer jwtIssuer;
     private final AuthProperties authProperties;
     private final AuditService auditService;
+    private final AccountBlockSessionGuard accountBlockSessionGuard;
 
     @PostMapping("/login")
     @Operation(
@@ -69,36 +73,79 @@ public class LoginController {
     @PostMapping("/refresh")
     @Operation(
             summary = "Rotate the refresh token, issuing a fresh access + refresh pair",
-            description = "Each refresh token is single-use. Re-presenting an already-rotated refresh token is treated as theft and revokes the whole token family."
+            description = "Each refresh token is single-use. Presenting one a second time is treated as theft and revokes the whole token family, "
+                    + "whether the first refresh has finished or is still in flight. So send at most ONE refresh per refresh token at a time: when "
+                    + "several calls fail with 401 together, queue them behind a single refresh and reuse its result. Two refreshes of the same token "
+                    + "sent together sign the customer out: one may still answer 200, but the tokens it returns are already revoked. After "
+                    + "refresh_replay_detected, discard every stored token, including any just received, and go to sign-in. "
+                    + "If the bank has fully blocked the customer's account, the refresh is refused with 403 account_restricted and EVERY session the customer "
+                    + "holds is ended: show the detail and return to the signed-out screen — retrying cannot succeed while the block stands. A debit-only "
+                    + "block does not end sessions (payments answer account_restricted instead)."
     )
     @ApiResponses({
             @ApiResponse(responseCode = "200", description = "Tokens rotated"),
-            @ApiResponse(responseCode = "401", description = "Invalid, expired, or replay-detected refresh token",
-                    content = @Content(schema = @Schema(implementation = ProblemDetail.class)))
+            @ApiResponse(responseCode = "401", description = "Invalid or expired refresh token (errorCode refresh_invalid), or a "
+                    + "refresh token presented a second time (errorCode refresh_replay_detected) — including the second of two refreshes "
+                    + "sent together. Either way the session is over: discard every stored token, including one just received from a "
+                    + "concurrent refresh, and sign in again.",
+                    content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
+            @ApiResponse(responseCode = "403", description = "The bank has fully blocked the customer's account; every "
+                    + "session has been ended (errorCode account_restricted)",
+                    content = @Content(schema = @Schema(implementation = ProblemDetail.class),
+                            examples = @ExampleObject(name = "Account restricted", value = """
+                                    {"type":"about:blank","title":"Account restricted","status":403,
+                                     "detail":"Your account has been restricted and you have been signed out. Please contact support.",
+                                     "errorCode":"account_restricted"}
+                                    """)))
     })
     public ResponseEntity<TokenResponse> refresh(@Valid @RequestBody RefreshRequest request) {
         String secret = parseRefreshTokenUuid(request.refreshToken()).toString();
 
-        RefreshToken rotated = refreshTokenService.rotate(secret, request.deviceHash());
+        // 1. Is this a live session? One read: nothing locked, nothing spent.
+        //    Only a live token (known, unrevoked, unexpired, not a replay, on
+        //    its own device) may cost a core read or learn of a block.
+        Optional<UUID> liveCustomerId = refreshTokenService.liveSessionCustomer(secret, request.deviceHash());
 
-        // Deliberately NO status gate: refresh does not refuse a 'locked'
-        // customer. That lock is driven by wrong PINs, which anyone can type
-        // against a number — gating refresh on it would let an attacker sign a
-        // victim out of every device by guessing wrong 7 times (the default
-        // cap). Ending sessions is the job of explicit actions (a PIN
-        // set/reset revokes every family); a future administrative block must
-        // revoke the customer's families explicitly too, not lean on a check
-        // here.
-        Customer customer = customerRepository.findById(rotated.getCustomerId())
-                .orElseThrow(IllegalStateException::new);
+        // Deliberately NO gate on the customer's 'locked' status: refresh does
+        // not refuse a PIN-locked customer. That lock is driven by wrong PINs,
+        // which anyone can type against a number — gating refresh on it would
+        // let an attacker sign a victim out of every device by guessing wrong
+        // 7 times (the default cap). Ending sessions is the job of explicit
+        // actions: a PIN set/reset revokes every family, and so does the
+        // bank's full block below.
+        // 2. The bank's block, read while the presented token is still UNSPENT
+        //    and with no transaction open (rotate() holds a pooled connection
+        //    and the customer-row lock; an HTTP call must not run inside it).
+        //    On a full block the guard revokes every family — this token's
+        //    included — and throws, so nothing is rotated; a failure in the
+        //    guard's own path leaves the token unspent too. This order does
+        //    NOT save a client that gives up waiting: nothing here stops when
+        //    it does, step 3 still spends the token, and its retry with the
+        //    old one is a replay. What keeps a slow core from signing anyone
+        //    out is the guard's timeout (well under the app's HTTP timeout)
+        //    and its failing open.
+        Customer customer = null;
+        if (liveCustomerId.isPresent()) {
+            customer = loadCustomer(liveCustomerId.get());
+            accountBlockSessionGuard.requireSessionAllowed(customer, request.deviceHash());
+        }
+
+        // 3. Spend it. rotate() re-checks everything under its lock and is the
+        //    one place a replay or device mismatch revokes the family — a token
+        //    that was not live in step 1 is refused here, as it always was.
+        RefreshToken rotated = refreshTokenService.rotate(secret, request.deviceHash());
+        if (customer == null || !customer.getId().equals(rotated.getCustomerId())) {
+            // Unreachable today (a token that was not live cannot rotate);
+            // kept so claims are never minted from another row.
+            customer = loadCustomer(rotated.getCustomerId());
+        }
 
         String accessToken = jwtIssuer.issue(new JwtIssuer.IssueRequest(
                 customer.getId().toString(),
                 customer.countryEnum(),
                 customer.getKycTier(),
                 CustomerScopes.DEFAULT,
-                request.deviceHash(),
-                customer.getNationalIdHash()
+                request.deviceHash()
         ));
 
         return ResponseEntity.ok(new TokenResponse(
@@ -121,6 +168,10 @@ public class LoginController {
                 auditService.record(AuditAction.LOGOUT, AuditOutcome.SUCCESS,
                         rt.getCustomerId(), rt.getDeviceHash()));
         return ResponseEntity.noContent().build();
+    }
+
+    private Customer loadCustomer(UUID customerId) {
+        return customerRepository.findById(customerId).orElseThrow(IllegalStateException::new);
     }
 
     /**
@@ -164,7 +215,9 @@ public class LoginController {
 
     @Schema(description = "Refresh request.")
     public record RefreshRequest(
-            @NotBlank @Schema(description = "The opaque refresh token (UUID format) issued by /auth/login; single-use, replay revokes the whole family.", example = "550e8400-e29b-41d4-a716-446655440000")
+            @NotBlank @Schema(description = "The opaque refresh token (UUID format) issued by /auth/login or the last refresh; single-use. "
+                    + "Send one refresh per token at a time: a second one, concurrent or later, revokes the whole family.",
+                    example = "550e8400-e29b-41d4-a716-446655440000")
             String refreshToken,
 
             @NotBlank @Schema(description = "Must match the device the refresh token was issued to.", example = "sha256-hex-of-device-fingerprint")

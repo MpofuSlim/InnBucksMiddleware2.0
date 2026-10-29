@@ -9,13 +9,10 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.HexFormat;
 import java.util.Optional;
 import java.util.function.Supplier;
 
@@ -34,6 +31,8 @@ import java.util.function.Supplier;
  *      its ORIGINAL status; a retry racing the winner gets 409
  *      idempotency_in_progress and re-tries with the same key.
  *   5. Retries with the same key + different body fail with 422 idempotency_conflict.
+ *      "Same body" is decided by {@link IdempotencyFingerprinter} — a KEYED
+ *      fingerprint, because some bodies carry a national ID.
  *
  * If the work throws, the claim row is deleted so a retry can re-execute. A
  * crash between claim and store leaves a stale claim; claims older than
@@ -93,6 +92,7 @@ public class IdempotencyService {
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
     private final IdempotencyProperties properties;
+    private final IdempotencyFingerprinter fingerprinter;
     private final Clock clock;
 
     /** Backwards-compatible overload: successful work stores HTTP 200. */
@@ -115,11 +115,11 @@ public class IdempotencyService {
         if (successStatus == IN_PROGRESS) {
             throw new IllegalArgumentException("successStatus 0 is reserved for the in-progress sentinel");
         }
-        String fingerprint = fingerprint(requestBody);
+        IdempotencyFingerprinter.RequestFingerprint fingerprint = fingerprinter.fingerprint(requestBody);
 
         // Two passes at most: the second only after evicting a stale claim.
         for (int attempt = 0; attempt < 2; attempt++) {
-            if (tryClaim(key, fingerprint, httpMethod, requestPath)) {
+            if (tryClaim(key, fingerprint.value(), httpMethod, requestPath)) {
                 return runAsClaimOwner(key, responseType, successStatus, work);
             }
 
@@ -129,7 +129,7 @@ public class IdempotencyService {
                 // released. Loop once more to claim afresh.
                 continue;
             }
-            if (!entry.fingerprint().equals(fingerprint)) {
+            if (!fingerprint.matches(entry.fingerprint())) {
                 throw new IdempotencyConflictException(key);
             }
             if (entry.responseStatus() != IN_PROGRESS) {
@@ -199,16 +199,6 @@ public class IdempotencyService {
                         rs.getTimestamp("created_at").toInstant()),
                 key);
         return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
-    }
-
-    private String fingerprint(Object body) {
-        try {
-            byte[] canonical = objectMapper.writeValueAsBytes(body);
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            return HexFormat.of().formatHex(digest.digest(canonical));
-        } catch (JsonProcessingException | NoSuchAlgorithmException ex) {
-            throw new IllegalStateException("Failed to fingerprint idempotency request body", ex);
-        }
     }
 
     private String serialize(Object value) {

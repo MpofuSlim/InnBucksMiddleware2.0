@@ -14,7 +14,6 @@ public record InnbucksPrincipal(
         String kycTier,
         Set<String> scopes,
         String deviceHash,
-        String nationalIdHash,
         Instant authTime,
         Instant issuedAt,
         Instant expiresAt
@@ -36,7 +35,6 @@ public record InnbucksPrincipal(
                 jwt.getClaimAsString(InnbucksClaims.KYC_TIER),
                 scopes,
                 jwt.getClaimAsString(InnbucksClaims.DEVICE_ID),
-                jwt.getClaimAsString(InnbucksClaims.NATIONAL_ID_HASH),
                 authTime,
                 jwt.getIssuedAt(),
                 jwt.getExpiresAt()

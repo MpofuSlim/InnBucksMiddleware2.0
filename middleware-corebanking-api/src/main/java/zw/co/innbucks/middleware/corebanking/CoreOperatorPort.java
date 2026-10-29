@@ -2,6 +2,7 @@ package zw.co.innbucks.middleware.corebanking;
 
 import zw.co.innbucks.middleware.corebanking.exception.CoreAuthException;
 import zw.co.innbucks.middleware.corebanking.exception.CoreClientException;
+import zw.co.innbucks.middleware.corebanking.exception.CoreOperatorAuthException;
 import zw.co.innbucks.middleware.corebanking.value.LoanTransactionPage;
 import zw.co.innbucks.middleware.corebanking.value.OperatorAccountView;
 import zw.co.innbucks.middleware.corebanking.value.OperatorCredential;
@@ -27,10 +28,12 @@ import zw.co.innbucks.middleware.corebanking.value.OperatorLoanView;
  *   <li>The credential is forwarded ONLY to the adapter's own core, over the
  *       private cell network — never stored, never logged, never sent
  *       anywhere else.</li>
- *   <li>A rejected credential throws {@link CoreAuthException}; an account
- *       the operator may not read — or that does not exist — throws
- *       {@link CoreClientException}. Implementations should not distinguish
- *       the last two more than their core already does.</li>
+ *   <li>A rejected credential throws {@link CoreOperatorAuthException}, never
+ *       {@link CoreAuthException}, which means the core refused this
+ *       middleware's own service account; an account the operator may not
+ *       read — or that does not exist — throws {@link CoreClientException}.
+ *       Implementations should not distinguish the last two more than their
+ *       core already does.</li>
  *   <li>This is a READ authorisation. Nothing behind this port may ever
  *       mutate core state on an operator's behalf — operator ACTIONS belong
  *       in the core's own console, per the standing back-office rule.</li>

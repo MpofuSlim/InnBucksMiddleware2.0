@@ -219,8 +219,7 @@ class PinControllerTest {
         String lostPhoneRotated = refreshTokenFrom(refresh(lostPhone, "device-lost")
                 .andExpect(status().isOk()));
         String ownPhone = refreshTokenFrom(login("1234", "device-own"));
-        // A session that lapsed on its own: revoked with the rest, but it was
-        // not live, so it is not counted.
+        // A session that lapsed on its own: revoked with the rest.
         Instant now = Instant.now();
         insertRefreshToken(customerId, "e".repeat(64), now.minusSeconds(3600));
         // Another customer's session must come through untouched.
@@ -262,11 +261,13 @@ class PinControllerTest {
                 "SELECT revoked_at, revocation_reason FROM refresh_token WHERE customer_id = ?", otherCustomerId))
                 .containsEntry("revoked_at", null)
                 .containsEntry("revocation_reason", null);
-        // The audit counts SESSIONS (live family heads), not rows: two.
+        // The audit counts the ROWS revoked (RefreshTokenService.revokeAllSessions):
+        // the lost phone's rotated predecessor and its head, the own phone's
+        // head and the lapsed one — four.
         assertThat(jdbcTemplate.queryForObject(
-                "SELECT metadata ->> 'sessionsRevoked' FROM audit_event WHERE action = 'pin_reset'",
+                "SELECT metadata ->> 'refreshTokensRevoked' FROM audit_event WHERE action = 'pin_reset'",
                 String.class))
-                .isEqualTo("2");
+                .isEqualTo("4");
 
         // The new PIN starts sessions as normal — the revocation is not sticky.
         String fresh = refreshTokenFrom(login("9999", "device-own"));
@@ -291,7 +292,7 @@ class PinControllerTest {
                 .containsEntry("revocation_reason", "pin_set")
                 .extractingByKey("revoked_at").isNotNull();
         assertThat(jdbcTemplate.queryForObject(
-                "SELECT metadata ->> 'sessionsRevoked' FROM audit_event WHERE action = 'pin_set'",
+                "SELECT metadata ->> 'refreshTokensRevoked' FROM audit_event WHERE action = 'pin_set'",
                 String.class))
                 .isEqualTo("1");
     }

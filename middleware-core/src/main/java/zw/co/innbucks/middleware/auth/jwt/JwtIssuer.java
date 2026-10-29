@@ -97,9 +97,6 @@ public class JwtIssuer {
             if (request.deviceHash() != null) {
                 builder.claim(InnbucksClaims.DEVICE_ID, request.deviceHash());
             }
-            if (request.nationalIdHash() != null) {
-                builder.claim(InnbucksClaims.NATIONAL_ID_HASH, request.nationalIdHash());
-            }
 
             JWSHeader header = new JWSHeader.Builder(algorithm).keyID(keyId).build();
             SignedJWT signedJwt = new SignedJWT(header, builder.build());
@@ -110,13 +107,19 @@ public class JwtIssuer {
         }
     }
 
+    /**
+     * Everything an access token carries beyond the registered claims. There
+     * is deliberately no national-ID field: the token is readable by anyone
+     * holding it (the app, its logs, a proxy) and lives on the device, and a
+     * national-ID derivative — even the keyed hash — is a stable identifier
+     * of the person that nothing server-side needs per request.
+     */
     public record IssueRequest(
             String subject,
             Country country,
             String kycTier,
             Set<String> scopes,
-            String deviceHash,
-            String nationalIdHash
+            String deviceHash
     ) {
     }
 }

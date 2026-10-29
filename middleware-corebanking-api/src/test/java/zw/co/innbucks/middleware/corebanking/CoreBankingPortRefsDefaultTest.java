@@ -5,6 +5,7 @@ import zw.co.innbucks.middleware.corebanking.command.CreateCustomerCommand;
 import zw.co.innbucks.middleware.corebanking.command.MoneyMovementCommand;
 import zw.co.innbucks.middleware.corebanking.command.TransferCommand;
 import zw.co.innbucks.middleware.corebanking.value.AccountBalance;
+import zw.co.innbucks.middleware.corebanking.value.AccountRestriction;
 import zw.co.innbucks.middleware.corebanking.value.AccountRef;
 import zw.co.innbucks.middleware.corebanking.value.CoreCustomerRef;
 import zw.co.innbucks.middleware.corebanking.value.CustomerProfile;
@@ -41,9 +42,9 @@ class CoreBankingPortRefsDefaultTest {
     void theDefaultDerivesEveryRefFromTheFullListing() {
         CoreBankingPort port = portListing(List.of(
                 new DepositAccountSummary(new AccountRef("acct-1"), "Wallet", "USD",
-                        new MinorUnits(5000, "USD")),
+                        new MinorUnits(5000, "USD"), AccountRestriction.NONE),
                 new DepositAccountSummary(new AccountRef("acct-2"), "Savings", "USD",
-                        new MinorUnits(0, "USD"))));
+                        new MinorUnits(0, "USD"), AccountRestriction.NONE)));
 
         List<DepositAccountRef> refs = port.listDepositAccountRefs(CUSTOMER);
 
@@ -63,9 +64,29 @@ class CoreBankingPortRefsDefaultTest {
     void theDefaultLeavesTheAccountNumberNullRatherThanGuessing() {
         CoreBankingPort port = portListing(List.of(
                 new DepositAccountSummary(new AccountRef("acct-1"), "Wallet", "USD",
-                        new MinorUnits(5000, "USD"))));
+                        new MinorUnits(5000, "USD"), AccountRestriction.NONE)));
 
         assertThat(port.listDepositAccountRefs(CUSTOMER).get(0).accountNumber()).isNull();
+    }
+
+    /**
+     * The restriction is what the payment path refuses a blocked source on, and
+     * what the session-refresh check signs a frozen customer out on. A default
+     * that dropped it to NONE would silently switch both off for every adapter
+     * that inherits it.
+     */
+    @Test
+    void theDefaultCarriesEachAccountsRestrictionAcross() {
+        CoreBankingPort port = portListing(List.of(
+                new DepositAccountSummary(new AccountRef("acct-1"), "Wallet", "USD",
+                        new MinorUnits(5000, "USD"), AccountRestriction.FULLY_BLOCKED),
+                new DepositAccountSummary(new AccountRef("acct-2"), "Savings", "USD",
+                        new MinorUnits(0, "USD"), AccountRestriction.DEBITS_BLOCKED)));
+
+        List<DepositAccountRef> refs = port.listDepositAccountRefs(CUSTOMER);
+
+        assertThat(refs).extracting(DepositAccountRef::restriction)
+                .containsExactly(AccountRestriction.FULLY_BLOCKED, AccountRestriction.DEBITS_BLOCKED);
     }
 
     @Test
@@ -82,6 +103,7 @@ class CoreBankingPortRefsDefaultTest {
 
             @Override public CoreProvider provider() { return CoreProvider.FINERACT; }
             @Override public Set<CoreCapability> capabilities() { return Set.of(); }
+            @Override public String cellCurrency() { return "USD"; }
             @Override public CoreCustomerRef createCustomer(CreateCustomerCommand cmd, IdempotencyKey key) {
                 throw new UnsupportedOperationException();
             }

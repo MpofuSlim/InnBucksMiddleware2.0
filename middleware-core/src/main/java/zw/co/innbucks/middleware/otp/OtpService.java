@@ -98,13 +98,43 @@ public class OtpService {
     private final RateLimiterService rateLimiterService;
     private final AuthAnomalyDetector anomalyDetector;
 
+    /**
+     * A code for the PUBLIC, unauthenticated purposes (PIN setup / reset),
+     * spending the per-NUMBER allowance — the SMS-flood guard for a caller
+     * who is not signed in. STEP_UP is refused here: it has its own
+     * per-customer allowance ({@link #requestStepUp}), and routing it through
+     * this one would let anyone who knows a number spend the owner's
+     * approval budget.
+     */
     @Transactional
     public void request(String rawMsisdn, OtpPurpose purpose) {
+        if (purpose == OtpPurpose.STEP_UP) {
+            throw new IllegalArgumentException("STEP_UP codes are issued by requestStepUp (per-customer allowance)");
+        }
         String msisdn = msisdnRegistry.forDeployment().normalize(rawMsisdn);
         // Per-MSISDN SMS-flood guard. Throws RateLimitExceededException (-> 429)
         // BEFORE any DB write or SMS dispatch, so a flood for one number costs
         // nothing. Keyed on the normalized MSISDN so format variants share a bucket.
         rateLimiterService.enforceMsisdnOtpRequest(msisdn);
+        issue(msisdn, purpose);
+    }
+
+    /**
+     * A STEP_UP approval code for an AUTHENTICATED customer, to their
+     * registered number. Spends the per-CUSTOMER step-up allowance and NOT the
+     * per-number one: that one is shared with the public PIN-reset request, so
+     * a stranger who knew the number could exhaust it and block every payment
+     * at or above the owner's step-up threshold. Still capped (anti-cost: each
+     * code is a billed SMS), and still refused before any write or send.
+     */
+    @Transactional
+    public void requestStepUp(UUID customerId, String registeredMsisdn) {
+        String msisdn = msisdnRegistry.forDeployment().normalize(registeredMsisdn);
+        rateLimiterService.enforceCustomerStepUpRequest(customerId);
+        issue(msisdn, OtpPurpose.STEP_UP);
+    }
+
+    private void issue(String msisdn, OtpPurpose purpose) {
         Instant now = clock.instant();
 
         // Invalidate any prior outstanding challenge for this (msisdn, purpose).

@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.ObjectProvider;
 import zw.co.innbucks.middleware.corebanking.CoreBankingPort;
 import zw.co.innbucks.middleware.corebanking.value.AccountRef;
+import zw.co.innbucks.middleware.corebanking.value.AccountRestriction;
 import zw.co.innbucks.middleware.corebanking.value.CoreCustomerRef;
 import zw.co.innbucks.middleware.corebanking.value.CoreMovementObserved;
 import zw.co.innbucks.middleware.corebanking.value.DepositAccountRef;
@@ -67,7 +68,7 @@ class CoreMovementAlertServiceTest {
         when(ledger.findByExternalRef(anyString())).thenReturn(Optional.empty());
         when(port.listDepositAccountRefs(new CoreCustomerRef(CUSTOMER.toString())))
                 .thenReturn(List.of(new DepositAccountRef(
-                        new AccountRef(ACCT), "Wallet", "USD", "000000010")));
+                        new AccountRef(ACCT), "Wallet", "USD", "000000010", AccountRestriction.NONE)));
         service = new CoreMovementAlertService(
                 new TransactionNotificationProperties(true, false, "Africa/Harare", 160, 24),
                 new TransactionMessageComposer(ZoneId.of("Africa/Harare"), 160, 24),

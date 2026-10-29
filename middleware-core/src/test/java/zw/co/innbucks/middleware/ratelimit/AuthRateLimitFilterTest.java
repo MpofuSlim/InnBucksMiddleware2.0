@@ -29,7 +29,7 @@ class AuthRateLimitFilterTest {
         RateLimitProperties props = new RateLimitProperties(
                 enabled, trustXff, 1,
                 TWO_PER_MIN, TWO_PER_MIN, TWO_PER_MIN, TWO_PER_MIN, TWO_PER_MIN, TWO_PER_MIN, TWO_PER_MIN,
-                TWO_PER_MIN);
+                TWO_PER_MIN, TWO_PER_MIN, TWO_PER_MIN);
         return new AuthRateLimitFilter(props, new RateLimiterService(props),
                 new ClientIpResolver(props), detector, objectMapper());
     }
@@ -188,6 +188,28 @@ class AuthRateLimitFilterTest {
         AuthRateLimitFilter filter = filter(true, false, blocking("203.0.113.7", 900L));
 
         assertThat(post(filter, "/me/profile", "203.0.113.7").getStatus()).isEqualTo(200);
+    }
+
+    /**
+     * On a shared address (carrier CGNAT, an office), strangers hammering the
+     * public OTP endpoints must not drain the per-IP budget a signed-in
+     * customer needs to approve a payment: step-up has buckets of its own.
+     */
+    @Test
+    void publicOtpTrafficCannotDrainTheStepUpBucketsOfASharedAddress() throws Exception {
+        AuthRateLimitFilter filter = filter(true, false);
+
+        assertThat(post(filter, "/auth/otp/request", "41.173.193.211").getStatus()).isEqualTo(200);
+        assertThat(post(filter, "/auth/otp/request", "41.173.193.211").getStatus()).isEqualTo(200);
+        assertThat(post(filter, "/auth/otp/request", "41.173.193.211").getStatus()).isEqualTo(429);
+
+        assertThat(post(filter, "/auth/step-up/request", "41.173.193.211").getStatus()).isEqualTo(200);
+        assertThat(post(filter, "/auth/otp/verify", "41.173.193.211").getStatus()).isEqualTo(200);
+        assertThat(post(filter, "/auth/otp/verify", "41.173.193.211").getStatus()).isEqualTo(200);
+        assertThat(post(filter, "/auth/step-up/verify", "41.173.193.211").getStatus()).isEqualTo(200);
+        // ...and step-up is still throttled per address on its own.
+        assertThat(post(filter, "/auth/step-up/request", "41.173.193.211").getStatus()).isEqualTo(200);
+        assertThat(post(filter, "/auth/step-up/request", "41.173.193.211").getStatus()).isEqualTo(429);
     }
 
     private MockHttpServletResponse postXff(AuthRateLimitFilter filter, String forwardedClient) throws Exception {

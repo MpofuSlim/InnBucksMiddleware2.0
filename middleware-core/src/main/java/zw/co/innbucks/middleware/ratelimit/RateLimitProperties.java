@@ -5,11 +5,15 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import java.time.Duration;
 
 /**
- * Token-bucket limits for the public, unauthenticated auth surface.
+ * Token-bucket limits for the public auth surface and a few per-customer
+ * request budgets.
  *
  * <p>Per-IP limits are enforced at the edge by {@link AuthRateLimitFilter}; the
  * per-MSISDN OTP-request limit is enforced inside {@code OtpService} (SMS-flood
- * control). Buckets live in-memory (Caffeine), so the limits are <b>per
+ * control); the per-CUSTOMER ones (recipient lookup, step-up SMS, payment
+ * requests) in their services. All are REQUEST budgets — never a source for
+ * the per-tier payment limits, which come from the ledger because a bucket
+ * forgets everything on restart. Buckets live in-memory (Caffeine), so the limits are <b>per
  * instance</b> — correct for the single-container-per-country deployment. If
  * this service is ever run with more than one replica, move to a shared store
  * (a Bucket4j Postgres/Redis {@code ProxyManager}) or the effective limit
@@ -57,7 +61,25 @@ public record RateLimitProperties(
          * customer id, not IP: NAT would let one abuser drain an office's
          * shared budget, and a botnet sidesteps per-IP entirely.
          */
-        Limit customerLookup
+        Limit customerLookup,
+
+        /**
+         * Per-CUSTOMER budget on step-up approval SMS (POST /auth/step-up/request).
+         * Deliberately SEPARATE from {@link #msisdnOtpRequest}: that one is
+         * spendable by anyone who knows the number (public PIN_RESET requests),
+         * so sharing it let a stranger exhaust it and block the owner's
+         * high-value payments. This one only the signed-in customer can spend.
+         * Still a cap — every approval is a billed SMS.
+         */
+        Limit customerStepUpRequest,
+
+        /**
+         * Per-CUSTOMER request budget on POST /transactions/* (deposit, withdraw,
+         * transfer). Not a payment limit — a refused or failed attempt costs
+         * nothing against those — but the bound on how fast a token (stolen or
+         * buggy) can hammer the money path and the core behind it.
+         */
+        Limit customerPayment
 ) {
 
     /** A bucket of {@code capacity} tokens, refilled greedily over {@code refillPeriod}. */

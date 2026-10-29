@@ -11,6 +11,7 @@ import zw.co.innbucks.middleware.common.msisdn.MsisdnNormalizerRegistry;
 import zw.co.innbucks.middleware.common.msisdn.ZimbabweMsisdnNormalizer;
 import zw.co.innbucks.middleware.corebanking.CoreBankingPort;
 import zw.co.innbucks.middleware.corebanking.value.AccountRef;
+import zw.co.innbucks.middleware.corebanking.value.AccountRestriction;
 import zw.co.innbucks.middleware.corebanking.value.CoreCustomerRef;
 import zw.co.innbucks.middleware.corebanking.value.CustomerProfile;
 import zw.co.innbucks.middleware.corebanking.value.DepositAccountRef;
@@ -59,7 +60,7 @@ class RecipientLookupServiceTest {
         Limit generous = new Limit(1000, Duration.ofMinutes(1));
         return new RateLimitProperties(true, false, 0,
                 generous, generous, generous, generous, generous, generous, generous,
-                new Limit(lookupCapacity, Duration.ofMinutes(1)));
+                new Limit(lookupCapacity, Duration.ofMinutes(1)), generous, generous);
     }
 
     @SuppressWarnings("unchecked")
@@ -87,7 +88,7 @@ class RecipientLookupServiceTest {
         when(customers.findByCountryAndMsisdn("ZW", MSISDN)).thenReturn(Optional.of(recipient));
         when(port.listDepositAccountRefs(new CoreCustomerRef(RECIPIENT.toString())))
                 .thenReturn(List.of(new DepositAccountRef(
-                        new AccountRef(WALLET), "Wallet", "USD", "000000010")));
+                        new AccountRef(WALLET), "Wallet", "USD", "000000010", AccountRestriction.NONE)));
         when(port.getProfile(new CoreCustomerRef(RECIPIENT.toString())))
                 .thenReturn(new CustomerProfile(new CoreCustomerRef(RECIPIENT.toString()),
                         "Tariro", "Moyo", "ACTIVE"));
@@ -189,9 +190,9 @@ class RecipientLookupServiceTest {
         when(port.listDepositAccountRefs(new CoreCustomerRef(RECIPIENT.toString())))
                 .thenReturn(List.of(
                         new DepositAccountRef(new AccountRef(RECIPIENT + ":savings"),
-                                "Savings", "USD", "000000011"),
+                                "Savings", "USD", "000000011", AccountRestriction.NONE),
                         new DepositAccountRef(new AccountRef(WALLET),
-                                "Wallet", "USD", "000000010")));
+                                "Wallet", "USD", "000000010", AccountRestriction.NONE)));
 
         assertThat(service.lookup(CALLER, MSISDN).accountId()).isEqualTo(WALLET);
     }
