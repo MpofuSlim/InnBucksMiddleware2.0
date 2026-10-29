@@ -352,3 +352,24 @@ json_flag_map() {
   local val="$1"; shift
   printf '%s\n' "$@" | jq -R . | jq -s --argjson v "$val" 'map({(.): $v}) | add | {permissions: .}'
 }
+
+# Fineract's own seed data (tenant/parts/0002_initial_data.xml) creates these
+# accounts on EVERY new tenant. interopUser (id 3) sits in the 'Super user'
+# role, i.e. ALL_FUNCTIONS, under a seeded password nobody here manages.
+# Nothing InnBucks runs uses it: the middleware rides its own two users, and
+# Fineract's interoperation module is not in use. So step 6a removes it on
+# every run. 'system' (id 2) is deliberately NOT listed: it holds no role, and
+# Fineract runs scheduled jobs as it.
+SEEDED_DEMO_USERS=(interopUser)
+
+# seeded_demo_user_ids USERS_JSON — the ids of the seeded demo accounts still in
+# a GET /v1/users listing, one per line, matched by exact username. Prints
+# nothing when none is present, and still succeeds: under the script's set -e a
+# no-match (or an unreadable listing) must never end the run here.
+seeded_demo_user_ids() {
+  local names
+  names=$(printf '%s\n' "${SEEDED_DEMO_USERS[@]}" | jq -R . | jq -s .)
+  jq -r --argjson names "$names" \
+    '.[]? | select((.username? // "") as $u | any($names[]; . == $u)) | .id' \
+    <<<"${1-}" 2>/dev/null || true
+}

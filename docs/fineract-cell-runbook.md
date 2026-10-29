@@ -350,6 +350,35 @@ problem and waiting will not fix it — on a re-run, `ADMIN_PASSWORD` must be
 the value you rotated *to* (or leave `ROTATE_ADMIN_PASSWORD` exported at that
 same value and the script will work it out).
 
+### Fineract's seeded demo super user (step 6a)
+
+Fineract's own seed data creates `interopUser` on every new tenant, in the
+`Super user` role (`ALL_FUNCTIONS`), under a seeded password nobody manages.
+Nothing InnBucks runs uses it: the middleware signs in as `innbucks-mw-read` /
+`innbucks-mw-write`, and Fineract's interoperation module is not in use. So
+step 6a deletes it on every run. That is Fineract's soft delete: the account
+can no longer sign in, and its audit history stays.
+
+- **A cell provisioned before this step** still has it. The next run removes
+  it and logs `removed user id 3.`; after that the step logs `none present.`
+- **A refused delete, or one maker-checker parks,** fails the run at the end
+  ("Fineract's seeded demo super user is still active"), after every other
+  step has run. Fix what it names, or approve the parked delete, and re-run.
+- **`system`** (id 2) is left on purpose. It has the same seeded password but
+  holds no role, so it can sign in and do nothing, and Fineract runs scheduled
+  jobs as it.
+
+To see who still holds the super-user role on a cell (seeded as `Super user`; it may have been renamed) (compliance reviews this list;
+anyone on it can approve their own maker-checker commands):
+
+```sh
+cd deploy/fineract
+docker compose exec -T fineract-db psql -U fineract -d fineract_default -c "
+SELECT u.username, u.firstname, u.lastname FROM m_appuser u
+JOIN m_appuser_role ur ON ur.appuser_id = u.id JOIN m_role r ON r.id = ur.role_id
+WHERE upper(r.name) = 'SUPER USER' AND NOT u.is_deleted ORDER BY 1;"
+```
+
 ### Lost the AppUser passwords (break-glass)
 
 Fineract has no way to read a password back, and `provision-cell.sh`
