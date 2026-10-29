@@ -38,9 +38,14 @@
 # Steps 6b-6e are per-market POLICY and belong in a cell file, not in your
 # shell history:
 #
-#     set -a; source deploy/cells/cell.zw.env; set +a     # policy, committed
-#     set -a; source deploy/fineract/.env;     set +a     # secrets, gitignored
-#     ./deploy/fineract/provision-cell.sh
+#     ( set -a; source deploy/cells/cell.zw.env   # policy, committed
+#       source deploy/fineract/.env; set +a       # secrets, gitignored
+#       ...the three passwords and CURL_OPTS (runbook section 4)...
+#       ./deploy/fineract/provision-cell.sh )
+#
+# The parentheses keep those exports out of your shell: a leftover
+# FINERACT_IMAGE_TAG beats .env in docker compose and pins the old image on the
+# next upgrade (runbook section 4).
 #
 # See deploy/cells/cell.example.env. Everything is additive and idempotent: a
 # re-run re-asserts the file's intent and never revokes a grant it doesn't name.
