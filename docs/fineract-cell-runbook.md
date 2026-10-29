@@ -368,8 +368,10 @@ can no longer sign in, and its audit history stays.
   holds no role, so it can sign in and do nothing, and Fineract runs scheduled
   jobs as it.
 
-To see who still holds the super-user role on a cell (seeded as `Super user`; it may have been renamed) (compliance reviews this list;
-anyone on it can approve their own maker-checker commands):
+This lists who still holds the super-user role on a cell. It is seeded as
+`Super user` and may have been renamed, hence the case-insensitive match.
+Compliance reviews this list: anyone on it can approve their own maker-checker
+commands.
 
 ```sh
 cd deploy/fineract
