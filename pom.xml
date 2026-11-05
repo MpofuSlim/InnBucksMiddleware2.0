@@ -28,7 +28,11 @@
              non-constant-time comparisons. 1.84 is the first version with the fix.
              Needed at runtime by Spring Security's Argon2PasswordEncoder (PinHasher). -->
         <bouncycastle.version>1.86</bouncycastle.version>
-        <testcontainers.version>1.20.4</testcontainers.version>
+        <!-- Testcontainers: 1.21.4 is the first 1.x that negotiates the Docker API
+             version. 1.20.4 asked for API 1.32, which the Docker on GitHub's
+             ubuntu-26.04 runners refuses ("Minimum supported API version is 1.40"),
+             so every integration test failed to start. -->
+        <testcontainers.version>1.21.4</testcontainers.version>
         <!-- Tomcat: Spring Boot 4.1.1's BOM manages 11.0.24, which carries three
              CRITICAL auth/access-control bypasses — CVE-2026-65182 (security
              constraint bypass), CVE-2026-65905 (DIGEST replay) and CVE-2026-68525
