@@ -27,7 +27,7 @@
         <!-- Bouncycastle: 1.78.1 had CVE-2026-5598 (HIGH) — private-key leak via
              non-constant-time comparisons. 1.84 is the first version with the fix.
              Needed at runtime by Spring Security's Argon2PasswordEncoder (PinHasher). -->
-        <bouncycastle.version>1.86</bouncycastle.version>
+        <bouncycastle.version>1.87</bouncycastle.version>
         <!-- Testcontainers: 1.21.4 is the first 1.x that negotiates the Docker API
              version. 1.20.4 asked for API 1.32, which the Docker on GitHub's
              ubuntu-26.04 runners refuses ("Minimum supported API version is 1.40"),
